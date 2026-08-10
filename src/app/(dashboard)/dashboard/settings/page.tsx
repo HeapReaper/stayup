@@ -88,7 +88,15 @@ export default function SettingsPage() {
                 <Label htmlFor="timezone">Timezone</Label>
                 <Select defaultValue="europe-amsterdam">
                   <SelectTrigger id="timezone">
-                    <SelectValue />
+                    <SelectValue>
+                      {(val: string) =>
+                        ({
+                          'europe-amsterdam': 'Europe/Amsterdam (UTC+2)',
+                          utc: 'UTC (Coordinated Universal Time)',
+                          'america-new_york': 'America/New_York (EST)',
+                        })[val] ?? val
+                      }
+                    </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="europe-amsterdam">
@@ -135,7 +143,16 @@ export default function SettingsPage() {
                   <Label htmlFor="defaultCheckInterval">Default Check Interval</Label>
                   <Select defaultValue="60s">
                     <SelectTrigger id="defaultCheckInterval">
-                      <SelectValue />
+                      <SelectValue>
+                        {(val: string) =>
+                          ({
+                            '15s': '15 seconds',
+                            '30s': '30 seconds',
+                            '60s': '60 seconds (1 min)',
+                            '300s': '5 minutes',
+                          })[val] ?? val
+                        }
+                      </SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="15s">15 seconds</SelectItem>

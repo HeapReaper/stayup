@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { redirect } from 'next/navigation';
 
 const stackItems = [
   { name: 'Next.js 16', description: 'App Router, Server Actions & modern React', icon: Zap },

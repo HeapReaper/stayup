@@ -7,15 +7,19 @@ generator client {
 }
 
 model User {
-  id            String    @id
-  name          String
-  email         String
-  emailVerified Boolean   @default(false)
-  image         String?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-  sessions      Session[]
-  accounts      Account[]
+  id              String           @id
+  name            String
+  email           String
+  emailVerified   Boolean          @default(false)
+  image           String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  sessions        Session[]
+  accounts        Account[]
+  monitors        Monitor[]
+  incidents       Incident[]
+  incidentUpdates IncidentUpdate[]
+  statusPages     StatusPage[]
 
   @@unique([email])
   @@map("user")
@@ -65,4 +69,173 @@ model Verification {
 
   @@index([identifier])
   @@map("verification")
+}
+
+model Monitor {
+  id            String              @id @default(cuid())
+  name          String
+  url           String
+  type          String              @default("HTTP") // HTTP | Ping | Port | DNS
+  status        String              @default("Up") // Up | Down | Degraded
+  interval      String              @default("60s") // 15s | 30s | 60s | 5m
+  port          Int?
+  uptime        Float               @default(100)
+  responseTime  Int?
+  lastCheckedAt DateTime?
+  createdById   String?
+  createdBy     User?               @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+  checks        MonitorCheck[]
+  incidents     Incident[]
+  statusPages   StatusPageMonitor[]
+
+  @@index([createdById])
+  @@map("monitor")
+}
+
+// A single check performed by a worker (e.g. src/workers/https.ts) against a
+// monitor. Each row is one "ping" — the aggregate fields on Monitor (status,
+// responseTime, uptime, lastCheckedAt) are derived from these.
+model MonitorCheck {
+  id           String   @id @default(cuid())
+  monitorId    String
+  monitor      Monitor  @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  status       String // Up | Down | Degraded
+  statusCode   Int?
+  responseTime Int? // ms
+  message      String?
+  checkedAt    DateTime @default(now())
+
+  @@index([monitorId, checkedAt])
+  @@map("monitor_check")
+}
+
+model Incident {
+  id          String    @id @default(cuid())
+  title       String
+  impact      String    @default("Major") // Critical | Major | Minor
+  status      String    @default("Investigating") // Investigating | Identified | Monitoring | Resolved
+  monitorId   String?
+  monitor     Monitor?  @relation(fields: [monitorId], references: [id], onDelete: SetNull)
+  createdById String? // null when auto-created by a worker
+  createdBy   User?     @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  resolvedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  updates     IncidentUpdate[]
+  subscribers IncidentSubscriber[]
+
+  @@index([monitorId])
+  @@index([createdById])
+  @@map("incident")
+}
+
+// A timeline entry on an incident (e.g. "We've identified the issue"). Every
+// status change (including the initial report and the final resolution) is
+// recorded as one of these, so the incident's history is just its update list.
+model IncidentUpdate {
+  id         String   @id @default(cuid())
+  incidentId String
+  incident   Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  status     String // Investigating | Identified | Monitoring | Resolved
+  message    String
+  authorId   String? // null when posted automatically by a worker
+  author     User?    @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  createdAt  DateTime @default(now())
+
+  @@index([incidentId, createdAt])
+  @@map("incident_update")
+}
+
+// Email subscribers for incident notifications. Self-serve "Subscribe to
+// updates" is a future feature — rows here can currently only exist if seeded
+// directly — but every incident update already emails whoever is in here.
+model IncidentSubscriber {
+  id         String   @id @default(cuid())
+  incidentId String
+  incident   Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  email      String
+  createdAt  DateTime @default(now())
+
+  @@unique([incidentId, email])
+  @@map("incident_subscriber")
+}
+
+// A public status page: a curated view of some of your monitors, with an
+// uptime history, incident feed, and its own subscribers — served at
+// /status/[slug] (see src/app/(status)).
+model StatusPage {
+  id                String   @id @default(cuid())
+  name              String
+  slug              String   @unique
+  description       String?
+  logoUrl           String?
+  theme             String   @default("system") // light | dark | system
+  primaryColor      String   @default("#7c3aed")
+  historyWindowDays Int      @default(90) // 7 | 30 | 90
+  isPublished       Boolean  @default(true)
+  createdById       String?
+  createdBy         User?    @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  groups      StatusPageGroup[]
+  monitors    StatusPageMonitor[]
+  subscribers StatusPageSubscriber[]
+
+  @@index([createdById])
+  @@map("status_page")
+}
+
+// A user-defined heading monitors can be grouped under on a status page (e.g.
+// "Core services" / "Third-party dependencies"). Purely cosmetic grouping —
+// scoped to one status page.
+model StatusPageGroup {
+  id           String     @id @default(cuid())
+  statusPageId String
+  statusPage   StatusPage @relation(fields: [statusPageId], references: [id], onDelete: Cascade)
+  name         String
+  order        Int        @default(0)
+
+  monitors StatusPageMonitor[]
+
+  @@index([statusPageId])
+  @@map("status_page_group")
+}
+
+// Join row: which monitors appear on a status page, in which group (if any),
+// and in what order.
+model StatusPageMonitor {
+  id           String           @id @default(cuid())
+  statusPageId String
+  statusPage   StatusPage       @relation(fields: [statusPageId], references: [id], onDelete: Cascade)
+  monitorId    String
+  monitor      Monitor          @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  groupId      String?
+  group        StatusPageGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  order        Int              @default(0)
+
+  @@unique([statusPageId, monitorId])
+  @@index([statusPageId])
+  @@index([groupId])
+  @@map("status_page_monitor")
+}
+
+// Someone subscribed to updates for an entire status page (as opposed to
+// IncidentSubscriber, which is scoped to one incident) — notified by email or
+// a Discord webhook whenever an incident affecting one of this page's
+// monitors gets a new update.
+model StatusPageSubscriber {
+  id           String     @id @default(cuid())
+  statusPageId String
+  statusPage   StatusPage @relation(fields: [statusPageId], references: [id], onDelete: Cascade)
+  channel      String // Email | Discord
+  target       String // email address, or a Discord webhook URL
+  createdAt    DateTime   @default(now())
+
+  @@unique([statusPageId, channel, target])
+  @@index([statusPageId])
+  @@map("status_page_subscriber")
 }

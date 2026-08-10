@@ -33,9 +33,6 @@ export default async function DashboardPage() {
     redirect('/login');
   }
 
-  const query = await caller.hello.world({ text: 'Kelvin' });
-  console.log(query.greeting);
-
   const user = session.user;
 
   return (

@@ -164,6 +164,37 @@ async function exampleUsage() {
 ```
 The helper file can be found in `src/lib/redis.ts`.
 
+### Workers
+Long-running checks (e.g. pinging monitors) run as standalone scripts in `src/workers/`, separate from the
+Next.js server. They're run with [`tsx`](https://github.com/privatenumber/tsx), which understands the
+`@/*` path alias from `tsconfig.json`.
+
+Each worker only implements "how do I check one monitor" — the polling loop, writing the `MonitorCheck`
+row (the "pings"), rolling the result up onto the monitor's `status`/`responseTime`/`uptime`/`lastCheckedAt`,
+and opening/updating an incident when a monitor goes Down/Degraded, all live once in
+`src/lib/monitor-worker.ts` and are shared by every worker below.
+
+| Worker | Monitor type | How it checks |
+|---|---|---|
+| `src/workers/https.ts` | `HTTP` | `fetch()`s the URL |
+| `src/workers/port.ts` | `Port` | Raw TCP connect to `host:port` |
+| `src/workers/ping.ts` | `Ping` | Shells out to the OS `ping` binary (Node has no built-in ICMP — see comments in the file) |
+
+Run them with:
+```bash
+npm run worker:https
+npm run worker:port
+npm run worker:ping
+# or, to auto-restart on file changes during development:
+npm run worker:https:watch
+npm run worker:port:watch
+npm run worker:ping:watch
+```
+
+Note: these are plain `tsx` processes, not hot-reloaded by Next.js — if you edit worker code (or
+`src/lib/monitor-worker.ts`/`src/lib/incidents.ts`) while one is already running, restart it (or use
+the `:watch` variant) to pick up the change.
+
 ### Shadcn UI
 You can change the theme by going to [ui.shadcn.com/create](https://ui.shadcn.com/create).  
 After changing the style, go to `get code` and `existing project` and copy the command and execute it.  

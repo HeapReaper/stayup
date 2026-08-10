@@ -207,12 +207,23 @@ export default function IntegrationsPage() {
                   <Label htmlFor="type">Platform / Type</Label>
                   <Select
                     value={newIntegration.type}
-                    onValueChange={(val: Integration['type']) =>
-                      setNewIntegration({ ...newIntegration, type: val })
-                    }
+                    onValueChange={(val) => {
+                      if (val) setNewIntegration({ ...newIntegration, type: val });
+                    }}
                   >
                     <SelectTrigger id="type">
-                      <SelectValue />
+                      <SelectValue>
+                        {(val: Integration['type']) =>
+                          ({
+                            Discord: 'Discord Webhook',
+                            Slack: 'Slack Incoming Webhook',
+                            Webhook: 'Custom HTTP Webhook',
+                            Telegram: 'Telegram Bot',
+                            Email: 'Email Notification',
+                            PagerDuty: 'PagerDuty Integration',
+                          })[val]
+                        }
+                      </SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="Discord">Discord Webhook</SelectItem>
