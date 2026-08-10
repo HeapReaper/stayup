@@ -9,7 +9,7 @@ import {
   Hr,
   Section,
   Tailwind,
-} from "@react-email/components";
+} from '@react-email/components';
 
 interface WelcomeEmailProps {
   name?: string;

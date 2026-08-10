@@ -1,7 +1,7 @@
-import nodemailer from "nodemailer";
-import { render } from "@react-email/components";
-import type { ReactElement } from "react";
-import { logger } from "@/lib/logging";
+import nodemailer from 'nodemailer';
+import { render } from '@react-email/components';
+import type { ReactElement } from 'react';
+import { logger } from '@/lib/logging';
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
@@ -35,7 +35,6 @@ export async function sendEmail({ to, subject, react }: SendEmailOptions) {
       });
 
       logger.info(`[Mail] Welcome email successfully send to ${to}!`);
-
       return { success: true, messageId: info.messageId };
     } catch (error) {
       logger.error(`[Mail] Welcome email failed with error: ${error}`);
@@ -43,7 +42,7 @@ export async function sendEmail({ to, subject, react }: SendEmailOptions) {
       return { success: false };
     }
   } catch (error) {
-    console.error("Failed to send SMTP email:", error);
+    console.error('Failed to send SMTP email:', error);
     return { success: false, error };
   }
 }

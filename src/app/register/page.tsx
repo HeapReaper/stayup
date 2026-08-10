@@ -8,6 +8,19 @@ import { Lock, User, Mail, ArrowRight, Loader2, AlertCircle } from 'lucide-react
 import { authClient } from '@/lib/auth-client';
 import { registerSchema } from '@/validations/auth';
 
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+
 export default function SignUpPage() {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
@@ -52,7 +65,7 @@ export default function SignUpPage() {
       } else {
         router.push('/dashboard');
       }
-    } catch (err) {
+    } catch {
       setError('An unexpected error occurred.');
     } finally {
       setLoading(false);
@@ -60,131 +73,126 @@ export default function SignUpPage() {
   }
 
   return (
-    <div className="min-h-screen bg-purple-50 text-purple-950 selection:bg-purple-200 flex flex-col justify-between">
-      <main className="flex-1 flex items-center justify-center px-6 py-12">
+    <div className="min-h-screen bg-muted/40 text-foreground flex flex-col justify-between">
+      <main className="flex-1 flex items-center justify-center p-6">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4, ease: 'easeOut' }}
           className="w-full max-w-md"
         >
-          <div className="bg-white p-8 rounded-2xl border border-purple-100 shadow-xl shadow-purple-500/5">
-            <div className="text-center mb-8">
-              <div className="w-12 h-12 bg-purple-100 text-purple-600 rounded-xl flex items-center justify-center mx-auto mb-4">
+          <Card className="shadow-lg">
+            <CardHeader className="text-center space-y-2 pb-6">
+              <div className="w-12 h-12 bg-primary/10 text-primary rounded-xl flex items-center justify-center mx-auto mb-2">
                 <Lock className="w-6 h-6" strokeWidth={2} />
               </div>
-              <h1 className="text-3xl font-extrabold tracking-tight text-purple-950 mb-2">
+              <CardTitle className="text-2xl font-bold tracking-tight">
                 Create Account
-              </h1>
-              <p className="text-sm text-purple-800/80 font-medium">
+              </CardTitle>
+              <CardDescription className="text-sm">
                 Get started with your NextTemp application
+              </CardDescription>
+            </CardHeader>
+
+            <CardContent>
+              {error && (
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.95 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  className="mb-6"
+                >
+                  <Alert variant="destructive">
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertDescription>{error}</AlertDescription>
+                  </Alert>
+                </motion.div>
+              )}
+
+              <form onSubmit={handleSubmit} className="space-y-4" noValidate>
+                <div className="space-y-2">
+                  <Label htmlFor="name">Full Name</Label>
+                  <div className="relative">
+                    <User className="w-4 h-4 text-muted-foreground absolute left-3 top-1/2 -translate-y-1/2" />
+                    <Input
+                      id="name"
+                      name="name"
+                      type="text"
+                      placeholder="John Doe"
+                      className="pl-9"
+                      aria-invalid={!!fieldErrors.name}
+                    />
+                  </div>
+                  {fieldErrors.name && (
+                    <p className="text-xs text-destructive font-medium">{fieldErrors.name}</p>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="email">Email Address</Label>
+                  <div className="relative">
+                    <Mail className="w-4 h-4 text-muted-foreground absolute left-3 top-1/2 -translate-y-1/2" />
+                    <Input
+                      id="email"
+                      name="email"
+                      type="email"
+                      placeholder="john@example.com"
+                      className="pl-9"
+                      aria-invalid={!!fieldErrors.email}
+                    />
+                  </div>
+                  {fieldErrors.email && (
+                    <p className="text-xs text-destructive font-medium">{fieldErrors.email}</p>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="password">Password</Label>
+                  <div className="relative">
+                    <Lock className="w-4 h-4 text-muted-foreground absolute left-3 top-1/2 -translate-y-1/2" />
+                    <Input
+                      id="password"
+                      name="password"
+                      type="password"
+                      placeholder="••••••••"
+                      className="pl-9"
+                      aria-invalid={!!fieldErrors.password}
+                    />
+                  </div>
+                  {fieldErrors.password && (
+                    <p className="text-xs text-destructive font-medium">{fieldErrors.password}</p>
+                  )}
+                </div>
+
+                <Button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full mt-2"
+                  size="lg"
+                >
+                  {loading ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <>
+                      <span>Create Account</span>
+                      <ArrowRight className="w-4 h-4 ml-2" />
+                    </>
+                  )}
+                </Button>
+              </form>
+            </CardContent>
+
+            <CardFooter className="justify-center border-t p-6 mt-2">
+              <p className="text-sm text-muted-foreground">
+                Already have an account?{' '}
+                <Link
+                  href="/login"
+                  className="text-primary hover:underline font-semibold transition-colors"
+                >
+                  Sign in
+                </Link>
               </p>
-            </div>
-
-            {error && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.95 }}
-                animate={{ opacity: 1, scale: 1 }}
-                className="mb-6 p-4 rounded-xl bg-red-50 border border-red-100 text-red-700 text-sm font-medium flex items-center gap-3"
-              >
-                <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
-                <span>{error}</span>
-              </motion.div>
-            )}
-
-            <form onSubmit={handleSubmit} className="space-y-5" noValidate>
-              <div>
-                <label className="block text-sm font-semibold text-purple-900 mb-1.5">
-                  Full Name
-                </label>
-                <div className="relative">
-                  <User className="w-5 h-5 text-purple-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                  <input
-                    name="name"
-                    type="text"
-                    placeholder="John Doe"
-                    className={`w-full pl-11 pr-4 py-2.5 rounded-xl bg-purple-50/50 border text-purple-950 placeholder:text-purple-300 focus:outline-none focus:ring-2 font-medium transition-all ${
-                      fieldErrors.name
-                        ? 'border-red-300 focus:ring-red-500/20 focus:border-red-500'
-                        : 'border-purple-100 focus:ring-purple-600/20 focus:border-purple-600'
-                    }`}
-                  />
-                </div>
-                {fieldErrors.name && (
-                  <p className="text-xs text-red-600 font-medium mt-1.5">{fieldErrors.name}</p>
-                )}
-              </div>
-
-              <div>
-                <label className="block text-sm font-semibold text-purple-900 mb-1.5">
-                  Email Address
-                </label>
-                <div className="relative">
-                  <Mail className="w-5 h-5 text-purple-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                  <input
-                    name="email"
-                    type="email"
-                    placeholder="john@example.com"
-                    className={`w-full pl-11 pr-4 py-2.5 rounded-xl bg-purple-50/50 border text-purple-950 placeholder:text-purple-300 focus:outline-none focus:ring-2 font-medium transition-all ${
-                      fieldErrors.email
-                        ? 'border-red-300 focus:ring-red-500/20 focus:border-red-500'
-                        : 'border-purple-100 focus:ring-purple-600/20 focus:border-purple-600'
-                    }`}
-                  />
-                </div>
-                {fieldErrors.email && (
-                  <p className="text-xs text-red-600 font-medium mt-1.5">{fieldErrors.email}</p>
-                )}
-              </div>
-
-              <div>
-                <label className="block text-sm font-semibold text-purple-900 mb-1.5">
-                  Password
-                </label>
-                <div className="relative">
-                  <Lock className="w-5 h-5 text-purple-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                  <input
-                    name="password"
-                    type="password"
-                    placeholder="••••••••"
-                    className={`w-full pl-11 pr-4 py-2.5 rounded-xl bg-purple-50/50 border text-purple-950 placeholder:text-purple-300 focus:outline-none focus:ring-2 font-medium transition-all ${
-                      fieldErrors.password
-                        ? 'border-red-300 focus:ring-red-500/20 focus:border-red-500'
-                        : 'border-purple-100 focus:ring-purple-600/20 focus:border-purple-600'
-                    }`}
-                  />
-                </div>
-                {fieldErrors.password && (
-                  <p className="text-xs text-red-600 font-medium mt-1.5">{fieldErrors.password}</p>
-                )}
-              </div>
-
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold rounded-xl px-4 py-3 flex items-center justify-center gap-2 shadow-lg shadow-purple-600/20 transition-all hover:shadow-purple-600/30 active:scale-[0.99] disabled:opacity-70 disabled:cursor-not-allowed mt-2"
-              >
-                {loading ? (
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                ) : (
-                  <>
-                    <span>Create Account</span>
-                    <ArrowRight className="w-4 h-4" />
-                  </>
-                )}
-              </button>
-            </form>
-
-            <div className="mt-8 text-center text-sm font-medium text-purple-800/80">
-              Already have an account?{' '}
-              <Link
-                href="/login"
-                className="text-purple-600 hover:text-purple-800 font-semibold transition-colors"
-              >
-                Sign in
-              </Link>
-            </div>
-          </div>
+            </CardFooter>
+          </Card>
         </motion.div>
       </main>
     </div>

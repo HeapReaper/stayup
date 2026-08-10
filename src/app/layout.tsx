@@ -1,39 +1,58 @@
-import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
-import "./globals.css";
-import Navbar from "@/components/core/navbar";
-import Footer from "@/components/core/footer";
+import type { Metadata } from 'next';
+import { Geist, Geist_Mono, Inter } from 'next/font/google';
+import './globals.css';
+import Navbar from '@/components/core/navbar';
+import Footer from '@/components/core/footer';
+import { cn } from "@/lib/utils";
+import { ThemeProvider as NextThemesProvider } from 'next-themes';
+import { TooltipProvider } from '@/components/ui/tooltip';
+import { TRPCReactProvider } from '@/trpc/client';
+
+const inter = Inter({ subsets: ['latin'], variable: '--font-sans' });
 
 const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
+  variable: '--font-geist-sans',
+  subsets: ['latin'],
 });
 
 const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
+  variable: '--font-geist-mono',
+  subsets: ['latin'],
 });
 
 export const metadata: Metadata = {
-  title: "NextTemp",
-  description: "The NextJS template i like",
+  title: 'NextTemp',
+  description: 'The NextJS template i like',
 };
 
 export default function RootLayout({
-                                     children,
-                                   }: {
+  children,
+}: {
   children: React.ReactNode;
 }) {
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      suppressHydrationWarning
+      className={cn("h-full", "antialiased", geistSans.variable, geistMono.variable, "font-sans", inter.variable)}
     >
-    <body className="min-h-screen flex flex-col bg-purple-50 text-purple-950 selection:bg-purple-200">
-    <Navbar />
-    <div className="flex-1 flex flex-col">{children}</div>
-    <Footer />
-    </body>
+      <body className="min-h-screen flex flex-col bg-background text-foreground">
+        <NextThemesProvider
+          attribute="class"
+          defaultTheme="system"
+          enableSystem
+          disableTransitionOnChange
+        >
+          <TRPCReactProvider>
+            <TooltipProvider>
+              <div className="flex-1 flex flex-col">
+                {children}
+              </div>
+            </TooltipProvider>
+          </TRPCReactProvider>
+
+        </NextThemesProvider>
+      </body>
     </html>
   );
 }
