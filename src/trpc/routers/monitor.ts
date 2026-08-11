@@ -3,6 +3,7 @@ import { TRPCError } from '@trpc/server';
 import type { Monitor as PrismaMonitor } from '@prisma/client';
 import { createTRPCRouter, protectedProcedure } from '../init';
 import { prisma } from '@/lib/prisma';
+import { logAudit } from '@/lib/audit';
 
 export const monitorTypeEnum = z.enum(['HTTP', 'Ping', 'Port', 'DNS']);
 export const monitorStatusEnum = z.enum(['Up', 'Down', 'Degraded']);
@@ -109,12 +110,20 @@ export const monitorRouter = createTRPCRouter({
         },
       });
 
+      await logAudit({
+        actorId: ctx.session.user.id,
+        actorName: ctx.session.user.name,
+        action: 'CREATED_MONITOR',
+        target: monitor.name,
+        ipAddress: ctx.ipAddress,
+      });
+
       return serializeMonitor(monitor);
     }),
 
   update: protectedProcedure
     .input(monitorUpdateInput)
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
       const existing = await prisma.monitor.findUnique({ where: { id: input.id } });
 
       if (!existing) {
@@ -132,12 +141,20 @@ export const monitorRouter = createTRPCRouter({
         },
       });
 
+      await logAudit({
+        actorId: ctx.session.user.id,
+        actorName: ctx.session.user.name,
+        action: 'UPDATED_MONITOR',
+        target: monitor.name,
+        ipAddress: ctx.ipAddress,
+      });
+
       return serializeMonitor(monitor);
     }),
 
   delete: protectedProcedure
     .input(z.object({ id: z.string() }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
       const existing = await prisma.monitor.findUnique({ where: { id: input.id } });
 
       if (!existing) {
@@ -145,6 +162,14 @@ export const monitorRouter = createTRPCRouter({
       }
 
       await prisma.monitor.delete({ where: { id: input.id } });
+
+      await logAudit({
+        actorId: ctx.session.user.id,
+        actorName: ctx.session.user.name,
+        action: 'DELETED_MONITOR',
+        target: existing.name,
+        ipAddress: ctx.ipAddress,
+      });
 
       return { id: input.id };
     }),

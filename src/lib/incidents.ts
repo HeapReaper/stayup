@@ -62,6 +62,11 @@ export async function createIncident(input: CreateIncidentInput) {
 
   logger.info(`[Incidents] Created "${incident.title}" (${incident.impact}) ${incident.id}`);
 
+  await Promise.all([
+    notifyStatusPageSubscribers(incident.monitorId, incident.title, incident.status, input.message),
+    queueIntegrationDeliveries(incident.id, incident.title, incident.status, input.message),
+  ]);
+
   return incident;
 }
 
@@ -95,6 +100,7 @@ export async function postIncidentUpdate(input: PostUpdateInput) {
   await Promise.all([
     notifySubscribers(incident, input.status, input.message),
     notifyStatusPageSubscribers(incident.monitorId, incident.title, input.status, input.message),
+    queueIntegrationDeliveries(incident.id, incident.title, input.status, input.message),
   ]);
 
   return incident;
@@ -187,6 +193,33 @@ async function notifyStatusPageSubscribers(
   logger.info(
     `[Incidents] Notified ${jobs.length - failed}/${jobs.length} status page subscriber(s) for monitor ${monitorId}`,
   );
+}
+
+/**
+ * Queues one IntegrationDelivery row per enabled Integration (Discord, Slack,
+ * Webhook, Telegram, Email, PagerDuty). Actual delivery happens asynchronously
+ * in src/workers/integrations.ts, so a slow/unreachable webhook never blocks
+ * this call — that's also what gives deliveries retries on failure.
+ */
+async function queueIntegrationDeliveries(
+  incidentId: string,
+  incidentTitle: string,
+  status: string,
+  message: string,
+) {
+  const integrations = await prisma.integration.findMany({ where: { enabled: true } });
+  if (integrations.length === 0) return;
+
+  await prisma.integrationDelivery.createMany({
+    data: integrations.map((integration) => ({
+      integrationId: integration.id,
+      incidentId,
+      event: 'Incident Alert',
+      message: `[${status}] ${incidentTitle}: ${message}`,
+    })),
+  });
+
+  logger.info(`[Incidents] Queued ${integrations.length} integration deliver${integrations.length === 1 ? 'y' : 'ies'} for ${incidentId}`);
 }
 
 /**

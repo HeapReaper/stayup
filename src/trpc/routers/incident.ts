@@ -3,6 +3,7 @@ import { TRPCError } from '@trpc/server';
 import type { Prisma } from '@prisma/client';
 import { createTRPCRouter, protectedProcedure } from '../init';
 import { prisma } from '@/lib/prisma';
+import { logAudit } from '@/lib/audit';
 import {
   incidentImpactEnum,
   incidentStatusEnum,
@@ -143,6 +144,14 @@ export const incidentRouter = createTRPCRouter({
         createdById: ctx.session.user.id,
       });
 
+      await logAudit({
+        actorId: ctx.session.user.id,
+        actorName: ctx.session.user.name,
+        action: 'CREATED_INCIDENT',
+        target: incident.title,
+        ipAddress: ctx.ipAddress,
+      });
+
       return { id: incident.id };
     }),
 
@@ -191,12 +200,20 @@ export const incidentRouter = createTRPCRouter({
         ctx.session.user.id,
       );
 
+      await logAudit({
+        actorId: ctx.session.user.id,
+        actorName: ctx.session.user.name,
+        action: 'RESOLVED_INCIDENT',
+        target: incident.title,
+        ipAddress: ctx.ipAddress,
+      });
+
       return { id: incident.id };
     }),
 
   delete: protectedProcedure
     .input(z.object({ id: z.string() }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
       const existing = await prisma.incident.findUnique({ where: { id: input.id } });
 
       if (!existing) {
@@ -204,6 +221,14 @@ export const incidentRouter = createTRPCRouter({
       }
 
       await prisma.incident.delete({ where: { id: input.id } });
+
+      await logAudit({
+        actorId: ctx.session.user.id,
+        actorName: ctx.session.user.name,
+        action: 'DELETED_INCIDENT',
+        target: existing.title,
+        ipAddress: ctx.ipAddress,
+      });
 
       return { id: input.id };
     }),

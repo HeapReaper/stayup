@@ -20,6 +20,8 @@ model User {
   incidents       Incident[]
   incidentUpdates IncidentUpdate[]
   statusPages     StatusPage[]
+  integrations    Integration[]
+  auditLogs       AuditLog[]
 
   @@unique([email])
   @@map("user")
@@ -124,8 +126,9 @@ model Incident {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
-  updates     IncidentUpdate[]
-  subscribers IncidentSubscriber[]
+  updates               IncidentUpdate[]
+  subscribers           IncidentSubscriber[]
+  integrationDeliveries IntegrationDelivery[]
 
   @@index([monitorId])
   @@index([createdById])
@@ -238,4 +241,94 @@ model StatusPageSubscriber {
   @@unique([statusPageId, channel, target])
   @@index([statusPageId])
   @@map("status_page_subscriber")
+}
+
+// A record of a significant dashboard action, shown on the Logs page's Audit
+// Logs tab. actorName is a denormalized snapshot so the log stays readable
+// even after the acting user is deleted (actorId goes null via SetNull).
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String?
+  actor     User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  actorName String
+  action    String // e.g. CREATED_MONITOR, RESOLVED_INCIDENT, DELETED_STATUS_PAGE
+  target    String // human-readable label of what was acted on
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@map("audit_log")
+}
+
+// An outgoing notification channel (Discord/Slack/Webhook/Telegram/Email/
+// PagerDuty). `target` holds the primary destination (webhook URL, email
+// address, chat ID, or PagerDuty routing key); `secret` only applies to
+// Telegram (bot token).
+model Integration {
+  id          String   @id @default(cuid())
+  name        String
+  type        String // Discord | Slack | Webhook | Telegram | Email | PagerDuty
+  target      String
+  secret      String?
+  enabled     Boolean  @default(true)
+  createdById String?
+  createdBy   User?    @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  deliveries IntegrationDelivery[]
+
+  @@index([createdById])
+  @@map("integration")
+}
+
+// A queued/attempted notification through one Integration. Written by
+// src/lib/incidents.ts whenever an incident update happens (or by a manual
+// "Send test" action) and delivered by src/workers/integrations.ts.
+model IntegrationDelivery {
+  id            String      @id @default(cuid())
+  integrationId String
+  integration   Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  incidentId    String?
+  incident      Incident?   @relation(fields: [incidentId], references: [id], onDelete: SetNull)
+  event         String // e.g. "Incident Alert", "Test Notification"
+  message       String
+  status        String      @default("Pending") // Pending | Sent | Failed
+  attempts      Int         @default(0)
+  error         String?
+  createdAt     DateTime    @default(now())
+  sentAt        DateTime?
+
+  @@index([integrationId, createdAt])
+  @@index([status])
+  @@map("integration_delivery")
+}
+
+// Single-row table (id is always "singleton") holding instance-wide config
+// shown on the Settings page. Use src/lib/settings.ts's getSettings() rather
+// than querying this directly — it creates the row (with generated API/
+// webhook secrets) on first use.
+model AppSettings {
+  id                       String   @id @default("singleton")
+  organizationName         String   @default("My Organization")
+  timezone                 String   @default("utc")
+  supportEmail             String?
+  defaultCheckInterval     String   @default("60s") // 15s | 30s | 60s | 5m
+  httpTimeoutSeconds       Int      @default(30)
+  failedAttemptsThreshold  Int      @default(1)
+  latencyThresholdMs       Int      @default(800)
+  sslCheckEnabled          Boolean  @default(true)
+  certExpiryWarningEnabled Boolean  @default(true)
+  smtpHost                 String?
+  smtpPort                 Int?
+  smtpUser                 String?
+  smtpPass                 String?
+  smtpFromEmail            String?
+  smtpFromName             String?
+  smtpUseTls               Boolean  @default(true)
+  apiKey                   String   @unique
+  webhookSigningSecret     String
+  updatedAt                DateTime @updatedAt
+
+  @@map("app_settings")
 }

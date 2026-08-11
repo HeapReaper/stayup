@@ -180,20 +180,32 @@ and opening/updating an incident when a monitor goes Down/Degraded, all live onc
 | `src/workers/port.ts` | `Port` | Raw TCP connect to `host:port` |
 | `src/workers/ping.ts` | `Ping` | Shells out to the OS `ping` binary (Node has no built-in ICMP — see comments in the file) |
 
-Run them with:
+The Settings page's Monitoring Defaults tab (request timeout, latency threshold) is read live by each of
+these on every check via `src/lib/settings.ts`'s `getSettings()` — save a new value there and it applies on
+the very next check, no restart needed.
+
+A different kind of worker delivers outgoing notifications instead of checking monitors:
+
+| Worker | Polls | Delivers via |
+|---|---|---|
+| `src/workers/integrations.ts` | `IntegrationDelivery` rows (status `Pending`) queued by `src/lib/incidents.ts` whenever an incident is created or updated | `src/lib/integration-delivery.ts` — Discord/Slack webhook, generic Webhook POST, Telegram Bot API, Email, or PagerDuty Events API v2, depending on the Integration's `type`. Retries up to 5 times before marking a delivery `Failed`. |
+
+Run them all with:
 ```bash
 npm run worker:https
 npm run worker:port
 npm run worker:ping
+npm run worker:integrations
 # or, to auto-restart on file changes during development:
 npm run worker:https:watch
 npm run worker:port:watch
 npm run worker:ping:watch
+npm run worker:integrations:watch
 ```
 
 Note: these are plain `tsx` processes, not hot-reloaded by Next.js — if you edit worker code (or
-`src/lib/monitor-worker.ts`/`src/lib/incidents.ts`) while one is already running, restart it (or use
-the `:watch` variant) to pick up the change.
+`src/lib/monitor-worker.ts`/`src/lib/incidents.ts`/`src/lib/integration-delivery.ts`) while one is already
+running, restart it (or use the `:watch` variant) to pick up the change.
 
 ### Shadcn UI
 You can change the theme by going to [ui.shadcn.com/create](https://ui.shadcn.com/create).  

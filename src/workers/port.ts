@@ -9,13 +9,7 @@
 import 'dotenv/config';
 import net from 'node:net';
 import { runMonitorWorker, type MonitorCheckResult } from '@/lib/monitor-worker';
-
-// Abort a connection attempt if it hasn't succeeded within this long.
-const CONNECT_TIMEOUT_MS = 10_000;
-
-// A connection that succeeds but takes longer than this is marked "Degraded"
-// instead of "Up".
-const DEGRADED_THRESHOLD_MS = 1_000;
+import { getSettings } from '@/lib/settings';
 
 // Deliberately not importing the `Monitor` model type from `@prisma/client`
 // here — this check only ever touches `url`/`port`, so a minimal local shape
@@ -60,11 +54,18 @@ async function performCheck(monitor: MonitorRef): Promise<MonitorCheckResult> {
     };
   }
 
+  // Read from the Settings page's Monitoring Defaults tab on every check —
+  // cheap enough at this poll rate — so saving new values there takes effect
+  // on the very next tick, no restart.
+  const settings = await getSettings();
+  const connectTimeoutMs = settings.httpTimeoutSeconds * 1000;
+  const degradedThresholdMs = settings.latencyThresholdMs;
+
   try {
-    const responseTime = await tcpConnect(monitor.url, monitor.port, CONNECT_TIMEOUT_MS);
+    const responseTime = await tcpConnect(monitor.url, monitor.port, connectTimeoutMs);
 
     return {
-      status: responseTime > DEGRADED_THRESHOLD_MS ? 'Degraded' : 'Up',
+      status: responseTime > degradedThresholdMs ? 'Degraded' : 'Up',
       statusCode: null,
       responseTime,
       message: null,
@@ -73,7 +74,7 @@ async function performCheck(monitor: MonitorRef): Promise<MonitorCheckResult> {
     return {
       status: 'Down',
       statusCode: null,
-      responseTime: CONNECT_TIMEOUT_MS,
+      responseTime: connectTimeoutMs,
       message: error instanceof Error ? error.message : 'Unknown error',
     };
   }

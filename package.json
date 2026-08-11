@@ -13,7 +13,9 @@
     "worker:port": "tsx src/workers/port.ts",
     "worker:port:watch": "tsx watch src/workers/port.ts",
     "worker:ping": "tsx src/workers/ping.ts",
-    "worker:ping:watch": "tsx watch src/workers/ping.ts"
+    "worker:ping:watch": "tsx watch src/workers/ping.ts",
+    "worker:integrations": "tsx src/workers/integrations.ts",
+    "worker:integrations:watch": "tsx watch src/workers/integrations.ts"
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.11.3",

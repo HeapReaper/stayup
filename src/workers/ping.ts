@@ -17,14 +17,7 @@
 import 'dotenv/config';
 import { execFile } from 'node:child_process';
 import { runMonitorWorker, type MonitorCheckResult } from '@/lib/monitor-worker';
-
-// Abort a ping attempt if it hasn't completed within this long.
-const PING_TIMEOUT_MS = 10_000;
-
-// ICMP echo replies are normally fast; a reply slower than this is marked
-// "Degraded" instead of "Up" (lower than the HTTP/TCP workers' threshold —
-// a slow ping is a stronger signal than a slow HTTP response).
-const DEGRADED_THRESHOLD_MS = 500;
+import { getSettings } from '@/lib/settings';
 
 // Deliberately not importing the `Monitor` model type from `@prisma/client`
 // here — this check only ever touches `url`, so a minimal local shape is
@@ -71,11 +64,18 @@ async function performCheck(monitor: MonitorRef): Promise<MonitorCheckResult> {
     };
   }
 
+  // Read from the Settings page's Monitoring Defaults tab on every check —
+  // cheap enough at this poll rate — so saving new values there takes effect
+  // on the very next tick, no restart.
+  const settings = await getSettings();
+  const pingTimeoutMs = settings.httpTimeoutSeconds * 1000;
+  const degradedThresholdMs = settings.latencyThresholdMs;
+
   try {
-    const responseTime = await ping(host, PING_TIMEOUT_MS);
+    const responseTime = await ping(host, pingTimeoutMs);
 
     return {
-      status: responseTime > DEGRADED_THRESHOLD_MS ? 'Degraded' : 'Up',
+      status: responseTime > degradedThresholdMs ? 'Degraded' : 'Up',
       statusCode: null,
       responseTime,
       message: null,
@@ -84,7 +84,7 @@ async function performCheck(monitor: MonitorRef): Promise<MonitorCheckResult> {
     return {
       status: 'Down',
       statusCode: null,
-      responseTime: PING_TIMEOUT_MS,
+      responseTime: pingTimeoutMs,
       message: error instanceof Error ? error.message : 'Unknown error',
     };
   }

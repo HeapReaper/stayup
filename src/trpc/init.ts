@@ -9,8 +9,18 @@ export const createTRPCContext = async (opts: { headers: Headers }) => {
     headers: opts.headers,
   });
 
+  // Behind a proxy/load balancer, the real client IP shows up in
+  // x-forwarded-for (first entry) or x-real-ip. Neither is set for direct
+  // local requests, hence the fallback — used for audit log entries only,
+  // not for anything security-sensitive.
+  const ipAddress =
+    opts.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+    opts.headers.get('x-real-ip') ||
+    'unknown';
+
   return {
     session,
+    ipAddress,
   };
 };
 

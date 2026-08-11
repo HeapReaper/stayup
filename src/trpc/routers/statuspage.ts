@@ -3,6 +3,7 @@ import { TRPCError } from '@trpc/server';
 import { Prisma } from '@prisma/client';
 import { createTRPCRouter, protectedProcedure, baseProcedure } from '../init';
 import { prisma } from '@/lib/prisma';
+import { logAudit } from '@/lib/audit';
 import type { IncidentImpact, IncidentStatus } from '@/lib/incidents';
 
 export const statusPageThemeEnum = z.enum(['light', 'dark', 'system']);
@@ -320,6 +321,14 @@ export const statusPageRouter = createTRPCRouter({
         return created;
       });
 
+      await logAudit({
+        actorId: ctx.session.user.id,
+        actorName: ctx.session.user.name,
+        action: 'CREATED_STATUS_PAGE',
+        target: page.name,
+        ipAddress: ctx.ipAddress,
+      });
+
       return { id: page.id, slug: page.slug };
     } catch (error) {
       if (isUniqueConstraintError(error)) {
@@ -329,7 +338,7 @@ export const statusPageRouter = createTRPCRouter({
     }
   }),
 
-  update: protectedProcedure.input(statusPageInput.extend({ id: z.string() })).mutation(async ({ input }) => {
+  update: protectedProcedure.input(statusPageInput.extend({ id: z.string() })).mutation(async ({ input, ctx }) => {
     const existing = await prisma.statusPage.findUnique({ where: { id: input.id } });
 
     if (!existing) {
@@ -361,6 +370,14 @@ export const statusPageRouter = createTRPCRouter({
         return updated;
       });
 
+      await logAudit({
+        actorId: ctx.session.user.id,
+        actorName: ctx.session.user.name,
+        action: 'UPDATED_STATUS_PAGE',
+        target: page.name,
+        ipAddress: ctx.ipAddress,
+      });
+
       return { id: page.id, slug: page.slug };
     } catch (error) {
       if (isUniqueConstraintError(error)) {
@@ -370,7 +387,7 @@ export const statusPageRouter = createTRPCRouter({
     }
   }),
 
-  delete: protectedProcedure.input(z.object({ id: z.string() })).mutation(async ({ input }) => {
+  delete: protectedProcedure.input(z.object({ id: z.string() })).mutation(async ({ input, ctx }) => {
     const existing = await prisma.statusPage.findUnique({ where: { id: input.id } });
 
     if (!existing) {
@@ -378,6 +395,14 @@ export const statusPageRouter = createTRPCRouter({
     }
 
     await prisma.statusPage.delete({ where: { id: input.id } });
+
+    await logAudit({
+      actorId: ctx.session.user.id,
+      actorName: ctx.session.user.name,
+      action: 'DELETED_STATUS_PAGE',
+      target: existing.name,
+      ipAddress: ctx.ipAddress,
+    });
 
     return { id: input.id };
   }),

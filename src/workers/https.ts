@@ -8,20 +8,21 @@
 // the Next.js server.
 import 'dotenv/config';
 import { runMonitorWorker, type MonitorCheckResult } from '@/lib/monitor-worker';
+import { getSettings } from '@/lib/settings';
 import type { MonitorStatus } from '@/trpc/routers/monitor';
 import type { Monitor } from '@prisma/client';
 
-// Abort a check if the target hasn't responded within this long.
-const REQUEST_TIMEOUT_MS = 10_000;
-
-// A response that succeeds but is slower than this is marked "Degraded"
-// instead of "Up".
-const DEGRADED_THRESHOLD_MS = 1_000;
-
 async function performCheck(monitor: Monitor): Promise<MonitorCheckResult> {
+  // Read from the Settings page's Monitoring Defaults tab on every check —
+  // a get-or-create by primary key, cheap enough at this poll rate — so
+  // saving new values there takes effect on the very next tick, no restart.
+  const settings = await getSettings();
+  const requestTimeoutMs = settings.httpTimeoutSeconds * 1000;
+  const degradedThresholdMs = settings.latencyThresholdMs;
+
   const startedAt = performance.now();
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
 
   let status: MonitorStatus = 'Down';
   let statusCode: number | null = null;
@@ -40,7 +41,7 @@ async function performCheck(monitor: Monitor): Promise<MonitorCheckResult> {
     statusCode = response.status;
 
     if (response.ok) {
-      status = responseTime > DEGRADED_THRESHOLD_MS ? 'Degraded' : 'Up';
+      status = responseTime > degradedThresholdMs ? 'Degraded' : 'Up';
     } else {
       status = 'Down';
       message = `Unexpected status code ${response.status}`;
