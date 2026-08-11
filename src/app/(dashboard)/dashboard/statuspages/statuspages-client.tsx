@@ -104,7 +104,7 @@ function emptyForm(): FormState {
   };
 }
 
-function slugify(value: string) {
+function Th(value: string) {
   return value
     .toLowerCase()
     .trim()
