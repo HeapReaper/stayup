@@ -1,0 +1,91 @@
+# Runs the whole stack: Postgres, Redis, the Next.js app, the migration
+# step, and all four monitor-check/notification workers.
+#
+# Quick start:
+#   cp .env.example .env   # fill in BETTER_AUTH_SECRET, POSTGRES_PASSWORD, etc.
+#   docker compose up --build
+#
+# `web` and every `worker-*` service run from the SAME image (see Dockerfile)
+# — only the `command:` differs. DB_PROVIDER/DB_URL/REDIS_URL are forced to
+# the in-network Postgres/Redis hostnames below regardless of what a local
+# `.env` (meant for `npm run dev`) might otherwise say.
+
+x-app: &app
+  build: .
+  env_file: .env
+  environment: &app-env
+    DB_PROVIDER: postgresql
+    DB_URL: postgresql://stayup:${POSTGRES_PASSWORD:-stayup}@postgres:5432/stayup
+    REDIS_URL: redis://redis:6379
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
+  volumes:
+    - logs:/app/logs
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: stayup
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stayup}
+      POSTGRES_DB: stayup
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stayup"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+
+  # One-shot: applies pending migrations, then exits. Everything else waits
+  # on it via `condition: service_completed_successfully`.
+  migrate:
+    build: .
+    env_file: .env
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["npx", "prisma", "migrate", "deploy"]
+
+  web:
+    <<: *app
+    ports:
+      - "3000:3000"
+
+  worker-https:
+    <<: *app
+    command: ["npx", "tsx", "src/workers/https.ts"]
+
+  worker-port:
+    <<: *app
+    command: ["npx", "tsx", "src/workers/port.ts"]
+
+  worker-ping:
+    <<: *app
+    # Belt-and-suspenders for the OS `ping` binary the worker shells out to —
+    # Docker's default capability set already includes NET_RAW, but some
+    # hardened hosts/runtimes drop it.
+    cap_add:
+      - NET_RAW
+    command: ["npx", "tsx", "src/workers/ping.ts"]
+
+  worker-integrations:
+    <<: *app
+    command: ["npx", "tsx", "src/workers/integrations.ts"]
+
+volumes:
+  postgres-data:
+  redis-data:
+  logs:

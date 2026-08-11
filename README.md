@@ -207,6 +207,29 @@ Note: these are plain `tsx` processes, not hot-reloaded by Next.js — if you ed
 `src/lib/monitor-worker.ts`/`src/lib/incidents.ts`/`src/lib/integration-delivery.ts`) while one is already
 running, restart it (or use the `:watch` variant) to pick up the change.
 
+### Docker
+`docker-compose.yml` runs the whole stack: Postgres, Redis, the Next.js app, a one-shot migration step, and
+all four workers above — `web` and every `worker-*` service build from the same image (see `Dockerfile`)
+and only differ in their `command:`.
+
+```bash
+cp .env.example .env   # fill in BETTER_AUTH_SECRET, POSTGRES_PASSWORD, SMTP_*, etc.
+docker compose up --build
+```
+
+A few things worth knowing:
+- **Postgres only.** The compose file forces `DB_PROVIDER=postgresql` and points `DB_URL`/`REDIS_URL` at
+  the in-network `postgres`/`redis` hostnames, regardless of what your `.env` has for local `npm run dev`
+  (which defaults to SQLite). Running multiple worker containers against a shared SQLite file is exactly
+  the kind of concurrent-writer situation SQLite isn't built for.
+- **Two migration histories.** Because the SQL is provider-specific, SQLite and Postgres each have their
+  own migration folder — `src/prisma/schemas/migrations/sqlite/` and `.../migrations/postgresql/` — selected
+  automatically via `prisma.config.ts`'s `migrations.path`, based on `DB_PROVIDER`. The `migrate` service
+  runs `prisma migrate deploy` against Postgres before `web`/the workers start.
+- The Postgres migration history was generated and schema-validated, but not applied against a live
+  Postgres instance in the environment this was built in (no Docker available there) — worth a close look
+  the first time you run `docker compose up`.
+
 ### Shadcn UI
 You can change the theme by going to [ui.shadcn.com/create](https://ui.shadcn.com/create).  
 After changing the style, go to `get code` and `existing project` and copy the command and execute it.  
