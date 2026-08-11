@@ -1,5 +1,5 @@
-# Runs the whole stack: Postgres, Redis, the Next.js app, the migration
-# step, and all four monitor-check/notification workers.
+# Runs the whole stack: Postgres, Redis, the Next.js app, and all four
+# monitor-check/notification workers.
 #
 # Quick start:
 #   cp .env.example .env   # fill in BETTER_AUTH_SECRET, POSTGRES_PASSWORD, etc.
@@ -9,6 +9,17 @@
 # — only the `command:` differs. DB_PROVIDER/DB_URL/REDIS_URL are forced to
 # the in-network Postgres/Redis hostnames below regardless of what a local
 # `.env` (meant for `npm run dev`) might otherwise say.
+#
+# No dedicated one-shot `migrate` service on purpose: each service below runs
+# `prisma migrate deploy` itself before its actual command. That's safe to do
+# from all 5 containers at once — Prisma serializes concurrent `migrate
+# deploy` calls with a DB-level advisory lock, so whichever gets there first
+# applies the migrations and the rest just see "already up to date". This
+# used to be one shared `migrate` service that everything else waited on via
+# `condition: service_completed_successfully`, but some deployment platforms
+# (e.g. Coolify) don't handle an intentionally-exiting one-shot container in
+# a compose stack well — every service here stays running, matching what
+# those platforms expect.
 
 x-app: &app
   build: .
@@ -21,8 +32,6 @@ x-app: &app
   depends_on:
     postgres:
       condition: service_healthy
-    migrate:
-      condition: service_completed_successfully
   volumes:
     - logs:/app/logs
 
@@ -48,29 +57,25 @@ services:
     volumes:
       - redis-data:/data
 
-  # One-shot: applies pending migrations, then exits. Everything else waits
-  # on it via `condition: service_completed_successfully`.
-  migrate:
-    build: .
-    env_file: .env
-    environment: *app-env
-    depends_on:
-      postgres:
-        condition: service_healthy
-    command: ["npx", "prisma", "migrate", "deploy"]
-
   web:
     <<: *app
     ports:
       - "3000:3000"
+    command: ["sh", "-c", "npx prisma migrate deploy && npm start"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/login >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
   worker-https:
     <<: *app
-    command: ["npx", "tsx", "src/workers/https.ts"]
+    command: ["sh", "-c", "npx prisma migrate deploy && npx tsx src/workers/https.ts"]
 
   worker-port:
     <<: *app
-    command: ["npx", "tsx", "src/workers/port.ts"]
+    command: ["sh", "-c", "npx prisma migrate deploy && npx tsx src/workers/port.ts"]
 
   worker-ping:
     <<: *app
@@ -79,11 +84,11 @@ services:
     # hardened hosts/runtimes drop it.
     cap_add:
       - NET_RAW
-    command: ["npx", "tsx", "src/workers/ping.ts"]
+    command: ["sh", "-c", "npx prisma migrate deploy && npx tsx src/workers/ping.ts"]
 
   worker-integrations:
     <<: *app
-    command: ["npx", "tsx", "src/workers/integrations.ts"]
+    command: ["sh", "-c", "npx prisma migrate deploy && npx tsx src/workers/integrations.ts"]
 
 volumes:
   postgres-data:

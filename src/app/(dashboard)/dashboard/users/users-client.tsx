@@ -1,14 +1,16 @@
 'use client';
 
 import * as React from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Search,
   MoreHorizontal,
-  Pencil,
   Trash2,
   UserPlus,
 } from 'lucide-react';
 
+import { useTRPC } from '@/trpc/client';
+import type { User, UserRole } from '@/trpc/routers/user';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
@@ -47,33 +49,54 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 
-// Type definition for a user
-type User = {
-  id: string;
-  name: string;
-  email: string;
-  image?: string | null;
-  emailVerified: boolean;
-  createdAt: Date | string;
-};
-
-type Role = 'Admin' | 'Member' | 'Viewer';
-
 interface UsersClientPageProps {
   initialUsers: User[];
 }
 
+type AddUserForm = {
+  name: string;
+  email: string;
+  password: string;
+  role: UserRole;
+};
+
+const emptyForm: AddUserForm = { name: '', email: '', password: '', role: 'Member' };
+
 export default function UsersClientPage({ initialUsers }: UsersClientPageProps) {
-  const [users, setUsers] = React.useState<User[]>(initialUsers);
+  const trpc = useTRPC();
+  const queryClient = useQueryClient();
+
+  const usersQuery = useQuery({
+    ...trpc.user.getAll.queryOptions(),
+    initialData: initialUsers,
+  });
+  const users = usersQuery.data;
+
   const [searchQuery, setSearchQuery] = React.useState('');
   const [isAddUserOpen, setIsAddUserOpen] = React.useState(false);
+  const [form, setForm] = React.useState<AddUserForm>(emptyForm);
+  const [formError, setFormError] = React.useState<string | null>(null);
 
-  // Form state for new user
-  const [newUser, setNewUser] = React.useState({
-    name: '',
-    email: '',
-    role: 'Member' as Role,
-  });
+  const invalidateAll = () => queryClient.invalidateQueries({ queryKey: trpc.user.getAll.queryKey() });
+
+  const createUser = useMutation(
+    trpc.user.create.mutationOptions({
+      onSuccess: () => {
+        invalidateAll();
+        setForm(emptyForm);
+        setFormError(null);
+        setIsAddUserOpen(false);
+      },
+      onError: (error) => setFormError(error.message),
+    }),
+  );
+
+  const deleteUser = useMutation(
+    trpc.user.delete.mutationOptions({
+      onSuccess: () => invalidateAll(),
+      onError: (error) => setFormError(error.message),
+    }),
+  );
 
   // Filter search
   const filteredUsers = users.filter(
@@ -82,26 +105,14 @@ export default function UsersClientPage({ initialUsers }: UsersClientPageProps) 
       user.email.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  // Add new user
   const handleAddUser = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newUser.name || !newUser.email) return;
-
-    const createdUser: User = {
-      id: Date.now().toString(),
-      name: newUser.name,
-      email: newUser.email,
-      emailVerified: false,
-      createdAt: new Date(),
-    };
-
-    setUsers([createdUser, ...users]);
-    setNewUser({ name: '', email: '', role: 'Member' });
-    setIsAddUserOpen(false);
+    if (!form.name || !form.email || !form.password) return;
+    createUser.mutate(form);
   };
 
   const handleDeleteUser = (id: string) => {
-    setUsers(users.filter((user) => user.id !== id));
+    deleteUser.mutate({ id });
   };
 
   return (
@@ -115,7 +126,16 @@ export default function UsersClientPage({ initialUsers }: UsersClientPageProps) 
           </p>
         </div>
 
-        <Dialog open={isAddUserOpen} onOpenChange={setIsAddUserOpen}>
+        <Dialog
+          open={isAddUserOpen}
+          onOpenChange={(open) => {
+            setIsAddUserOpen(open);
+            if (!open) {
+              setForm(emptyForm);
+              setFormError(null);
+            }
+          }}
+        >
           <DialogTrigger
             render={
               <Button className="gap-2">
@@ -129,7 +149,8 @@ export default function UsersClientPage({ initialUsers }: UsersClientPageProps) 
               <DialogHeader>
                 <DialogTitle>Invite New User</DialogTitle>
                 <DialogDescription>
-                  Add a new team member. They will receive an email to activate their account.
+                  Create an account for a new team member directly — self-service registration is closed
+                  once the first account exists.
                 </DialogDescription>
               </DialogHeader>
               <div className="grid gap-4 py-4">
@@ -138,8 +159,8 @@ export default function UsersClientPage({ initialUsers }: UsersClientPageProps) 
                   <Input
                     id="name"
                     placeholder="e.g. John Doe"
-                    value={newUser.name}
-                    onChange={(e) => setNewUser({ ...newUser, name: e.target.value })}
+                    value={form.name}
+                    onChange={(e) => setForm({ ...form, name: e.target.value })}
                     required
                   />
                 </div>
@@ -149,21 +170,33 @@ export default function UsersClientPage({ initialUsers }: UsersClientPageProps) 
                     id="email"
                     type="email"
                     placeholder="john@company.com"
-                    value={newUser.email}
-                    onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
+                    value={form.email}
+                    onChange={(e) => setForm({ ...form, email: e.target.value })}
                     required
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="password">Temporary Password</Label>
+                  <Input
+                    id="password"
+                    type="password"
+                    placeholder="At least 8 characters"
+                    value={form.password}
+                    onChange={(e) => setForm({ ...form, password: e.target.value })}
+                    required
+                    minLength={8}
                   />
                 </div>
                 <div className="grid gap-2">
                   <Label htmlFor="role">Role</Label>
                   <Select
-                    value={newUser.role}
+                    value={form.role}
                     onValueChange={(value) => {
-                      if (value) setNewUser({ ...newUser, role: value as Role });
+                      if (value) setForm({ ...form, role: value as UserRole });
                     }}
                   >
                     <SelectTrigger id="role">
-                      <SelectValue placeholder="Select role" />
+                      <SelectValue>{(val: UserRole) => val}</SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="Admin">Admin</SelectItem>
@@ -172,12 +205,16 @@ export default function UsersClientPage({ initialUsers }: UsersClientPageProps) 
                     </SelectContent>
                   </Select>
                 </div>
+
+                {formError && <p className="text-sm text-destructive">{formError}</p>}
               </div>
               <DialogFooter>
                 <Button type="button" variant="outline" onClick={() => setIsAddUserOpen(false)}>
                   Cancel
                 </Button>
-                <Button type="submit">Send Invitation</Button>
+                <Button type="submit" disabled={createUser.isPending}>
+                  {createUser.isPending ? 'Creating…' : 'Create User'}
+                </Button>
               </DialogFooter>
             </form>
           </DialogContent>
@@ -255,13 +292,6 @@ export default function UsersClientPage({ initialUsers }: UsersClientPageProps) 
                       <DropdownMenuContent align="end">
                         <DropdownMenuGroup>
                           <DropdownMenuLabel>Actions</DropdownMenuLabel>
-                          <DropdownMenuItem onClick={() => alert(`Edit ${user.name}`)}>
-                            <Pencil className="mr-2 h-4 w-4" />
-                            Edit
-                          </DropdownMenuItem>
-                        </DropdownMenuGroup>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuGroup>
                           <DropdownMenuItem
                             className="text-destructive focus:text-destructive"
                             onClick={() => handleDeleteUser(user.id)}

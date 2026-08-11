@@ -1,10 +1,12 @@
-# One image, six services (see docker-compose.yml): `web` runs `next start`,
-# the four `worker-*` services run their src/workers/*.ts file via tsx, and
-# `migrate` runs `prisma migrate deploy`. All five need the full source tree
-# and full node_modules (including dev dependencies — tsx is only needed at
-# runtime for the workers), so this deliberately skips Next's `standalone`
-# output trimming: that only traces what the Next.js app itself imports, and
-# would drop `tsx` and anything only a worker uses.
+# One image, five services (see docker-compose.yml): `web` runs
+# `prisma migrate deploy && next start`, the four `worker-*` services each run
+# `prisma migrate deploy` then their src/workers/*.ts file via tsx (safe to
+# run concurrently from all five — Prisma serializes it with a DB-level
+# advisory lock). All five need the full source tree and full node_modules
+# (including dev dependencies — tsx is only needed at runtime for the
+# workers), so this deliberately skips Next's `standalone` output trimming:
+# that only traces what the Next.js app itself imports, and would drop `tsx`
+# and anything only a worker uses.
 FROM node:20-alpine AS base
 # openssl: Prisma's generated client needs it on Alpine.
 # python3/make/g++: better-sqlite3 is still an unconditional import in
@@ -48,5 +50,6 @@ COPY --from=builder /app/src ./src
 
 EXPOSE 3000
 
-# Overridden by docker-compose.yml's `command:` for the worker/migrate services.
-CMD ["npm", "start"]
+# Overridden by docker-compose.yml's `command:` for every service, including
+# `web` — this is just a sane default if the image is ever run standalone.
+CMD ["sh", "-c", "npx prisma migrate deploy && npm start"]

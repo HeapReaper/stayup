@@ -14,6 +14,15 @@ model User {
   image           String?
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
+  // better-auth's admin plugin (src/lib/auth.ts) — lets dashboard-authenticated
+  // users create other users via auth.api.createUser without a public
+  // self-service /register flow. Not used for permission gating anywhere in
+  // this app (every logged-in user has full dashboard access, same as
+  // before); the plugin just requires these columns to exist.
+  role            String?
+  banned          Boolean?         @default(false)
+  banReason       String?
+  banExpires      DateTime?
   sessions        Session[]
   accounts        Account[]
   monitors        Monitor[]
@@ -28,15 +37,16 @@ model User {
 }
 
 model Session {
-  id        String   @id
-  expiresAt DateTime
-  token     String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  ipAddress String?
-  userAgent String?
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id             String   @id
+  expiresAt      DateTime
+  token          String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  ipAddress      String?
+  userAgent      String?
+  impersonatedBy String? // better-auth admin plugin column; unused (see User.role)
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([token])
   @@index([userId])

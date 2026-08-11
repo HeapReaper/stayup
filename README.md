@@ -208,9 +208,9 @@ Note: these are plain `tsx` processes, not hot-reloaded by Next.js — if you ed
 running, restart it (or use the `:watch` variant) to pick up the change.
 
 ### Docker
-`docker-compose.yml` runs the whole stack: Postgres, Redis, the Next.js app, a one-shot migration step, and
-all four workers above — `web` and every `worker-*` service build from the same image (see `Dockerfile`)
-and only differ in their `command:`.
+`docker-compose.yml` runs the whole stack: Postgres, Redis, the Next.js app, and all four workers above —
+`web` and every `worker-*` service build from the same image (see `Dockerfile`) and only differ in their
+`command:`.
 
 ```bash
 cp .env.example .env   # fill in BETTER_AUTH_SECRET, POSTGRES_PASSWORD, SMTP_*, etc.
@@ -224,8 +224,14 @@ A few things worth knowing:
   the kind of concurrent-writer situation SQLite isn't built for.
 - **Two migration histories.** Because the SQL is provider-specific, SQLite and Postgres each have their
   own migration folder — `src/prisma/schemas/migrations/sqlite/` and `.../migrations/postgresql/` — selected
-  automatically via `prisma.config.ts`'s `migrations.path`, based on `DB_PROVIDER`. The `migrate` service
-  runs `prisma migrate deploy` against Postgres before `web`/the workers start.
+  automatically via `prisma.config.ts`'s `migrations.path`, based on `DB_PROVIDER`.
+- **No dedicated `migrate` service.** Each of `web`/`worker-*` runs `prisma migrate deploy` itself before
+  its actual command — safe to do concurrently from all five, since Prisma serializes it with a DB-level
+  advisory lock. This used to be one shared one-shot `migrate` service the others waited on, but some
+  deployment platforms (Coolify, at least) don't reliably handle an intentionally-exiting container inside
+  a compose stack — the deploy would hang on `web`/the workers never leaving "Created", then fail with
+  `Error response from daemon: No such container: <id>` once whatever was polling the exited `migrate`
+  container's status couldn't find it anymore. Every service here stays running instead.
 - The Postgres migration history was generated and schema-validated, but not applied against a live
   Postgres instance in the environment this was built in (no Docker available there) — worth a close look
   the first time you run `docker compose up`.
