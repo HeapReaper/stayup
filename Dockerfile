@@ -1,8 +1,8 @@
-# One image, five services (see docker-compose.yml): `web` runs
-# `prisma migrate deploy && next start`, the four `worker-*` services each run
+# One image, six services (see docker-compose.yml): `web` runs
+# `prisma migrate deploy && next start`, the five `worker-*` services each run
 # `prisma migrate deploy` then their src/workers/*.ts file via tsx (safe to
-# run concurrently from all five — Prisma serializes it with a DB-level
-# advisory lock). All five need the full source tree and full node_modules
+# run concurrently from all six — Prisma serializes it with a DB-level
+# advisory lock). All six need the full source tree and full node_modules
 # (including dev dependencies — tsx is only needed at runtime for the
 # workers), so this deliberately skips Next's `standalone` output trimming:
 # that only traces what the Next.js app itself imports, and would drop `tsx`

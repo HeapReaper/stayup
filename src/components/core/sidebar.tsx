@@ -15,6 +15,7 @@ import {
   Siren,
   StickyNoteCheck,
   Webhook, FileText, Monitor,
+  Wrench,
 } from 'lucide-react';
 
 import {
@@ -43,6 +44,7 @@ const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
   { name: 'Monitors', href: '/dashboard/monitors', icon: MonitorCheck },
   { name: 'Incidents', href: '/dashboard/incidents', icon: Siren },
+  { name: 'Maintenance', href: '/dashboard/maintenance', icon: Wrench },
   { name: 'Status pages', href: '/dashboard/statuspages', icon: StickyNoteCheck },
   { name: 'Integrations', href: '/dashboard/integrations', icon: Webhook },
   { name: 'Users', href: '/dashboard/users', icon: Users },

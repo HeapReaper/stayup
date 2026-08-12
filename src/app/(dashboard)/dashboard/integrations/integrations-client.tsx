@@ -15,6 +15,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   Clock,
+  Smartphone,
 } from 'lucide-react';
 
 import { useTRPC } from '@/trpc/client';
@@ -68,6 +69,7 @@ const TYPE_LABELS: Record<IntegrationType, string> = {
   Telegram: 'Telegram Bot',
   Email: 'Email Notification',
   PagerDuty: 'PagerDuty Integration',
+  Push: 'Browser / Mobile Push',
 };
 
 const TYPE_ICON: Record<IntegrationType, React.ReactNode> = {
@@ -77,7 +79,16 @@ const TYPE_ICON: Record<IntegrationType, React.ReactNode> = {
   Telegram: <Send className="h-3 w-3 text-sky-500" />,
   Email: <Mail className="h-3 w-3 text-emerald-500" />,
   PagerDuty: <AlertTriangle className="h-3 w-3 text-rose-500" />,
+  Push: <Smartphone className="h-3 w-3 text-cyan-500" />,
 };
+
+/** Converts a base64url VAPID public key into the Uint8Array PushManager.subscribe() expects. */
+function urlBase64ToUint8Array(base64String: string): Uint8Array {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = atob(base64);
+  return Uint8Array.from([...rawData].map((char) => char.charCodeAt(0)));
+}
 
 type FormState = {
   name: string;
@@ -151,6 +162,7 @@ export default function IntegrationsClientPage({ initialIntegrations }: Integrat
   const [form, setForm] = React.useState<FormState>(emptyForm());
   const [formError, setFormError] = React.useState<string | null>(null);
   const [testFeedback, setTestFeedback] = React.useState<{ id: string; ok: boolean; message: string } | null>(null);
+  const [isEnablingPush, setIsEnablingPush] = React.useState(false);
 
   const invalidateAll = () => queryClient.invalidateQueries({ queryKey: trpc.integration.getAll.queryKey() });
 
@@ -201,6 +213,57 @@ export default function IntegrationsClientPage({ initialIntegrations }: Integrat
       },
     }),
   );
+
+  const registerPush = useMutation(
+    trpc.integration.registerPush.mutationOptions({
+      onSuccess: () => {
+        invalidateAll();
+        closeForm();
+      },
+      onError: (error) => setFormError(error.message),
+    }),
+  );
+
+  /** Full "connect this browser" handshake: service worker -> Notification permission -> PushManager subscription -> save as an Integration. */
+  const handleEnablePush = async () => {
+    setFormError(null);
+
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      setFormError('This browser does not support push notifications.');
+      return;
+    }
+
+    setIsEnablingPush(true);
+    try {
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') {
+        setFormError('Notification permission was not granted.');
+        return;
+      }
+
+      const { publicKey } = await queryClient.fetchQuery(trpc.integration.getVapidPublicKey.queryOptions());
+      if (!publicKey) {
+        setFormError('Push is not configured on the server.');
+        return;
+      }
+
+      const registration = await navigator.serviceWorker.register('/sw.js');
+      await navigator.serviceWorker.ready;
+      const subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(publicKey),
+      });
+
+      registerPush.mutate({
+        name: form.name || 'Browser Push',
+        subscription: JSON.stringify(subscription),
+      });
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : 'Failed to enable push notifications.');
+    } finally {
+      setIsEnablingPush(false);
+    }
+  };
 
   React.useEffect(() => {
     if (!testFeedback) return;
@@ -321,16 +384,42 @@ export default function IntegrationsClientPage({ initialIntegrations }: Integrat
                   </SelectContent>
                 </Select>
               </div>
-              <div className="grid gap-2">
-                <Label htmlFor="target">{targetLabel(form.type)}</Label>
-                <Input
-                  id="target"
-                  placeholder={targetPlaceholder(form.type)}
-                  value={form.target}
-                  onChange={(e) => setForm({ ...form, target: e.target.value })}
-                  required
-                />
-              </div>
+              {form.type === 'Push' ? (
+                editingId ? (
+                  <p className="text-xs text-muted-foreground">
+                    This channel is tied to the browser it was connected from — delete and re-add
+                    it to switch devices.
+                  </p>
+                ) : (
+                  <div className="rounded-lg border p-3 space-y-2">
+                    <p className="text-xs text-muted-foreground">
+                      Name it above, then grant notification permission to connect this browser as
+                      a push destination.
+                    </p>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="w-full gap-2"
+                      onClick={handleEnablePush}
+                      disabled={isEnablingPush || registerPush.isPending}
+                    >
+                      <Smartphone className="h-4 w-4" />
+                      {isEnablingPush || registerPush.isPending ? 'Connecting…' : 'Enable Push in This Browser'}
+                    </Button>
+                  </div>
+                )
+              ) : (
+                <div className="grid gap-2">
+                  <Label htmlFor="target">{targetLabel(form.type)}</Label>
+                  <Input
+                    id="target"
+                    placeholder={targetPlaceholder(form.type)}
+                    value={form.target}
+                    onChange={(e) => setForm({ ...form, target: e.target.value })}
+                    required
+                  />
+                </div>
+              )}
               {form.type === 'Telegram' && (
                 <div className="grid gap-2">
                   <Label htmlFor="secret">Bot Token</Label>
@@ -356,9 +445,11 @@ export default function IntegrationsClientPage({ initialIntegrations }: Integrat
                 <Button type="button" variant="outline" className="flex-1" onClick={closeForm}>
                   Cancel
                 </Button>
-                <Button type="submit" className="flex-1" disabled={isSaving}>
-                  {isSaving ? 'Saving…' : editingId ? 'Save Changes' : 'Save & Connect'}
-                </Button>
+                {!(form.type === 'Push' && !editingId) && (
+                  <Button type="submit" className="flex-1" disabled={isSaving}>
+                    {isSaving ? 'Saving…' : editingId ? 'Save Changes' : 'Save & Connect'}
+                  </Button>
+                )}
               </div>
             </SheetFooter>
           </form>
@@ -402,7 +493,7 @@ export default function IntegrationsClientPage({ initialIntegrations }: Integrat
                     <div className="flex flex-col">
                       <span className="font-semibold text-sm">{item.name}</span>
                       <span className="text-xs text-muted-foreground font-mono truncate max-w-[280px] mt-0.5">
-                        {item.target}
+                        {item.type === 'Push' ? 'Connected browser subscription' : item.target}
                       </span>
                       {testFeedback?.id === item.id && (
                         <span

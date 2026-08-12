@@ -23,14 +23,15 @@ model User {
   banned          Boolean?         @default(false)
   banReason       String?
   banExpires      DateTime?
-  sessions        Session[]
-  accounts        Account[]
-  monitors        Monitor[]
-  incidents       Incident[]
-  incidentUpdates IncidentUpdate[]
-  statusPages     StatusPage[]
-  integrations    Integration[]
-  auditLogs       AuditLog[]
+  sessions           Session[]
+  accounts           Account[]
+  monitors           Monitor[]
+  incidents          Incident[]
+  incidentUpdates    IncidentUpdate[]
+  statusPages        StatusPage[]
+  integrations       Integration[]
+  auditLogs          AuditLog[]
+  maintenanceWindows MaintenanceWindow[]
 
   @@unique([email])
   @@map("user")
@@ -98,9 +99,10 @@ model Monitor {
   createdBy     User?               @relation(fields: [createdById], references: [id], onDelete: SetNull)
   createdAt     DateTime            @default(now())
   updatedAt     DateTime            @updatedAt
-  checks        MonitorCheck[]
-  incidents     Incident[]
-  statusPages   StatusPageMonitor[]
+  checks              MonitorCheck[]
+  incidents           Incident[]
+  statusPages         StatusPageMonitor[]
+  maintenanceWindows  MaintenanceWindowMonitor[]
 
   @@index([createdById])
   @@map("monitor")
@@ -135,6 +137,12 @@ model Incident {
   resolvedAt  DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
+
+  // Root-cause writeup, added after the incident is resolved. Only shown on
+  // the public status page once postmortemPublishedAt is set — saving a
+  // draft (publishedAt still null) keeps it dashboard-only.
+  postmortem            String?
+  postmortemPublishedAt DateTime?
 
   updates               IncidentUpdate[]
   subscribers           IncidentSubscriber[]
@@ -183,6 +191,12 @@ model StatusPage {
   id                String   @id @default(cuid())
   name              String
   slug              String   @unique
+  // Optional vanity hostname (no protocol, no port — e.g. "status.acme.com")
+  // that transparently shows this page instead of /status/[slug]. Resolved
+  // in src/proxy.ts via src/app/api/public/status-domain. Pointing the DNS
+  // record (CNAME/A) at wherever this app is hosted, and any TLS for it, is
+  // on the operator — this app only does the request-time rewrite.
+  customDomain      String?  @unique
   description       String?
   logoUrl           String?
   theme             String   @default("system") // light | dark | system
@@ -251,6 +265,46 @@ model StatusPageSubscriber {
   @@unique([statusPageId, channel, target])
   @@index([statusPageId])
   @@map("status_page_subscriber")
+}
+
+// A scheduled or in-progress maintenance window covering one or more
+// monitors. While `now` falls within [startsAt, endsAt] (and it hasn't been
+// cancelled), the monitor-check workers (src/lib/monitor-worker.ts) still
+// check and record pings as usual, but suppress opening/alerting a new
+// incident for a Down/Degraded result — see src/lib/maintenance.ts. Shown on
+// the public status page as a "Scheduled maintenance" notice instead of an
+// outage.
+model MaintenanceWindow {
+  id          String    @id @default(cuid())
+  title       String
+  message     String? // shown on the public status page
+  startsAt    DateTime
+  endsAt      DateTime
+  cancelledAt DateTime?
+  createdById String?
+  createdBy   User?     @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  monitors MaintenanceWindowMonitor[]
+
+  @@index([createdById])
+  @@index([startsAt, endsAt])
+  @@map("maintenance_window")
+}
+
+// Join row: which monitors a maintenance window covers.
+model MaintenanceWindowMonitor {
+  id                  String            @id @default(cuid())
+  maintenanceWindowId String
+  maintenanceWindow   MaintenanceWindow @relation(fields: [maintenanceWindowId], references: [id], onDelete: Cascade)
+  monitorId           String
+  monitor             Monitor           @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+
+  @@unique([maintenanceWindowId, monitorId])
+  @@index([maintenanceWindowId])
+  @@index([monitorId])
+  @@map("maintenance_window_monitor")
 }
 
 // A record of a significant dashboard action, shown on the Logs page's Audit
@@ -338,6 +392,13 @@ model AppSettings {
   smtpUseTls               Boolean  @default(true)
   apiKey                   String   @unique
   webhookSigningSecret     String
+  // VAPID key pair for the "Push" integration channel (browser/mobile web
+  // push, src/lib/push.ts). Generated once on first use (see
+  // src/lib/settings.ts) and reused for every subscription — the public key
+  // is exposed to the browser to create a PushSubscription, the private key
+  // signs outgoing pushes and never leaves the server.
+  vapidPublicKey           String?
+  vapidPrivateKey          String?
   updatedAt                DateTime @updatedAt
 
   @@map("app_settings")

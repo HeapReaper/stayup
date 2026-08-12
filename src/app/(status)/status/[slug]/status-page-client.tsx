@@ -11,10 +11,18 @@ import {
   RefreshCw,
   Mail,
   Send,
+  Wrench,
+  FileText,
 } from 'lucide-react';
 
 import { useTRPC } from '@/trpc/client';
-import type { PublicStatusPage, PublicMonitorView, DayBucket, SubscriberChannel } from '@/trpc/routers/statuspage';
+import type {
+  PublicStatusPage,
+  PublicMonitorView,
+  DayBucket,
+  SubscriberChannel,
+  PublicMaintenanceWindow,
+} from '@/trpc/routers/statuspage';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -86,6 +94,50 @@ function OverallBanner({ status }: { status: PublicStatusPage['overallStatus'] }
   );
 }
 
+function formatMaintenanceRange(startsAt: string, endsAt: string) {
+  const start = new Date(startsAt);
+  const end = new Date(endsAt);
+  const sameDay = start.toDateString() === end.toDateString();
+  const dateOpts: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric' };
+  const timeOpts: Intl.DateTimeFormatOptions = { hour: 'numeric', minute: '2-digit' };
+
+  if (sameDay) {
+    return `${start.toLocaleDateString(undefined, dateOpts)}, ${start.toLocaleTimeString(undefined, timeOpts)} – ${end.toLocaleTimeString(undefined, timeOpts)}`;
+  }
+  return `${start.toLocaleString(undefined, { ...dateOpts, ...timeOpts })} – ${end.toLocaleString(undefined, { ...dateOpts, ...timeOpts })}`;
+}
+
+function MaintenanceBanner({ windows }: { windows: PublicMaintenanceWindow[] }) {
+  if (windows.length === 0) return null;
+
+  return (
+    <div className="space-y-2">
+      {windows.map((w) => {
+        const isActive = new Date(w.startsAt) <= new Date() && new Date(w.endsAt) >= new Date();
+        return (
+          <div
+            key={w.id}
+            className="flex items-start gap-3 rounded-xl border border-blue-500/20 bg-blue-500/10 p-4 text-blue-700 dark:text-blue-400"
+          >
+            <Wrench className="h-5 w-5 shrink-0 mt-0.5" />
+            <div className="space-y-0.5">
+              <p className="font-semibold text-sm">
+                {isActive ? 'Maintenance in progress: ' : 'Scheduled maintenance: '}
+                {w.title}
+              </p>
+              <p className="text-xs opacity-90">
+                {formatMaintenanceRange(w.startsAt, w.endsAt)}
+                {w.monitorNames.length > 0 && ` · ${w.monitorNames.join(', ')}`}
+              </p>
+              {w.message && <p className="text-sm mt-1 opacity-90 whitespace-pre-line">{w.message}</p>}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function UptimeHeatmap({ monitor }: { monitor: PublicMonitorView }) {
   const scrollRef = React.useRef<HTMLDivElement>(null);
 
@@ -134,8 +186,19 @@ function MonitorRow({ monitor }: { monitor: PublicMonitorView }) {
     <div className="py-4 space-y-2">
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-2 min-w-0">
-          <span className={`h-2 w-2 rounded-full shrink-0 ${statusDotClass(monitor.status)}`} />
+          <span
+            className={`h-2 w-2 rounded-full shrink-0 ${monitor.underMaintenance ? 'bg-blue-500' : statusDotClass(monitor.status)}`}
+          />
           <span className="font-medium text-sm truncate">{monitor.name}</span>
+          {monitor.underMaintenance && (
+            <Badge
+              variant="secondary"
+              className="bg-blue-500/15 text-blue-600 dark:text-blue-400 border-blue-500/20 gap-1 text-[10px] px-1.5 py-0 h-4 shrink-0"
+            >
+              <Wrench className="h-2.5 w-2.5" />
+              Maintenance
+            </Badge>
+          )}
         </div>
         <span className="text-xs text-muted-foreground shrink-0">{monitor.uptime.toFixed(2)}% uptime</span>
       </div>
@@ -162,6 +225,56 @@ function IncidentStatusBadge({ status }: { status: string }) {
   );
 }
 
+function IncidentSubscribeForm({ incidentId }: { incidentId: string }) {
+  const trpc = useTRPC();
+  const [email, setEmail] = React.useState('');
+  const [state, setState] = React.useState<'idle' | 'success' | 'error'>('idle');
+  const [error, setError] = React.useState<string | null>(null);
+
+  const subscribe = useMutation(
+    trpc.incident.subscribe.mutationOptions({
+      onSuccess: () => {
+        setState('success');
+        setEmail('');
+      },
+      onError: (err) => {
+        setState('error');
+        setError(err.message);
+      },
+    }),
+  );
+
+  if (state === 'success') {
+    return <p className="text-xs text-emerald-600 dark:text-emerald-400">You'll get an email on every update.</p>;
+  }
+
+  return (
+    <form
+      className="flex items-center gap-1.5"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (!email) return;
+        setState('idle');
+        subscribe.mutate({ incidentId, email });
+      }}
+    >
+      <Input
+        type="email"
+        placeholder="you@example.com"
+        value={email}
+        onChange={(e) => setEmail(e.target.value)}
+        className="h-7 max-w-[200px] text-xs"
+        required
+      />
+      <Button type="submit" size="sm" variant="outline" className="h-7 gap-1 text-xs" disabled={subscribe.isPending}>
+        <Mail className="h-3 w-3" />
+        {subscribe.isPending ? 'Subscribing…' : 'Notify me'}
+      </Button>
+      {state === 'error' && error && <span className="text-xs text-destructive">{error}</span>}
+    </form>
+  );
+}
+
 function IncidentCard({ incident }: { incident: PublicStatusPage['incidents'][number] }) {
   return (
     <div className="rounded-lg border p-4 space-y-3">
@@ -185,6 +298,20 @@ function IncidentCard({ incident }: { incident: PublicStatusPage['incidents'][nu
           </li>
         ))}
       </ol>
+      {incident.postmortem && (
+        <div className="rounded-md bg-muted/50 p-3 space-y-1">
+          <p className="flex items-center gap-1.5 text-xs font-semibold text-muted-foreground">
+            <FileText className="h-3.5 w-3.5" />
+            Post-mortem
+          </p>
+          <p className="text-sm whitespace-pre-line">{incident.postmortem}</p>
+        </div>
+      )}
+      {incident.status !== 'Resolved' && (
+        <div className="pt-1 border-t">
+          <IncidentSubscribeForm incidentId={incident.id} />
+        </div>
+      )}
     </div>
   );
 }
@@ -297,6 +424,8 @@ function StatusPageBody({ slug, initialData }: StatusPageClientProps) {
         </div>
 
         <OverallBanner status={page.overallStatus} />
+
+        <MaintenanceBanner windows={page.maintenanceWindows} />
 
         <div className="flex items-center justify-end gap-1.5 text-xs text-muted-foreground">
           <RefreshCw className={`h-3 w-3 ${pageQuery.isFetching ? 'animate-spin' : ''}`} />

@@ -5,6 +5,7 @@ import { createTRPCRouter, protectedProcedure, baseProcedure } from '../init';
 import { prisma } from '@/lib/prisma';
 import { logAudit } from '@/lib/audit';
 import type { IncidentImpact, IncidentStatus } from '@/lib/incidents';
+import { getVisibleMaintenanceWindows } from '@/lib/maintenance';
 
 export const statusPageThemeEnum = z.enum(['light', 'dark', 'system']);
 export const historyWindowDaysEnum = z.union([z.literal(7), z.literal(30), z.literal(90)]);
@@ -24,6 +25,7 @@ export type StatusPageSummary = {
   id: string;
   name: string;
   slug: string;
+  customDomain: string | null;
   theme: StatusPageTheme;
   historyWindowDays: HistoryWindowDays;
   isPublished: boolean;
@@ -42,6 +44,7 @@ export type StatusPageDetail = {
   id: string;
   name: string;
   slug: string;
+  customDomain: string;
   description: string;
   logoUrl: string;
   theme: StatusPageTheme;
@@ -65,6 +68,7 @@ export type PublicMonitorView = {
   type: string;
   status: string;
   uptime: number;
+  underMaintenance: boolean;
   days: DayBucket[];
 };
 
@@ -89,6 +93,18 @@ export type PublicIncident = {
   resolvedAt: string | null;
   createdAt: string;
   updates: PublicIncidentUpdate[];
+  // Only present once the incident's postmortem has been published — see
+  // src/trpc/routers/incident.ts's setPostmortem.
+  postmortem: string | null;
+};
+
+export type PublicMaintenanceWindow = {
+  id: string;
+  title: string;
+  message: string | null;
+  startsAt: string;
+  endsAt: string;
+  monitorNames: string[];
 };
 
 export type PublicStatusPage = {
@@ -103,6 +119,7 @@ export type PublicStatusPage = {
   overallStatus: OverallStatus;
   groups: PublicMonitorGroup[];
   incidents: PublicIncident[];
+  maintenanceWindows: PublicMaintenanceWindow[];
 };
 
 // ---------------------------------------------------------------------------
@@ -117,6 +134,15 @@ function computeOverallStatus(monitorStatuses: string[]): OverallStatus {
 
 function isUniqueConstraintError(error: unknown): boolean {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
+}
+
+/** P2002's `meta.target` lists the column(s) that collided — used to tell a slug clash from a domain clash. */
+function conflictingField(error: unknown): string | null {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError)) return null;
+  const target = error.meta?.target;
+  if (Array.isArray(target)) return String(target[0] ?? '');
+  if (typeof target === 'string') return target;
+  return null;
 }
 
 /** Replaces a status page's groups/monitor-assignments from the editor's flat input shape. */
@@ -213,9 +239,24 @@ const statusPageGroupInput = z.object({
   monitorIds: z.array(z.string()),
 });
 
+// Bare hostname only — no protocol, no port, no path. Lowercased and
+// trailing-dot-stripped so "Status.Acme.com" and "status.acme.com." both
+// normalize to the same value the Host header comparison in src/proxy.ts
+// expects.
+const customDomainSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .max(255)
+  .transform((value) => value.replace(/\.$/, ''))
+  .refine((value) => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/.test(value), {
+    message: 'Enter a bare domain, e.g. status.example.com (no https:// or path)',
+  });
+
 const statusPageInput = z.object({
   name: z.string().trim().min(1, 'Name is required').max(120),
   slug: slugSchema,
+  customDomain: z.union([customDomainSchema, z.literal('')]).optional(),
   description: z.string().trim().max(500).optional(),
   logoUrl: z.union([z.string().trim().url().max(2000), z.literal('')]).optional(),
   theme: statusPageThemeEnum,
@@ -252,6 +293,7 @@ export const statusPageRouter = createTRPCRouter({
       id: page.id,
       name: page.name,
       slug: page.slug,
+      customDomain: page.customDomain,
       theme: page.theme as StatusPageTheme,
       historyWindowDays: page.historyWindowDays as HistoryWindowDays,
       isPublished: page.isPublished,
@@ -289,6 +331,7 @@ export const statusPageRouter = createTRPCRouter({
         id: page.id,
         name: page.name,
         slug: page.slug,
+        customDomain: page.customDomain ?? '',
         description: page.description ?? '',
         logoUrl: page.logoUrl ?? '',
         theme: page.theme as StatusPageTheme,
@@ -306,6 +349,7 @@ export const statusPageRouter = createTRPCRouter({
           data: {
             name: input.name,
             slug: input.slug,
+            customDomain: input.customDomain || null,
             description: input.description || null,
             logoUrl: input.logoUrl || null,
             theme: input.theme,
@@ -332,7 +376,14 @@ export const statusPageRouter = createTRPCRouter({
       return { id: page.id, slug: page.slug };
     } catch (error) {
       if (isUniqueConstraintError(error)) {
-        throw new TRPCError({ code: 'CONFLICT', message: 'That slug is already taken' });
+        const field = conflictingField(error);
+        throw new TRPCError({
+          code: 'CONFLICT',
+          message:
+            field === 'customDomain'
+              ? 'That custom domain is already in use by another status page'
+              : 'That slug is already taken',
+        });
       }
       throw error;
     }
@@ -352,6 +403,7 @@ export const statusPageRouter = createTRPCRouter({
           data: {
             name: input.name,
             slug: input.slug,
+            customDomain: input.customDomain || null,
             description: input.description || null,
             logoUrl: input.logoUrl || null,
             theme: input.theme,
@@ -381,7 +433,14 @@ export const statusPageRouter = createTRPCRouter({
       return { id: page.id, slug: page.slug };
     } catch (error) {
       if (isUniqueConstraintError(error)) {
-        throw new TRPCError({ code: 'CONFLICT', message: 'That slug is already taken' });
+        const field = conflictingField(error);
+        throw new TRPCError({
+          code: 'CONFLICT',
+          message:
+            field === 'customDomain'
+              ? 'That custom domain is already in use by another status page'
+              : 'That slug is already taken',
+        });
       }
       throw error;
     }
@@ -441,7 +500,9 @@ export const statusPageRouter = createTRPCRouter({
       windowStart.setUTCDate(windowStart.getUTCDate() - (page.historyWindowDays - 1));
       windowStart.setUTCHours(0, 0, 0, 0);
 
-      const [checks, incidents] = await Promise.all([
+      const now = new Date();
+
+      const [checks, incidents, maintenanceWindows] = await Promise.all([
         monitorIds.length
           ? prisma.monitorCheck.findMany({
               where: { monitorId: { in: monitorIds }, checkedAt: { gte: windowStart } },
@@ -458,7 +519,19 @@ export const statusPageRouter = createTRPCRouter({
               },
             })
           : Promise.resolve([]),
+        getVisibleMaintenanceWindows(monitorIds, now),
       ]);
+
+      // Monitors currently inside an active (started, not yet ended,
+      // uncancelled) window — shown with an "Under maintenance" badge
+      // instead of their raw Down/Degraded status.
+      const monitorIdsUnderMaintenanceNow = new Set(
+        maintenanceWindows
+          .filter((w) => w.startsAt <= now && w.endsAt >= now)
+          .flatMap((w) => w.monitorIds),
+      );
+
+      const monitorNameById = new Map(page.monitors.map((m) => [m.monitorId, m.monitor.name] as const));
 
       const checksByMonitor = new Map<string, typeof checks>();
       for (const check of checks) {
@@ -481,6 +554,7 @@ export const statusPageRouter = createTRPCRouter({
         type: link.monitor.type,
         status: link.monitor.status,
         uptime: link.monitor.uptime,
+        underMaintenance: monitorIdsUnderMaintenanceNow.has(link.monitor.id),
         days: bucketByDay(
           checksByMonitor.get(link.monitorId) ?? [],
           incidentsByMonitor.get(link.monitorId) ?? [],
@@ -522,6 +596,15 @@ export const statusPageRouter = createTRPCRouter({
             message: update.message,
             createdAt: update.createdAt.toISOString(),
           })),
+          postmortem: incident.postmortemPublishedAt ? incident.postmortem : null,
+        })),
+        maintenanceWindows: maintenanceWindows.map((w) => ({
+          id: w.id,
+          title: w.title,
+          message: w.message,
+          startsAt: w.startsAt.toISOString(),
+          endsAt: w.endsAt.toISOString(),
+          monitorNames: w.monitorIds.map((id) => monitorNameById.get(id)).filter((n): n is string => !!n),
         })),
       };
     }),

@@ -5,8 +5,9 @@ import { createTRPCRouter, protectedProcedure } from '../init';
 import { prisma } from '@/lib/prisma';
 import { logAudit } from '@/lib/audit';
 import { deliverToIntegration } from '@/lib/integration-delivery';
+import { getSettings } from '@/lib/settings';
 
-export const integrationTypeEnum = z.enum(['Discord', 'Slack', 'Webhook', 'Telegram', 'Email', 'PagerDuty']);
+export const integrationTypeEnum = z.enum(['Discord', 'Slack', 'Webhook', 'Telegram', 'Email', 'PagerDuty', 'Push']);
 export type IntegrationType = z.infer<typeof integrationTypeEnum>;
 
 export type IntegrationSummary = {
@@ -166,4 +167,59 @@ export const integrationRouter = createTRPCRouter({
 
     return { success: true };
   }),
+
+  /** Public VAPID key, needed client-side to open a browser PushSubscription (see registerPush below). */
+  getVapidPublicKey: protectedProcedure.query(async () => {
+    const settings = await getSettings();
+    return { publicKey: settings.vapidPublicKey };
+  }),
+
+  /**
+   * Turns a browser's PushSubscription into a "Push" Integration, so it
+   * receives incident alerts the same way a Discord/Slack channel would.
+   * Called by integrations-client.tsx's "Enable browser push" button after
+   * it completes the PushManager.subscribe() handshake — the subscription
+   * itself (endpoint + keys) is what gets stored as the target.
+   */
+  registerPush: protectedProcedure
+    .input(
+      z.object({
+        name: z.string().trim().min(1).max(120),
+        subscription: z.string().trim().min(1),
+      }),
+    )
+    .mutation(async ({ input, ctx }) => {
+      try {
+        JSON.parse(input.subscription);
+      } catch {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'Invalid push subscription' });
+      }
+
+      // Re-subscribing the same browser (e.g. after clearing site data) reuses
+      // its existing row instead of piling up dead duplicates.
+      const existing = await prisma.integration.findFirst({
+        where: { type: 'Push', target: input.subscription },
+      });
+      if (existing) return { id: existing.id };
+
+      const integration = await prisma.integration.create({
+        data: {
+          name: input.name,
+          type: 'Push',
+          target: input.subscription,
+          enabled: true,
+          createdById: ctx.session.user.id,
+        },
+      });
+
+      await logAudit({
+        actorId: ctx.session.user.id,
+        actorName: ctx.session.user.name,
+        action: 'CREATED_INTEGRATION',
+        target: integration.name,
+        ipAddress: ctx.ipAddress,
+      });
+
+      return { id: integration.id };
+    }),
 });

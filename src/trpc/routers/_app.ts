@@ -7,6 +7,7 @@ import { statusPageRouter } from './statuspage';
 import { integrationRouter } from './integration';
 import { logsRouter } from './logs';
 import { settingsRouter } from './settings';
+import { maintenanceRouter } from './maintenance';
 import { helloRouter } from '@/trpc/routers/hello';
 
 export const appRouter = createTRPCRouter({
@@ -18,6 +19,7 @@ export const appRouter = createTRPCRouter({
   integration: integrationRouter,
   logs: logsRouter,
   settings: settingsRouter,
+  maintenance: maintenanceRouter,
 });
 
 // export type definition of API

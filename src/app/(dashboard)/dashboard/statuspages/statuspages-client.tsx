@@ -82,6 +82,7 @@ type FormState = {
   name: string;
   slug: string;
   slugTouched: boolean;
+  customDomain: string;
   description: string;
   logoUrl: string;
   theme: StatusPageTheme;
@@ -98,6 +99,7 @@ function emptyForm(): FormState {
     name: '',
     slug: '',
     slugTouched: false,
+    customDomain: '',
     description: '',
     logoUrl: '',
     theme: 'system',
@@ -135,6 +137,7 @@ function detailToForm(detail: StatusPageDetail): FormState {
     name: detail.name,
     slug: detail.slug,
     slugTouched: true,
+    customDomain: detail.customDomain,
     description: detail.description,
     logoUrl: detail.logoUrl,
     theme: detail.theme,
@@ -298,6 +301,7 @@ export default function StatusPagesClientPage({ initialStatusPages, monitors }: 
     const payload = {
       name: form.name,
       slug: form.slug,
+      customDomain: form.customDomain || undefined,
       description: form.description || undefined,
       logoUrl: form.logoUrl || undefined,
       theme: form.theme,
@@ -478,6 +482,20 @@ export default function StatusPagesClientPage({ initialStatusPages, monitors }: 
                       required
                     />
                   </div>
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="sp-domain">Custom Domain (optional)</Label>
+                  <Input
+                    id="sp-domain"
+                    placeholder="status.example.com"
+                    value={form.customDomain}
+                    onChange={(e) => setForm((prev) => ({ ...prev, customDomain: e.target.value }))}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Point a CNAME (or A record) at wherever this app is hosted, then enter the bare
+                    domain here — no <span className="font-mono">https://</span> or path. TLS for the
+                    domain is handled by your hosting/reverse proxy, not this app.
+                  </p>
                 </div>
                 <div className="grid gap-2">
                   <Label htmlFor="sp-description">Description (optional)</Label>
@@ -813,6 +831,18 @@ export default function StatusPagesClientPage({ initialStatusPages, monitors }: 
                         /status/{page.slug}
                         <ExternalLink className="h-3 w-3 shrink-0" />
                       </a>
+                      {page.customDomain && (
+                        <a
+                          href={`https://${page.customDomain}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-xs text-muted-foreground hover:underline flex items-center gap-1"
+                        >
+                          <Globe className="h-3 w-3 shrink-0" />
+                          {page.customDomain}
+                          <ExternalLink className="h-3 w-3 shrink-0" />
+                        </a>
+                      )}
                     </div>
                   </TableCell>
 

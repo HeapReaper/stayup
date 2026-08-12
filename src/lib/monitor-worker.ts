@@ -7,6 +7,7 @@ import { prisma } from '@/lib/prisma';
 import { logger } from '@/lib/logging';
 import { monitorIntervalEnum, type MonitorInterval, type MonitorStatus, type MonitorType } from '@/trpc/routers/monitor';
 import { ensureIncidentForMonitor, noteMonitorRecovered } from '@/lib/incidents';
+import { isMonitorUnderMaintenance } from '@/lib/maintenance';
 import type { Monitor } from '@prisma/client';
 
 export interface MonitorCheckResult {
@@ -84,6 +85,14 @@ async function syncIncidentForResult(
 ): Promise<void> {
   try {
     if (status === 'Down' || status === 'Degraded') {
+      // A failing check during a scheduled maintenance window is expected —
+      // still recorded as a ping (so uptime history stays honest), but
+      // doesn't open/alert an incident. See src/lib/maintenance.ts.
+      if (await isMonitorUnderMaintenance(monitor.id)) {
+        logger.info(`[${workerLabel}] ${monitor.name} is ${status.toLowerCase()} but under maintenance — skipping incident`);
+        return;
+      }
+
       const detail = failureMessage ? ` (${failureMessage})` : '';
       const incident = await ensureIncidentForMonitor(
         monitor,

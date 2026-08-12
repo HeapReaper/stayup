@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
-import type { Prisma } from '@prisma/client';
-import { createTRPCRouter, protectedProcedure } from '../init';
+import { Prisma } from '@prisma/client';
+import { createTRPCRouter, protectedProcedure, baseProcedure } from '../init';
 import { prisma } from '@/lib/prisma';
 import { logAudit } from '@/lib/audit';
 import {
@@ -40,6 +40,8 @@ export type IncidentUpdateItem = {
 
 export type IncidentDetail = IncidentSummary & {
   updates: IncidentUpdateItem[];
+  postmortem: string | null;
+  postmortemPublishedAt: string | null;
 };
 
 const summaryInclude = {
@@ -123,6 +125,10 @@ export const incidentRouter = createTRPCRouter({
           author: update.author,
           createdAt: update.createdAt.toISOString(),
         })),
+        postmortem: incident.postmortem,
+        postmortemPublishedAt: incident.postmortemPublishedAt
+          ? incident.postmortemPublishedAt.toISOString()
+          : null,
       };
     }),
 
@@ -231,5 +237,75 @@ export const incidentRouter = createTRPCRouter({
       });
 
       return { id: input.id };
+    }),
+
+  /**
+   * Saves the postmortem draft, and optionally publishes it (visible on the
+   * public status page — see statusPage.getPublicBySlug). Publishing is a
+   * one-way switch here: unpublishing would need to clear
+   * postmortemPublishedAt explicitly, which the dashboard UI doesn't expose
+   * (a published postmortem can still be edited in place).
+   */
+  setPostmortem: protectedProcedure
+    .input(
+      z.object({
+        incidentId: z.string(),
+        postmortem: z.string().trim().max(10_000),
+        publish: z.boolean(),
+      }),
+    )
+    .mutation(async ({ input, ctx }) => {
+      const existing = await prisma.incident.findUnique({ where: { id: input.incidentId } });
+      if (!existing) throw new TRPCError({ code: 'NOT_FOUND', message: 'Incident not found' });
+
+      const incident = await prisma.incident.update({
+        where: { id: input.incidentId },
+        data: {
+          postmortem: input.postmortem || null,
+          postmortemPublishedAt: input.publish ? (existing.postmortemPublishedAt ?? new Date()) : existing.postmortemPublishedAt,
+        },
+      });
+
+      await logAudit({
+        actorId: ctx.session.user.id,
+        actorName: ctx.session.user.name,
+        action: input.publish ? 'PUBLISHED_POSTMORTEM' : 'SAVED_POSTMORTEM_DRAFT',
+        target: incident.title,
+        ipAddress: ctx.ipAddress,
+      });
+
+      return {
+        id: incident.id,
+        postmortem: incident.postmortem,
+        postmortemPublishedAt: incident.postmortemPublishedAt ? incident.postmortemPublishedAt.toISOString() : null,
+      };
+    }),
+
+  // -- Public (unauthenticated) procedures, used by src/app/(status) --------
+
+  /**
+   * Self-serve "notify me about this incident" — distinct from
+   * statusPage.subscribe (which subscribes to every incident on a whole
+   * page). Backed by IncidentSubscriber; every postIncidentUpdate() call
+   * emails everyone subscribed here (see src/lib/incidents.ts).
+   */
+  subscribe: baseProcedure
+    .input(z.object({ incidentId: z.string(), email: z.string().trim().email() }))
+    .mutation(async ({ input }) => {
+      const incident = await prisma.incident.findUnique({ where: { id: input.incidentId } });
+      if (!incident) throw new TRPCError({ code: 'NOT_FOUND', message: 'Incident not found' });
+
+      try {
+        await prisma.incidentSubscriber.create({
+          data: { incidentId: input.incidentId, email: input.email },
+        });
+      } catch (error) {
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+          throw new TRPCError({ code: 'CONFLICT', message: 'This email is already subscribed' });
+        }
+        throw error;
+      }
+
+      return { success: true };
     }),
 });

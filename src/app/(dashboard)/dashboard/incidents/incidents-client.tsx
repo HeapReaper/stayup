@@ -14,6 +14,9 @@ import {
   UserCheck,
   Bot,
   MessageSquare,
+  FileText,
+  Save,
+  Globe,
 } from 'lucide-react';
 
 import { useTRPC } from '@/trpc/client';
@@ -165,10 +168,20 @@ export default function IncidentsClientPage({ initialIncidents, monitors }: Inci
   });
   const [updateError, setUpdateError] = React.useState<string | null>(null);
 
+  const [postmortemDraft, setPostmortemDraft] = React.useState('');
+  const [postmortemSaved, setPostmortemSaved] = React.useState(false);
+
   const detailQuery = useQuery({
     ...trpc.incident.getById.queryOptions({ id: selectedIncidentId ?? '' }),
     enabled: selectedIncidentId !== null,
   });
+
+  // Re-sync the draft textarea whenever a different incident is opened (or
+  // its detail finishes loading) — not on every keystroke.
+  React.useEffect(() => {
+    setPostmortemDraft(detailQuery.data?.postmortem ?? '');
+    setPostmortemSaved(false);
+  }, [detailQuery.data?.id]);
 
   const invalidateAll = (incidentId?: string) => {
     queryClient.invalidateQueries({ queryKey: trpc.incident.getAll.queryKey() });
@@ -203,6 +216,15 @@ export default function IncidentsClientPage({ initialIncidents, monitors }: Inci
   const resolveIncident = useMutation(
     trpc.incident.resolve.mutationOptions({
       onSuccess: (_, variables) => invalidateAll(variables.incidentId),
+    }),
+  );
+
+  const setPostmortem = useMutation(
+    trpc.incident.setPostmortem.mutationOptions({
+      onSuccess: () => {
+        invalidateAll(selectedIncidentId ?? undefined);
+        setPostmortemSaved(true);
+      },
     }),
   );
 
@@ -449,6 +471,74 @@ export default function IncidentsClientPage({ initialIncidents, monitors }: Inci
                     ))}
                   </ol>
                 )}
+
+                <div className="border-t pt-4 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <Label htmlFor="postmortem" className="flex items-center gap-1.5">
+                      <FileText className="h-3.5 w-3.5" />
+                      Post-mortem
+                    </Label>
+                    {detail.postmortemPublishedAt ? (
+                      <Badge
+                        variant="secondary"
+                        className="bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/20 gap-1 text-[10px]"
+                      >
+                        <Globe className="h-3 w-3" />
+                        Published
+                      </Badge>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">Draft — dashboard only</span>
+                    )}
+                  </div>
+                  <Textarea
+                    id="postmortem"
+                    placeholder="Root cause, timeline, and lessons learned..."
+                    value={postmortemDraft}
+                    onChange={(e) => {
+                      setPostmortemDraft(e.target.value);
+                      setPostmortemSaved(false);
+                    }}
+                    rows={4}
+                  />
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="gap-1.5"
+                      disabled={setPostmortem.isPending}
+                      onClick={() =>
+                        setPostmortem.mutate({
+                          incidentId: detail.id,
+                          postmortem: postmortemDraft,
+                          publish: false,
+                        })
+                      }
+                    >
+                      <Save className="h-3.5 w-3.5" />
+                      Save Draft
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="gap-1.5"
+                      disabled={setPostmortem.isPending || !postmortemDraft.trim()}
+                      onClick={() =>
+                        setPostmortem.mutate({
+                          incidentId: detail.id,
+                          postmortem: postmortemDraft,
+                          publish: true,
+                        })
+                      }
+                    >
+                      <Globe className="h-3.5 w-3.5" />
+                      {detail.postmortemPublishedAt ? 'Update Published' : 'Publish to Status Page'}
+                    </Button>
+                    {postmortemSaved && !setPostmortem.isPending && (
+                      <span className="text-xs text-emerald-600 dark:text-emerald-400">Saved</span>
+                    )}
+                  </div>
+                </div>
               </div>
 
               <SheetFooter>

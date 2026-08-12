@@ -179,6 +179,7 @@ and opening/updating an incident when a monitor goes Down/Degraded, all live onc
 | `src/workers/https.ts` | `HTTP` | `fetch()`s the URL |
 | `src/workers/port.ts` | `Port` | Raw TCP connect to `host:port` |
 | `src/workers/ping.ts` | `Ping` | Shells out to the OS `ping` binary (Node has no built-in ICMP — see comments in the file) |
+| `src/workers/dns.ts` | `DNS` | Resolves the hostname's A record(s) via `node:dns/promises` |
 
 The Settings page's Monitoring Defaults tab (request timeout, latency threshold) is read live by each of
 these on every check via `src/lib/settings.ts`'s `getSettings()` — save a new value there and it applies on
@@ -195,11 +196,13 @@ Run them all with:
 npm run worker:https
 npm run worker:port
 npm run worker:ping
+npm run worker:dns
 npm run worker:integrations
 # or, to auto-restart on file changes during development:
 npm run worker:https:watch
 npm run worker:port:watch
 npm run worker:ping:watch
+npm run worker:dns:watch
 npm run worker:integrations:watch
 ```
 

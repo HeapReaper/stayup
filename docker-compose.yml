@@ -1,4 +1,4 @@
-# Runs the whole stack: Postgres, Redis, the Next.js app, and all four
+# Runs the whole stack: Postgres, Redis, the Next.js app, and all five
 # monitor-check/notification workers.
 #
 # Quick start:
@@ -12,7 +12,7 @@
 #
 # No dedicated one-shot `migrate` service on purpose: each service below runs
 # `prisma migrate deploy` itself before its actual command. That's safe to do
-# from all 5 containers at once — Prisma serializes concurrent `migrate
+# from all 6 containers at once — Prisma serializes concurrent `migrate
 # deploy` calls with a DB-level advisory lock, so whichever gets there first
 # applies the migrations and the rest just see "already up to date". This
 # used to be one shared `migrate` service that everything else waited on via
@@ -85,6 +85,10 @@ services:
     cap_add:
       - NET_RAW
     command: ["sh", "-c", "npx prisma migrate deploy && npx tsx src/workers/ping.ts"]
+
+  worker-dns:
+    <<: *app
+    command: ["sh", "-c", "npx prisma migrate deploy && npx tsx src/workers/dns.ts"]
 
   worker-integrations:
     <<: *app

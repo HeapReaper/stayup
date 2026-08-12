@@ -6,6 +6,7 @@
 import { logger } from '@/lib/logging';
 import { sendEmail } from '@/lib/email';
 import { sendDiscordWebhook } from '@/lib/discord';
+import { sendPushNotification, InvalidPushSubscriptionError } from '@/lib/push';
 import IntegrationAlertEmail from '@/emails/integration-alert-email';
 
 // Deliberately not importing the `Integration` model type from
@@ -76,6 +77,18 @@ export async function deliverToIntegration(
           react: IntegrationAlertEmail({ subject, message }),
         });
         return result.success ? { success: true } : { success: false, error: 'Email send failed' };
+      }
+
+      case 'Push': {
+        try {
+          await sendPushNotification(integration.target, { title: subject, body: message });
+          return { success: true };
+        } catch (error) {
+          if (error instanceof InvalidPushSubscriptionError) {
+            return { success: false, error: 'This browser subscription is no longer valid — reconnect it' };
+          }
+          throw error;
+        }
       }
 
       case 'PagerDuty': {
