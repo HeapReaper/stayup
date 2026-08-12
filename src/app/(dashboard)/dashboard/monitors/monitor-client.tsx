@@ -38,14 +38,13 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from '@/components/ui/dialog';
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet';
 import { Label } from '@/components/ui/label';
 import {
   Select,
@@ -86,13 +85,15 @@ const MONITOR_INTERVAL_LABELS: Record<MonitorInterval, string> = {
   '5m': 'Every 5 min',
 };
 
-const emptyForm: MonitorFormState = {
-  name: '',
-  url: '',
-  type: 'HTTP',
-  interval: '60s',
-  port: '',
-};
+function emptyForm(): MonitorFormState {
+  return {
+    name: '',
+    url: '',
+    type: 'HTTP',
+    interval: '60s',
+    port: '',
+  };
+}
 
 function monitorToForm(monitor: Monitor): MonitorFormState {
   return {
@@ -122,26 +123,28 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
   const [searchQuery, setSearchQuery] = React.useState('');
   const [statusFilter, setStatusFilter] = React.useState('all');
 
-  const [isAddOpen, setIsAddOpen] = React.useState(false);
-  const [addForm, setAddForm] = React.useState<MonitorFormState>(emptyForm);
-  const [addError, setAddError] = React.useState<string | null>(null);
-
-  const [editingMonitor, setEditingMonitor] = React.useState<Monitor | null>(null);
-  const [editForm, setEditForm] = React.useState<MonitorFormState>(emptyForm);
-  const [editError, setEditError] = React.useState<string | null>(null);
+  const [isFormOpen, setIsFormOpen] = React.useState(false);
+  const [editingId, setEditingId] = React.useState<string | null>(null);
+  const [form, setForm] = React.useState<MonitorFormState>(emptyForm());
+  const [formError, setFormError] = React.useState<string | null>(null);
 
   const invalidateMonitors = () =>
     queryClient.invalidateQueries({ queryKey: trpc.monitor.getAll.queryKey() });
+
+  const closeForm = () => {
+    setIsFormOpen(false);
+    setEditingId(null);
+    setForm(emptyForm());
+    setFormError(null);
+  };
 
   const createMonitor = useMutation(
     trpc.monitor.create.mutationOptions({
       onSuccess: () => {
         invalidateMonitors();
-        setAddForm(emptyForm);
-        setAddError(null);
-        setIsAddOpen(false);
+        closeForm();
       },
-      onError: (error) => setAddError(error.message),
+      onError: (error) => setFormError(error.message),
     }),
   );
 
@@ -149,10 +152,9 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
     trpc.monitor.update.mutationOptions({
       onSuccess: () => {
         invalidateMonitors();
-        setEditError(null);
-        setEditingMonitor(null);
+        closeForm();
       },
-      onError: (error) => setEditError(error.message),
+      onError: (error) => setFormError(error.message),
     }),
   );
 
@@ -174,37 +176,37 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
     return matchesSearch && matchesStatus;
   });
 
-  const handleAddMonitor = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!addForm.name || !addForm.url) return;
-
-    createMonitor.mutate({
-      name: addForm.name,
-      url: addForm.url,
-      type: addForm.type,
-      interval: addForm.interval,
-      port: addForm.type === 'Port' ? Number(addForm.port) : undefined,
-    });
+  const openCreate = () => {
+    setEditingId(null);
+    setForm(emptyForm());
+    setFormError(null);
+    setIsFormOpen(true);
   };
 
-  const openEditDialog = (monitor: Monitor) => {
-    setEditingMonitor(monitor);
-    setEditForm(monitorToForm(monitor));
-    setEditError(null);
+  const openEdit = (monitor: Monitor) => {
+    setEditingId(monitor.id);
+    setForm(monitorToForm(monitor));
+    setFormError(null);
+    setIsFormOpen(true);
   };
 
-  const handleEditMonitor = (e: React.FormEvent) => {
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingMonitor || !editForm.name || !editForm.url) return;
+    if (!form.name || !form.url) return;
 
-    updateMonitor.mutate({
-      id: editingMonitor.id,
-      name: editForm.name,
-      url: editForm.url,
-      type: editForm.type,
-      interval: editForm.interval,
-      port: editForm.type === 'Port' ? Number(editForm.port) : undefined,
-    });
+    const payload = {
+      name: form.name,
+      url: form.url,
+      type: form.type,
+      interval: form.interval,
+      port: form.type === 'Port' ? Number(form.port) : undefined,
+    };
+
+    if (editingId) {
+      updateMonitor.mutate({ id: editingId, ...payload });
+    } else {
+      createMonitor.mutate(payload);
+    }
   };
 
   const handleDeleteMonitor = (id: string) => {
@@ -219,6 +221,8 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
     }
   };
 
+  const isSaving = createMonitor.isPending || updateMonitor.isPending;
+
   return (
     <div className="space-y-6">
       {/* Header & Actions */}
@@ -230,175 +234,61 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
           </p>
         </div>
 
-        {/* Modal for new monitor */}
-        <Dialog open={isAddOpen} onOpenChange={(open) => {
-          setIsAddOpen(open);
-          if (!open) {
-            setAddForm(emptyForm);
-            setAddError(null);
-          }
-        }}>
-          <DialogTrigger
-            render={
-              <Button className="gap-2">
-                <Plus className="h-4 w-4" />
-                Monitor
-              </Button>
-            }
-          />
-          <DialogContent className="sm:max-w-[425px]">
-            <form onSubmit={handleAddMonitor}>
-              <DialogHeader>
-                <DialogTitle>Add new monitor</DialogTitle>
-                <DialogDescription>
-                  Configure a new endpoint to continuously test availability and performance.
-                </DialogDescription>
-              </DialogHeader>
-              <div className="grid gap-4 py-4">
-                <div className="grid gap-2">
-                  <Label htmlFor="name">Name</Label>
-                  <Input
-                    id="name"
-                    placeholder="Ex. Production API"
-                    value={addForm.name}
-                    onChange={(e) => setAddForm({ ...addForm, name: e.target.value })}
-                    required
-                  />
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="url">URL, host or IP address</Label>
-                  <Input
-                    id="url"
-                    placeholder="https://api.example.com/health"
-                    value={addForm.url}
-                    onChange={(e) => setAddForm({ ...addForm, url: e.target.value })}
-                    required
-                  />
-                </div>
-
-                {addForm.type === 'Port' && (
-                  <div className="grid gap-2">
-                    <Label htmlFor="port">Port</Label>
-                    <Input
-                      id="port"
-                      type="number"
-                      min={1}
-                      max={65535}
-                      placeholder="80"
-                      value={addForm.port}
-                      onChange={(e) => setAddForm({ ...addForm, port: e.target.value })}
-                      required
-                    />
-                  </div>
-                )}
-
-                <div className="grid sm:grid-cols-2 gap-4">
-                  <div className="grid gap-2">
-                    <Label htmlFor="type">Type</Label>
-                    <Select
-                      value={addForm.type}
-                      onValueChange={(val) => {
-                        if (val) setAddForm({ ...addForm, type: val as MonitorType });
-                      }}
-                    >
-                      <SelectTrigger id="type">
-                        <SelectValue>{(val: MonitorType) => MONITOR_TYPE_LABELS[val]}</SelectValue>
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="HTTP">HTTP(s)</SelectItem>
-                        <SelectItem value="Ping">Ping</SelectItem>
-                        <SelectItem value="Port">Port</SelectItem>
-                        <SelectItem value="DNS">DNS</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="interval">Interval</Label>
-                    <Select
-                      value={addForm.interval}
-                      onValueChange={(val) => {
-                        if (val) setAddForm({ ...addForm, interval: val as MonitorInterval });
-                      }}
-                    >
-                      <SelectTrigger id="interval">
-                        <SelectValue>{(val: MonitorInterval) => MONITOR_INTERVAL_LABELS[val]}</SelectValue>
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="15s">Every 15 sec</SelectItem>
-                        <SelectItem value="30s">Every 30 sec</SelectItem>
-                        <SelectItem value="60s">Every minute</SelectItem>
-                        <SelectItem value="5m">Every 5 min</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </div>
-
-                {addError && <p className="text-sm text-destructive">{addError}</p>}
-              </div>
-              <DialogFooter>
-                <Button type="button" variant="outline" onClick={() => setIsAddOpen(false)}>
-                  Cancel
-                </Button>
-                <Button type="submit" disabled={createMonitor.isPending}>
-                  {createMonitor.isPending ? 'Saving…' : 'Save & Start'}
-                </Button>
-              </DialogFooter>
-            </form>
-          </DialogContent>
-        </Dialog>
+        <Button className="gap-2" onClick={openCreate}>
+          <Plus className="h-4 w-4" />
+          Monitor
+        </Button>
       </div>
 
-      {/* Edit monitor modal */}
-      <Dialog
-        open={editingMonitor !== null}
+      {/* Add/Edit Sheet */}
+      <Sheet
+        open={isFormOpen}
         onOpenChange={(open) => {
-          if (!open) {
-            setEditingMonitor(null);
-            setEditError(null);
-          }
+          if (!open) closeForm();
         }}
       >
-        <DialogContent className="sm:max-w-[425px]">
-          <form onSubmit={handleEditMonitor}>
-            <DialogHeader>
-              <DialogTitle>Edit monitor</DialogTitle>
-              <DialogDescription>
-                Update the configuration for this endpoint.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="grid gap-4 py-4">
+        <SheetContent side="right" className="sm:max-w-md w-full">
+          <SheetHeader>
+            <SheetTitle>{editingId ? 'Edit Monitor' : 'Add New Monitor'}</SheetTitle>
+            <SheetDescription>
+              Configure an endpoint to continuously test availability and performance.
+            </SheetDescription>
+          </SheetHeader>
+
+          <form onSubmit={handleSubmit} className="flex-1 flex flex-col min-h-0">
+            <div className="flex-1 overflow-y-auto px-4 space-y-4">
               <div className="grid gap-2">
-                <Label htmlFor="edit-name">Name</Label>
+                <Label htmlFor="name">Name</Label>
                 <Input
-                  id="edit-name"
+                  id="name"
                   placeholder="Ex. Production API"
-                  value={editForm.name}
-                  onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
+                  value={form.name}
+                  onChange={(e) => setForm({ ...form, name: e.target.value })}
                   required
                 />
               </div>
               <div className="grid gap-2">
-                <Label htmlFor="edit-url">URL, host or IP address</Label>
+                <Label htmlFor="url">URL, host or IP address</Label>
                 <Input
-                  id="edit-url"
+                  id="url"
                   placeholder="https://api.example.com/health"
-                  value={editForm.url}
-                  onChange={(e) => setEditForm({ ...editForm, url: e.target.value })}
+                  value={form.url}
+                  onChange={(e) => setForm({ ...form, url: e.target.value })}
                   required
                 />
               </div>
 
-              {editForm.type === 'Port' && (
+              {form.type === 'Port' && (
                 <div className="grid gap-2">
-                  <Label htmlFor="edit-port">Port</Label>
+                  <Label htmlFor="port">Port</Label>
                   <Input
-                    id="edit-port"
+                    id="port"
                     type="number"
                     min={1}
                     max={65535}
                     placeholder="80"
-                    value={editForm.port}
-                    onChange={(e) => setEditForm({ ...editForm, port: e.target.value })}
+                    value={form.port}
+                    onChange={(e) => setForm({ ...form, port: e.target.value })}
                     required
                   />
                 </div>
@@ -406,14 +296,14 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
 
               <div className="grid sm:grid-cols-2 gap-4">
                 <div className="grid gap-2">
-                  <Label htmlFor="edit-type">Type</Label>
+                  <Label htmlFor="type">Type</Label>
                   <Select
-                    value={editForm.type}
+                    value={form.type}
                     onValueChange={(val) => {
-                      if (val) setEditForm({ ...editForm, type: val as MonitorType });
+                      if (val) setForm({ ...form, type: val as MonitorType });
                     }}
                   >
-                    <SelectTrigger id="edit-type">
+                    <SelectTrigger id="type">
                       <SelectValue>{(val: MonitorType) => MONITOR_TYPE_LABELS[val]}</SelectValue>
                     </SelectTrigger>
                     <SelectContent>
@@ -425,14 +315,14 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                   </Select>
                 </div>
                 <div className="grid gap-2">
-                  <Label htmlFor="edit-interval">Interval</Label>
+                  <Label htmlFor="interval">Interval</Label>
                   <Select
-                    value={editForm.interval}
+                    value={form.interval}
                     onValueChange={(val) => {
-                      if (val) setEditForm({ ...editForm, interval: val as MonitorInterval });
+                      if (val) setForm({ ...form, interval: val as MonitorInterval });
                     }}
                   >
-                    <SelectTrigger id="edit-interval">
+                    <SelectTrigger id="interval">
                       <SelectValue>{(val: MonitorInterval) => MONITOR_INTERVAL_LABELS[val]}</SelectValue>
                     </SelectTrigger>
                     <SelectContent>
@@ -445,19 +335,22 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                 </div>
               </div>
 
-              {editError && <p className="text-sm text-destructive">{editError}</p>}
+              {formError && <p className="text-sm text-destructive">{formError}</p>}
             </div>
-            <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setEditingMonitor(null)}>
-                Cancel
-              </Button>
-              <Button type="submit" disabled={updateMonitor.isPending}>
-                {updateMonitor.isPending ? 'Saving…' : 'Save changes'}
-              </Button>
-            </DialogFooter>
+
+            <SheetFooter>
+              <div className="flex gap-2 w-full">
+                <Button type="button" variant="outline" className="flex-1" onClick={closeForm}>
+                  Cancel
+                </Button>
+                <Button type="submit" className="flex-1" disabled={isSaving}>
+                  {isSaving ? 'Saving…' : editingId ? 'Save Changes' : 'Save & Start'}
+                </Button>
+              </div>
+            </SheetFooter>
           </form>
-        </DialogContent>
-      </Dialog>
+        </SheetContent>
+      </Sheet>
 
       {/* Search & Status Tabs */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -596,7 +489,7 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                             <Copy className="mr-2 h-4 w-4" />
                             Copy URL
                           </DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => openEditDialog(monitor)}>
+                          <DropdownMenuItem onClick={() => openEdit(monitor)}>
                             <Pencil className="mr-2 h-4 w-4" />
                             Edit
                           </DropdownMenuItem>

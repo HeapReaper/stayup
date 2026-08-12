@@ -41,14 +41,13 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from '@/components/ui/dialog';
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet';
 import { Label } from '@/components/ui/label';
 import {
   Select,
@@ -268,101 +267,103 @@ export default function IntegrationsClientPage({ initialIntegrations }: Integrat
           </p>
         </div>
 
-        <Dialog
-          open={isFormOpen}
-          onOpenChange={(open) => {
-            if (!open) closeForm();
-          }}
-        >
-          <DialogTrigger
-            render={
-              <Button className="gap-2" onClick={openCreate}>
-                <Plus className="h-4 w-4" />
-                Add Integration
-              </Button>
-            }
-          />
-          <DialogContent className="sm:max-w-[485px]">
-            <form onSubmit={handleSubmit}>
-              <DialogHeader>
-                <DialogTitle>{editingId ? 'Edit Notification Channel' : 'Set Up Notification Channel'}</DialogTitle>
-                <DialogDescription>
-                  Select a platform and provide the required Webhook URL or identifier. Every incident report
-                  and update is sent to every enabled channel below.
-                </DialogDescription>
-              </DialogHeader>
-              <div className="grid gap-4 py-4">
-                <div className="grid gap-2">
-                  <Label htmlFor="name">Name / Description</Label>
-                  <Input
-                    id="name"
-                    placeholder="e.g. Discord #alerts channel"
-                    value={form.name}
-                    onChange={(e) => setForm({ ...form, name: e.target.value })}
-                    required
-                  />
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="type">Platform / Type</Label>
-                  <Select
-                    value={form.type}
-                    onValueChange={(val) => {
-                      if (val) setForm({ ...form, type: val as IntegrationType });
-                    }}
-                  >
-                    <SelectTrigger id="type">
-                      <SelectValue>{(val: IntegrationType) => TYPE_LABELS[val]}</SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      {(Object.keys(TYPE_LABELS) as IntegrationType[]).map((type) => (
-                        <SelectItem key={type} value={type}>
-                          {TYPE_LABELS[type]}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="target">{targetLabel(form.type)}</Label>
-                  <Input
-                    id="target"
-                    placeholder={targetPlaceholder(form.type)}
-                    value={form.target}
-                    onChange={(e) => setForm({ ...form, target: e.target.value })}
-                    required
-                  />
-                </div>
-                {form.type === 'Telegram' && (
-                  <div className="grid gap-2">
-                    <Label htmlFor="secret">Bot Token</Label>
-                    <Input
-                      id="secret"
-                      type="password"
-                      placeholder={editingId ? 'Leave blank to keep the current token' : '123456:ABC-DEF...'}
-                      value={form.secret}
-                      onChange={(e) => setForm({ ...form, secret: e.target.value })}
-                      required={!editingId}
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      From @BotFather. The chat above must have started a conversation with the bot.
-                    </p>
-                  </div>
-                )}
+        <Button className="gap-2" onClick={openCreate}>
+          <Plus className="h-4 w-4" />
+          Add Integration
+        </Button>
+      </div>
 
-                {formError && <p className="text-sm text-destructive">{formError}</p>}
+      {/* Add/Edit Sheet */}
+      <Sheet
+        open={isFormOpen}
+        onOpenChange={(open) => {
+          if (!open) closeForm();
+        }}
+      >
+        <SheetContent side="right" className="sm:max-w-md w-full">
+          <SheetHeader>
+            <SheetTitle>{editingId ? 'Edit Notification Channel' : 'Set Up Notification Channel'}</SheetTitle>
+            <SheetDescription>
+              Select a platform and provide the required Webhook URL or identifier. Every incident report
+              and update is sent to every enabled channel below.
+            </SheetDescription>
+          </SheetHeader>
+
+          <form onSubmit={handleSubmit} className="flex-1 flex flex-col min-h-0">
+            <div className="flex-1 overflow-y-auto px-4 space-y-4">
+              <div className="grid gap-2">
+                <Label htmlFor="name">Name / Description</Label>
+                <Input
+                  id="name"
+                  placeholder="e.g. Discord #alerts channel"
+                  value={form.name}
+                  onChange={(e) => setForm({ ...form, name: e.target.value })}
+                  required
+                />
               </div>
-              <DialogFooter>
-                <Button type="button" variant="outline" onClick={closeForm}>
+              <div className="grid gap-2">
+                <Label htmlFor="type">Platform / Type</Label>
+                <Select
+                  value={form.type}
+                  onValueChange={(val) => {
+                    if (val) setForm({ ...form, type: val as IntegrationType });
+                  }}
+                >
+                  <SelectTrigger id="type">
+                    <SelectValue>{(val: IntegrationType) => TYPE_LABELS[val]}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(Object.keys(TYPE_LABELS) as IntegrationType[]).map((type) => (
+                      <SelectItem key={type} value={type}>
+                        {TYPE_LABELS[type]}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="target">{targetLabel(form.type)}</Label>
+                <Input
+                  id="target"
+                  placeholder={targetPlaceholder(form.type)}
+                  value={form.target}
+                  onChange={(e) => setForm({ ...form, target: e.target.value })}
+                  required
+                />
+              </div>
+              {form.type === 'Telegram' && (
+                <div className="grid gap-2">
+                  <Label htmlFor="secret">Bot Token</Label>
+                  <Input
+                    id="secret"
+                    type="password"
+                    placeholder={editingId ? 'Leave blank to keep the current token' : '123456:ABC-DEF...'}
+                    value={form.secret}
+                    onChange={(e) => setForm({ ...form, secret: e.target.value })}
+                    required={!editingId}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    From @BotFather. The chat above must have started a conversation with the bot.
+                  </p>
+                </div>
+              )}
+
+              {formError && <p className="text-sm text-destructive">{formError}</p>}
+            </div>
+
+            <SheetFooter>
+              <div className="flex gap-2 w-full">
+                <Button type="button" variant="outline" className="flex-1" onClick={closeForm}>
                   Cancel
                 </Button>
-                <Button type="submit" disabled={isSaving}>
+                <Button type="submit" className="flex-1" disabled={isSaving}>
                   {isSaving ? 'Saving…' : editingId ? 'Save Changes' : 'Save & Connect'}
                 </Button>
-              </DialogFooter>
-            </form>
-          </DialogContent>
-        </Dialog>
-      </div>
+              </div>
+            </SheetFooter>
+          </form>
+        </SheetContent>
+      </Sheet>
 
       {/* Search Bar */}
       <div className="relative w-full sm:w-80">
