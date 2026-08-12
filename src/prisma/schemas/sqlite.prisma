@@ -326,7 +326,7 @@ model AppSettings {
   defaultCheckInterval     String   @default("60s") // 15s | 30s | 60s | 5m
   httpTimeoutSeconds       Int      @default(30)
   failedAttemptsThreshold  Int      @default(1)
-  latencyThresholdMs       Int      @default(800)
+  latencyThresholdMs       Int      @default(2000)
   sslCheckEnabled          Boolean  @default(true)
   certExpiryWarningEnabled Boolean  @default(true)
   smtpHost                 String?
