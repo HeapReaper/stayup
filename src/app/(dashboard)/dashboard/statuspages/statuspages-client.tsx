@@ -17,6 +17,8 @@ import {
   Users,
   Copy,
   X,
+  ChevronUp,
+  ChevronDown,
 } from 'lucide-react';
 
 import { useTRPC } from '@/trpc/client';
@@ -62,6 +64,7 @@ import {
   Select,
   SelectContent,
   SelectItem,
+  SelectSeparator,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
@@ -73,6 +76,7 @@ interface StatusPagesClientPageProps {
 }
 
 const UNGROUPED = -1;
+const REMOVE_FROM_PAGE = 'remove';
 
 type FormState = {
   name: string;
@@ -85,7 +89,8 @@ type FormState = {
   historyWindowDays: HistoryWindowDays;
   isPublished: boolean;
   groupNames: string[];
-  assignment: Record<string, number>; // monitorId -> group index, or UNGROUPED
+  assignment: Record<string, number>; // monitorId -> group index, or UNGROUPED. Absent = not on the page.
+  order: string[]; // monitorIds in display order; relative order within a group is what's saved
 };
 
 function emptyForm(): FormState {
@@ -101,6 +106,7 @@ function emptyForm(): FormState {
     isPublished: true,
     groupNames: [],
     assignment: {},
+    order: [],
   };
 }
 
@@ -115,11 +121,13 @@ function slugify(value: string) {
 function detailToForm(detail: StatusPageDetail): FormState {
   const groupNames = detail.groups.filter((g) => g.name !== null).map((g) => g.name as string);
   const assignment: Record<string, number> = {};
+  const order: string[] = [];
 
   detail.groups.forEach((group) => {
     const index = group.name === null ? UNGROUPED : groupNames.indexOf(group.name);
     for (const monitorId of group.monitorIds) {
       assignment[monitorId] = index;
+      order.push(monitorId);
     }
   });
 
@@ -135,6 +143,7 @@ function detailToForm(detail: StatusPageDetail): FormState {
     isPublished: detail.isPublished,
     groupNames,
     assignment,
+    order,
   };
 }
 
@@ -144,7 +153,16 @@ function formToGroups(form: FormState) {
     ...form.groupNames.map((name) => ({ name, monitorIds: [] as string[] })),
   ];
 
-  for (const [monitorId, index] of Object.entries(form.assignment)) {
+  // Walk monitors in display order so each group's saved monitorIds keep the
+  // order the user arranged them in; any assigned monitor missing from
+  // `order` (shouldn't normally happen) is appended at the end.
+  const orderedIds = [
+    ...form.order.filter((id) => id in form.assignment),
+    ...Object.keys(form.assignment).filter((id) => !form.order.includes(id)),
+  ];
+
+  for (const monitorId of orderedIds) {
+    const index = form.assignment[monitorId];
     const bucket = index === UNGROUPED ? groups[0] : groups[index + 1];
     if (bucket) bucket.monitorIds.push(monitorId);
   }
@@ -317,7 +335,63 @@ export default function StatusPagesClientPage({ initialStatusPages, monitors }: 
     });
 
   const assignMonitor = (monitorId: string, groupIndex: number) =>
-    setForm((prev) => ({ ...prev, assignment: { ...prev.assignment, [monitorId]: groupIndex } }));
+    setForm((prev) => ({
+      ...prev,
+      assignment: { ...prev.assignment, [monitorId]: groupIndex },
+      // Newly assigned monitors land at the end of their group; existing
+      // members keep their spot in `order` so this doesn't reorder anyone.
+      order: prev.order.includes(monitorId) ? prev.order : [...prev.order, monitorId],
+    }));
+
+  const removeMonitorFromPage = (monitorId: string) =>
+    setForm((prev) => {
+      const assignment = { ...prev.assignment };
+      delete assignment[monitorId];
+      return { ...prev, assignment, order: prev.order.filter((id) => id !== monitorId) };
+    });
+
+  const moveMonitorInGroup = (monitorId: string, direction: -1 | 1) =>
+    setForm((prev) => {
+      const groupIndex = prev.assignment[monitorId];
+      if (groupIndex === undefined) return prev;
+
+      const siblingIds = prev.order.filter((id) => prev.assignment[id] === groupIndex);
+      const pos = siblingIds.indexOf(monitorId);
+      const swapPos = pos + direction;
+      if (pos === -1 || swapPos < 0 || swapPos >= siblingIds.length) return prev;
+
+      const otherId = siblingIds[swapPos];
+      const order = [...prev.order];
+      const i1 = order.indexOf(monitorId);
+      const i2 = order.indexOf(otherId);
+      [order[i1], order[i2]] = [order[i2], order[i1]];
+
+      return { ...prev, order };
+    });
+
+  const assignedMonitorGroups = React.useMemo(() => {
+    const monitorsById = new Map(monitors.map((m) => [m.id, m] as const));
+    const buckets: { index: number; name: string; monitors: Monitor[] }[] = [
+      { index: UNGROUPED, name: 'Ungrouped', monitors: [] },
+      ...form.groupNames.map((name, index) => ({ index, name: name || `Group ${index + 1}`, monitors: [] })),
+    ];
+    const bucketByIndex = new Map(buckets.map((b) => [b.index, b]));
+
+    const orderedIds = [
+      ...form.order.filter((id) => id in form.assignment),
+      ...Object.keys(form.assignment).filter((id) => !form.order.includes(id)),
+    ];
+
+    for (const id of orderedIds) {
+      const monitor = monitorsById.get(id);
+      const bucket = bucketByIndex.get(form.assignment[id]);
+      if (monitor && bucket) bucket.monitors.push(monitor);
+    }
+
+    return buckets.filter((b) => b.monitors.length > 0);
+  }, [monitors, form.order, form.assignment, form.groupNames]);
+
+  const unassignedMonitors = monitors.filter((m) => form.assignment[m.id] === undefined);
 
   const filteredPages = statusPages.filter((page) => {
     const matchesSearch =
@@ -544,50 +618,122 @@ export default function StatusPagesClientPage({ initialStatusPages, monitors }: 
               </div>
 
               {/* Monitors */}
-              <div className="space-y-3">
-                <h3 className="text-sm font-semibold">Monitors</h3>
+              <div className="space-y-4">
+                <div>
+                  <h3 className="text-sm font-semibold">Monitors</h3>
+                  <p className="text-xs text-muted-foreground">
+                    Use the arrows to set the order monitors appear in on the page.
+                  </p>
+                </div>
                 {monitors.length === 0 ? (
                   <p className="text-xs text-muted-foreground">
                     No monitors yet — create one on the Monitors page first.
                   </p>
                 ) : (
-                  <div className="border rounded-lg divide-y">
-                    {monitors.map((monitor) => (
-                      <div key={monitor.id} className="flex items-center justify-between gap-3 p-3">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <span className="text-sm font-medium truncate">{monitor.name}</span>
-                          <Badge variant="outline" className="text-[10px] px-1 py-0 h-4 shrink-0">
-                            {monitor.type}
-                          </Badge>
-                        </div>
-                        <Select
-                          value={String(form.assignment[monitor.id] ?? UNGROUPED)}
-                          onValueChange={(val) => {
-                            if (val !== null && val !== undefined) assignMonitor(monitor.id, Number(val));
-                          }}
-                        >
-                          <SelectTrigger className="w-44 shrink-0">
-                            <SelectValue>
-                              {(val: string) => {
-                                const index = Number(val);
-                                return index === UNGROUPED
-                                  ? 'Not on this page'
-                                  : form.groupNames[index] || `Group ${index + 1}`;
-                              }}
-                            </SelectValue>
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value={String(UNGROUPED)}>Not on this page</SelectItem>
-                            {form.groupNames.map((name, index) => (
-                              <SelectItem key={index} value={String(index)}>
-                                {name || `Group ${index + 1}`}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
+                  <>
+                    {assignedMonitorGroups.length > 0 && (
+                      <div className="space-y-3">
+                        {assignedMonitorGroups.map((bucket) => (
+                          <div key={bucket.index} className="space-y-1.5">
+                            <p className="text-xs font-medium text-muted-foreground">{bucket.name}</p>
+                            <div className="border rounded-lg divide-y">
+                              {bucket.monitors.map((monitor, i) => (
+                                <div key={monitor.id} className="flex items-center gap-2 p-2.5">
+                                  <div className="flex flex-col shrink-0">
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="icon"
+                                      className="h-4 w-6"
+                                      disabled={i === 0}
+                                      onClick={() => moveMonitorInGroup(monitor.id, -1)}
+                                    >
+                                      <ChevronUp className="h-3.5 w-3.5" />
+                                      <span className="sr-only">Move up</span>
+                                    </Button>
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="icon"
+                                      className="h-4 w-6"
+                                      disabled={i === bucket.monitors.length - 1}
+                                      onClick={() => moveMonitorInGroup(monitor.id, 1)}
+                                    >
+                                      <ChevronDown className="h-3.5 w-3.5" />
+                                      <span className="sr-only">Move down</span>
+                                    </Button>
+                                  </div>
+                                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                                    <span className="text-sm font-medium truncate">{monitor.name}</span>
+                                    <Badge variant="outline" className="text-[10px] px-1 py-0 h-4 shrink-0">
+                                      {monitor.type}
+                                    </Badge>
+                                  </div>
+                                  <Select
+                                    value={String(form.assignment[monitor.id] ?? UNGROUPED)}
+                                    onValueChange={(val) => {
+                                      if (val === null || val === undefined) return;
+                                      if (val === REMOVE_FROM_PAGE) removeMonitorFromPage(monitor.id);
+                                      else assignMonitor(monitor.id, Number(val));
+                                    }}
+                                  >
+                                    <SelectTrigger className="w-40 shrink-0">
+                                      <SelectValue>
+                                        {(val: string) => {
+                                          const index = Number(val);
+                                          return index === UNGROUPED
+                                            ? 'Ungrouped'
+                                            : form.groupNames[index] || `Group ${index + 1}`;
+                                        }}
+                                      </SelectValue>
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      <SelectItem value={String(UNGROUPED)}>Ungrouped</SelectItem>
+                                      {form.groupNames.map((name, index) => (
+                                        <SelectItem key={index} value={String(index)}>
+                                          {name || `Group ${index + 1}`}
+                                        </SelectItem>
+                                      ))}
+                                      <SelectSeparator />
+                                      <SelectItem value={REMOVE_FROM_PAGE}>Remove from page</SelectItem>
+                                    </SelectContent>
+                                  </Select>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
                       </div>
-                    ))}
-                  </div>
+                    )}
+
+                    {unassignedMonitors.length > 0 && (
+                      <div className="space-y-1.5">
+                        <p className="text-xs font-medium text-muted-foreground">Not on this page</p>
+                        <div className="border rounded-lg divide-y">
+                          {unassignedMonitors.map((monitor) => (
+                            <div key={monitor.id} className="flex items-center justify-between gap-3 p-2.5">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className="text-sm font-medium truncate">{monitor.name}</span>
+                                <Badge variant="outline" className="text-[10px] px-1 py-0 h-4 shrink-0">
+                                  {monitor.type}
+                                </Badge>
+                              </div>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="gap-1.5 shrink-0"
+                                onClick={() => assignMonitor(monitor.id, UNGROUPED)}
+                              >
+                                <Plus className="h-3.5 w-3.5" />
+                                Add
+                              </Button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
 
