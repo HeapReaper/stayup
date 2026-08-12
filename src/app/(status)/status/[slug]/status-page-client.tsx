@@ -27,6 +27,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import AutoRefresh from '@/components/core/autoRefresh';
 
 interface StatusPageClientProps {
   slug: string;
@@ -97,6 +98,7 @@ function UptimeHeatmap({ monitor }: { monitor: PublicMonitorView }) {
 
   return (
     <div ref={scrollRef} className="overflow-x-auto pb-1">
+      <AutoRefresh />
       <div className="flex gap-[3px] w-max">
         {monitor.days.map((day) => (
           <Tooltip key={day.date}>

@@ -82,7 +82,7 @@ export default function SettingsClientPage({ initialSettings }: SettingsClientPa
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: trpc.settings.get.queryKey() });
 
-  // ---- General ----
+  // General
   const [general, setGeneral] = React.useState(() => ({
     organizationName: initialSettings.organizationName,
     timezone: initialSettings.timezone,
@@ -103,7 +103,7 @@ export default function SettingsClientPage({ initialSettings }: SettingsClientPa
     }),
   );
 
-  // ---- Monitoring defaults ----
+  // Monitoring defaults
   const [monitoring, setMonitoring] = React.useState(() => ({
     defaultCheckInterval: initialSettings.defaultCheckInterval as MonitorInterval,
     httpTimeoutSeconds: initialSettings.httpTimeoutSeconds,
@@ -131,7 +131,7 @@ export default function SettingsClientPage({ initialSettings }: SettingsClientPa
     }),
   );
 
-  // ---- SMTP ----
+  // SMTP
   const [smtp, setSmtp] = React.useState(() => ({
     smtpHost: initialSettings.smtpHost,
     smtpPort: initialSettings.smtpPort,
@@ -170,7 +170,7 @@ export default function SettingsClientPage({ initialSettings }: SettingsClientPa
     return () => clearTimeout(timer);
   }, [testEmailStatus]);
 
-  // ---- API & tokens ----
+  // API & tokens
   const [copyFeedback, setCopyFeedback] = React.useState<string | null>(null);
 
   const regenerateApiKey = useMutation(
