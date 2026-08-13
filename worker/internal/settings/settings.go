@@ -1,0 +1,115 @@
+// Package settings mirrors src/lib/settings.ts: fetches the single
+// instance-wide `app_settings` row, creating it (with a generated API key,
+// webhook secret, and VAPID key pair) on first use, and lazily backfilling
+// VAPID keys onto rows created before the Push integration channel existed.
+package settings
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"time"
+
+	webpush "github.com/SherClockHolmes/webpush-go"
+
+	"stayup/worker/internal/store"
+)
+
+type Settings struct {
+	SupportEmail     *string
+	HTTPTimeoutSecs  int
+	LatencyThreshold int
+	VapidPublicKey   string
+	VapidPrivateKey  string
+}
+
+func generateAPIKey() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return "up_live_" + hex.EncodeToString(b), nil
+}
+
+func generateWebhookSecret() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return "whsec_" + hex.EncodeToString(b), nil
+}
+
+// Get returns the singleton app_settings row, creating it (and/or
+// backfilling its VAPID keys) if needed — mirrors getSettings() +
+// backfillVapidKeys() in src/lib/settings.ts.
+func Get(ctx context.Context, s *store.Store) (Settings, error) {
+	row, err := s.GetSettings(ctx)
+	if err != nil {
+		return Settings{}, err
+	}
+
+	if row == nil {
+		row, err = create(ctx, s)
+		if err != nil {
+			return Settings{}, err
+		}
+	}
+
+	if row.VapidPublicKey == nil || row.VapidPrivateKey == nil {
+		privateKey, publicKey, err := webpush.GenerateVAPIDKeys()
+		if err != nil {
+			return Settings{}, fmt.Errorf("settings: generate vapid keys: %w", err)
+		}
+		if err := s.BackfillVapidKeys(ctx, publicKey, privateKey, time.Now()); err != nil {
+			return Settings{}, err
+		}
+		row.VapidPublicKey = &publicKey
+		row.VapidPrivateKey = &privateKey
+	}
+
+	return Settings{
+		SupportEmail:     row.SupportEmail,
+		HTTPTimeoutSecs:  row.HTTPTimeoutSecs,
+		LatencyThreshold: row.LatencyThreshold,
+		VapidPublicKey:   *row.VapidPublicKey,
+		VapidPrivateKey:  *row.VapidPrivateKey,
+	}, nil
+}
+
+// create inserts the singleton row, tolerating a lost race against another
+// worker/the Next.js app doing the same thing — mirrors getSettings()'s
+// try/catch-and-reread fallback.
+func create(ctx context.Context, s *store.Store) (*store.AppSettings, error) {
+	apiKey, err := generateAPIKey()
+	if err != nil {
+		return nil, fmt.Errorf("settings: generate api key: %w", err)
+	}
+	webhookSecret, err := generateWebhookSecret()
+	if err != nil {
+		return nil, fmt.Errorf("settings: generate webhook secret: %w", err)
+	}
+	privateKey, publicKey, err := webpush.GenerateVAPIDKeys()
+	if err != nil {
+		return nil, fmt.Errorf("settings: generate vapid keys: %w", err)
+	}
+
+	if err := s.CreateSettings(ctx, store.CreateSettingsInput{
+		APIKey:               apiKey,
+		WebhookSigningSecret: webhookSecret,
+		VapidPublicKey:       publicKey,
+		VapidPrivateKey:      privateKey,
+		Now:                  time.Now(),
+	}); err != nil {
+		return nil, err
+	}
+
+	row, err := s.GetSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if row == nil {
+		return nil, fmt.Errorf("settings: failed to load or create app settings")
+	}
+	return row, nil
+}

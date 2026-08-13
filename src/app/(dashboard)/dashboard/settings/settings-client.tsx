@@ -296,8 +296,8 @@ export default function SettingsClientPage({ initialSettings }: SettingsClientPa
                 <CardTitle>Default Monitoring Parameters</CardTitle>
                 <CardDescription>
                   Thresholds and rules for when a monitor is considered 'Down' or 'Degraded'. Read live by
-                  every check worker (src/workers/https.ts, port.ts, ping.ts) on every check — changes here
-                  apply on the next check, no restart needed.
+                  every monitor-check worker on every check — changes here apply on the next check, no
+                  restart needed.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">

@@ -230,9 +230,9 @@ export const incidentRouter = createTRPCRouter({
     }),
 
   /**
-   * Marks an incident as acknowledged — the halting condition for
-   * src/lib/incidents.ts's escalateOverdueIncidents(). No-op (not an error)
-   * if it's already acknowledged, so double-clicking is safe.
+   * Marks an incident as acknowledged — the halting condition for the Go
+   * integrations worker's EscalateOverdueIncidents (worker/internal/incidents).
+   * No-op (not an error) if it's already acknowledged, so double-clicking is safe.
    */
   acknowledge: protectedProcedure
     .input(z.object({ incidentId: z.string() }))

@@ -1,17 +1,18 @@
-// Shared incident lifecycle logic, used by both the `incident` tRPC router
-// (manual actions from the dashboard) and src/workers/https.ts (automatic
-// incidents opened/updated when a monitor goes Down/Degraded or recovers).
-// Keeping this in one place means "post an update" always does the same
-// thing — write the timeline entry, roll the status up, notify subscribers —
-// no matter who triggered it.
+// Incident lifecycle logic for the dashboard: the `incident` tRPC router's
+// manual actions (create/update/resolve/acknowledge). Automatic incidents —
+// opened/updated when a monitor goes Down/Degraded or recovers, and
+// escalation paging — are handled by the Go workers instead
+// (worker/internal/incidents), a behaviorally-equivalent port of this same
+// lifecycle so a manual dashboard action and an automatic one produce
+// identical incident/timeline/notification records.
 //
-// Notification routing: a monitor without an EscalationPolicy gets the
-// default behavior — every incident/update broadcasts to every enabled
-// Integration (queueIntegrationDeliveries). A monitor *with* one instead has
-// its incidents paged through that policy's ordered steps
-// (escalateOverdueIncidents, polled from src/workers/integrations.ts),
-// stopping once acknowledgeIncident() is called or the incident resolves.
-// See notifyOrEscalate() for where that fork happens.
+// Notification routing (mirrored on the Go side): a monitor without an
+// EscalationPolicy gets the default behavior — every incident/update
+// broadcasts to every enabled Integration (queueIntegrationDeliveries). A
+// monitor *with* one instead has its incidents paged through that policy's
+// ordered steps (EscalateOverdueIncidents, polled from
+// worker/cmd/integrations), stopping once acknowledgeIncident() is called or
+// the incident resolves. See notifyOrEscalate() for where that fork happens.
 import { z } from 'zod';
 import { prisma } from '@/lib/prisma';
 import { logger } from '@/lib/logging';
@@ -207,8 +208,9 @@ async function notifyStatusPageSubscribers(
 /**
  * Queues one IntegrationDelivery row per enabled Integration (Discord, Slack,
  * Webhook, Telegram, Email, PagerDuty). Actual delivery happens asynchronously
- * in src/workers/integrations.ts, so a slow/unreachable webhook never blocks
- * this call — that's also what gives deliveries retries on failure.
+ * in the Go integrations worker (worker/cmd/integrations), so a slow/
+ * unreachable webhook never blocks this call — that's also what gives
+ * deliveries retries on failure.
  */
 async function queueIntegrationDeliveries(
   incidentId: string,
@@ -235,8 +237,8 @@ async function queueIntegrationDeliveries(
  * Routes an incident's Integration notification: the normal broadcast to
  * every enabled Integration, unless the incident's monitor has an
  * EscalationPolicy attached — in which case the broadcast is skipped
- * entirely and escalateOverdueIncidents() (called on a timer from
- * src/workers/integrations.ts) pages the policy's steps in order instead,
+ * entirely and EscalateOverdueIncidents (called on a timer from the Go
+ * worker/cmd/integrations binary) pages the policy's steps in order instead,
  * stopping as soon as someone acknowledges the incident.
  */
 async function notifyOrEscalate(
@@ -254,62 +256,12 @@ async function notifyOrEscalate(
   await queueIntegrationDeliveries(incident.id, incident.title, status, message);
 }
 
-/**
- * Pages the next step of each overdue, unacknowledged, escalation-policy
- * incident. Called on a timer from src/workers/integrations.ts, so this
- * doesn't need its own polling loop — a step that's due fires on the next
- * tick, and the resulting IntegrationDelivery goes through the exact same
- * retry-up-to-5x queue as every other notification.
- */
-export async function escalateOverdueIncidents() {
-  const now = new Date();
-
-  const incidents = await prisma.incident.findMany({
-    where: {
-      status: { not: 'Resolved' },
-      acknowledgedAt: null,
-      monitor: { escalationPolicyId: { not: null } },
-    },
-    include: {
-      monitor: {
-        include: {
-          escalationPolicy: {
-            include: { steps: { orderBy: { order: 'asc' }, include: { integration: true } } },
-          },
-        },
-      },
-    },
-  });
-
-  for (const incident of incidents) {
-    const steps = incident.monitor?.escalationPolicy?.steps ?? [];
-    const step = steps[incident.escalationStep];
-    if (!step) continue; // chain exhausted — nothing left to page
-
-    const since = (incident.lastEscalatedAt ?? incident.createdAt).getTime();
-    if (now.getTime() - since < step.delayMinutes * 60_000) continue; // not due yet
-
-    if (step.integration.enabled) {
-      await prisma.integrationDelivery.create({
-        data: {
-          integrationId: step.integrationId,
-          incidentId: incident.id,
-          event: 'Escalation Alert',
-          message: `[Step ${incident.escalationStep + 1}/${steps.length}] "${incident.title}"${incident.monitor ? ` (${incident.monitor.name})` : ''} is still unacknowledged.`,
-        },
-      });
-    }
-
-    await prisma.incident.update({
-      where: { id: incident.id },
-      data: { escalationStep: { increment: 1 }, lastEscalatedAt: now },
-    });
-
-    logger.info(
-      `[Incidents] Escalated ${incident.id} to step ${incident.escalationStep + 1}/${steps.length} (${step.integration.name})`,
-    );
-  }
-}
+// escalateOverdueIncidents() used to live here, polled from
+// src/workers/integrations.ts. That worker is now the Go binary built from
+// worker/cmd/integrations, which pages escalation steps itself
+// (worker/internal/incidents's EscalateOverdueIncidents) — nothing in the
+// Next.js app calls this anymore, so it was removed rather than kept as dead
+// code. See that Go package for the current implementation.
 
 /** Acknowledges an incident, halting any further escalation-policy paging. Idempotent. */
 export async function acknowledgeIncident(incidentId: string, userId: string) {
