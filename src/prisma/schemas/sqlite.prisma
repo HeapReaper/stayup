@@ -102,7 +102,7 @@ model Monitor {
   // Optional paging chain — if set, an open incident on this monitor is paged
   // through EscalationPolicy.steps (in order, one step per X minutes of no
   // acknowledgement) instead of the usual broadcast to every enabled
-  // Integration. See src/lib/incidents.ts's escalateOverdueIncidents().
+  // Integration. See worker/internal/incidents's EscalateOverdueIncidents (the Go integrations worker).
   escalationPolicyId String?
   escalationPolicy   EscalationPolicy? @relation(fields: [escalationPolicyId], references: [id], onDelete: SetNull)
   createdAt     DateTime            @default(now())
@@ -118,7 +118,7 @@ model Monitor {
   @@map("monitor")
 }
 
-// A single check performed by a worker (e.g. src/workers/https.ts) against a
+// A single check performed by a worker (e.g. the Go binary built from worker/cmd/https) against a
 // monitor. Each row is one "ping" — the aggregate fields on Monitor (status,
 // responseTime, uptime, lastCheckedAt) are derived from these.
 model MonitorCheck {
@@ -154,8 +154,8 @@ model Incident {
   postmortem            String?
   postmortemPublishedAt DateTime?
 
-  // Escalation (see Monitor.escalationPolicyId / escalateOverdueIncidents in
-  // src/lib/incidents.ts). acknowledgedAt is the halting condition — once
+  // Escalation (see Monitor.escalationPolicyId / EscalateOverdueIncidents in
+  // worker/internal/incidents). acknowledgedAt is the halting condition — once
   // set, no further escalation steps fire. escalationStep counts how many
   // steps have already been paged; lastEscalatedAt is the clock the next
   // step's delayMinutes counts from (falls back to createdAt for step 0).
@@ -293,7 +293,8 @@ model StatusPageSubscriber {
 
 // A scheduled or in-progress maintenance window covering one or more
 // monitors. While `now` falls within [startsAt, endsAt] (and it hasn't been
-// cancelled), the monitor-check workers (src/lib/monitor-worker.ts) still
+// cancelled), the monitor-check workers (worker/internal/runner, the Go port
+// of what used to be src/lib/monitor-worker.ts) still
 // check and record pings as usual, but suppress opening/alerting a new
 // incident for a Down/Degraded result — see src/lib/maintenance.ts. Shown on
 // the public status page as a "Scheduled maintenance" notice instead of an
@@ -373,7 +374,7 @@ model Integration {
 
 // A queued/attempted notification through one Integration. Written by
 // src/lib/incidents.ts whenever an incident update happens (or by a manual
-// "Send test" action) and delivered by src/workers/integrations.ts.
+// "Send test" action) and delivered by the Go worker/cmd/integrations binary.
 model IntegrationDelivery {
   id            String      @id @default(cuid())
   integrationId String
@@ -397,7 +398,7 @@ model IntegrationDelivery {
 // to replace the default "broadcast to every enabled Integration" behavior for
 // that monitor's incidents with "page step 1, and if nobody acknowledges within
 // step N's delayMinutes, page step N+1", stopping once the incident is
-// acknowledged or resolved. See src/lib/incidents.ts's escalateOverdueIncidents().
+// acknowledged or resolved. See worker/internal/incidents's EscalateOverdueIncidents (the Go integrations worker).
 model EscalationPolicy {
   id          String   @id @default(cuid())
   name        String
