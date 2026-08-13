@@ -53,5 +53,5 @@ async function backfillVapidKeys<T extends { id: string; vapidPublicKey: string 
   return prisma.appSettings.update({
     where: { id: settings.id },
     data: { vapidPublicKey: vapidKeys.publicKey, vapidPrivateKey: vapidKeys.privateKey },
-  }) as Promise<T>;
+  }) as unknown as Promise<T>;
 }
