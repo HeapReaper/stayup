@@ -16,6 +16,7 @@ import {
   StickyNoteCheck,
   Webhook, FileText, Monitor,
   Wrench,
+  ChevronsUp,
 } from 'lucide-react';
 
 import {
@@ -47,6 +48,7 @@ const navigation = [
   { name: 'Maintenance', href: '/dashboard/maintenance', icon: Wrench },
   { name: 'Status pages', href: '/dashboard/statuspages', icon: StickyNoteCheck },
   { name: 'Integrations', href: '/dashboard/integrations', icon: Webhook },
+  { name: 'Escalations', href: '/dashboard/escalations', icon: ChevronsUp },
   { name: 'Users', href: '/dashboard/users', icon: Users },
   { name: 'Logs', href: '/dashboard/logs', icon: FileText },
   { name: 'Settings', href: '/dashboard/settings', icon: Settings },

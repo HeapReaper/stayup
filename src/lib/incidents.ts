@@ -4,6 +4,14 @@
 // Keeping this in one place means "post an update" always does the same
 // thing — write the timeline entry, roll the status up, notify subscribers —
 // no matter who triggered it.
+//
+// Notification routing: a monitor without an EscalationPolicy gets the
+// default behavior — every incident/update broadcasts to every enabled
+// Integration (queueIntegrationDeliveries). A monitor *with* one instead has
+// its incidents paged through that policy's ordered steps
+// (escalateOverdueIncidents, polled from src/workers/integrations.ts),
+// stopping once acknowledgeIncident() is called or the incident resolves.
+// See notifyOrEscalate() for where that fork happens.
 import { z } from 'zod';
 import { prisma } from '@/lib/prisma';
 import { logger } from '@/lib/logging';
@@ -58,13 +66,14 @@ export async function createIncident(input: CreateIncidentInput) {
         },
       },
     },
+    include: { monitor: true },
   });
 
   logger.info(`[Incidents] Created "${incident.title}" (${incident.impact}) ${incident.id}`);
 
   await Promise.all([
     notifyStatusPageSubscribers(incident.monitorId, incident.title, incident.status, input.message),
-    queueIntegrationDeliveries(incident.id, incident.title, incident.status, input.message),
+    notifyOrEscalate(incident, incident.status, input.message),
   ]);
 
   return incident;
@@ -100,7 +109,7 @@ export async function postIncidentUpdate(input: PostUpdateInput) {
   await Promise.all([
     notifySubscribers(incident, input.status, input.message),
     notifyStatusPageSubscribers(incident.monitorId, incident.title, input.status, input.message),
-    queueIntegrationDeliveries(incident.id, incident.title, input.status, input.message),
+    notifyOrEscalate(incident, input.status, input.message),
   ]);
 
   return incident;
@@ -220,6 +229,102 @@ async function queueIntegrationDeliveries(
   });
 
   logger.info(`[Incidents] Queued ${integrations.length} integration deliver${integrations.length === 1 ? 'y' : 'ies'} for ${incidentId}`);
+}
+
+/**
+ * Routes an incident's Integration notification: the normal broadcast to
+ * every enabled Integration, unless the incident's monitor has an
+ * EscalationPolicy attached — in which case the broadcast is skipped
+ * entirely and escalateOverdueIncidents() (called on a timer from
+ * src/workers/integrations.ts) pages the policy's steps in order instead,
+ * stopping as soon as someone acknowledges the incident.
+ */
+async function notifyOrEscalate(
+  incident: { id: string; title: string; monitor: { escalationPolicyId: string | null } | null },
+  status: string,
+  message: string,
+) {
+  if (incident.monitor?.escalationPolicyId) {
+    logger.info(
+      `[Incidents] ${incident.id} is on an escalation policy — skipping the Integration broadcast, escalation steps will page instead`,
+    );
+    return;
+  }
+
+  await queueIntegrationDeliveries(incident.id, incident.title, status, message);
+}
+
+/**
+ * Pages the next step of each overdue, unacknowledged, escalation-policy
+ * incident. Called on a timer from src/workers/integrations.ts, so this
+ * doesn't need its own polling loop — a step that's due fires on the next
+ * tick, and the resulting IntegrationDelivery goes through the exact same
+ * retry-up-to-5x queue as every other notification.
+ */
+export async function escalateOverdueIncidents() {
+  const now = new Date();
+
+  const incidents = await prisma.incident.findMany({
+    where: {
+      status: { not: 'Resolved' },
+      acknowledgedAt: null,
+      monitor: { escalationPolicyId: { not: null } },
+    },
+    include: {
+      monitor: {
+        include: {
+          escalationPolicy: {
+            include: { steps: { orderBy: { order: 'asc' }, include: { integration: true } } },
+          },
+        },
+      },
+    },
+  });
+
+  for (const incident of incidents) {
+    const steps = incident.monitor?.escalationPolicy?.steps ?? [];
+    const step = steps[incident.escalationStep];
+    if (!step) continue; // chain exhausted — nothing left to page
+
+    const since = (incident.lastEscalatedAt ?? incident.createdAt).getTime();
+    if (now.getTime() - since < step.delayMinutes * 60_000) continue; // not due yet
+
+    if (step.integration.enabled) {
+      await prisma.integrationDelivery.create({
+        data: {
+          integrationId: step.integrationId,
+          incidentId: incident.id,
+          event: 'Escalation Alert',
+          message: `[Step ${incident.escalationStep + 1}/${steps.length}] "${incident.title}"${incident.monitor ? ` (${incident.monitor.name})` : ''} is still unacknowledged.`,
+        },
+      });
+    }
+
+    await prisma.incident.update({
+      where: { id: incident.id },
+      data: { escalationStep: { increment: 1 }, lastEscalatedAt: now },
+    });
+
+    logger.info(
+      `[Incidents] Escalated ${incident.id} to step ${incident.escalationStep + 1}/${steps.length} (${step.integration.name})`,
+    );
+  }
+}
+
+/** Acknowledges an incident, halting any further escalation-policy paging. Idempotent. */
+export async function acknowledgeIncident(incidentId: string, userId: string) {
+  const existing = await prisma.incident.findUnique({ where: { id: incidentId } });
+  if (!existing) return null;
+  if (existing.acknowledgedAt) return existing;
+
+  const incident = await prisma.incident.update({
+    where: { id: incidentId },
+    data: { acknowledgedAt: new Date(), acknowledgedById: userId },
+  });
+
+  logger.info(`[Incidents] ${incident.id} acknowledged by ${userId}`);
+
+  return incident;
 }
 
 /**

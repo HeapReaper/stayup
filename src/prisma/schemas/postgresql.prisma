@@ -26,12 +26,14 @@ model User {
   sessions           Session[]
   accounts           Account[]
   monitors           Monitor[]
-  incidents          Incident[]
+  incidents          Incident[]           @relation("IncidentCreatedBy")
+  acknowledgedIncidents Incident[]        @relation("IncidentAcknowledgedBy")
   incidentUpdates    IncidentUpdate[]
   statusPages        StatusPage[]
   integrations       Integration[]
   auditLogs          AuditLog[]
   maintenanceWindows MaintenanceWindow[]
+  escalationPolicies EscalationPolicy[]
 
   @@unique([email])
   @@map("user")
@@ -97,14 +99,22 @@ model Monitor {
   lastCheckedAt DateTime?
   createdById   String?
   createdBy     User?               @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  // Optional paging chain — if set, an open incident on this monitor is paged
+  // through EscalationPolicy.steps (in order, one step per X minutes of no
+  // acknowledgement) instead of the usual broadcast to every enabled
+  // Integration. See src/lib/incidents.ts's escalateOverdueIncidents().
+  escalationPolicyId String?
+  escalationPolicy   EscalationPolicy? @relation(fields: [escalationPolicyId], references: [id], onDelete: SetNull)
   createdAt     DateTime            @default(now())
   updatedAt     DateTime            @updatedAt
   checks              MonitorCheck[]
   incidents           Incident[]
   statusPages         StatusPageMonitor[]
   maintenanceWindows  MaintenanceWindowMonitor[]
+  tags                MonitorTag[]
 
   @@index([createdById])
+  @@index([escalationPolicyId])
   @@map("monitor")
 }
 
@@ -133,7 +143,7 @@ model Incident {
   monitorId   String?
   monitor     Monitor?  @relation(fields: [monitorId], references: [id], onDelete: SetNull)
   createdById String? // null when auto-created by a worker
-  createdBy   User?     @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdBy   User?     @relation("IncidentCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
   resolvedAt  DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -144,12 +154,24 @@ model Incident {
   postmortem            String?
   postmortemPublishedAt DateTime?
 
+  // Escalation (see Monitor.escalationPolicyId / escalateOverdueIncidents in
+  // src/lib/incidents.ts). acknowledgedAt is the halting condition — once
+  // set, no further escalation steps fire. escalationStep counts how many
+  // steps have already been paged; lastEscalatedAt is the clock the next
+  // step's delayMinutes counts from (falls back to createdAt for step 0).
+  acknowledgedAt   DateTime?
+  acknowledgedById String?
+  acknowledgedBy   User?     @relation("IncidentAcknowledgedBy", fields: [acknowledgedById], references: [id], onDelete: SetNull)
+  escalationStep   Int       @default(0)
+  lastEscalatedAt  DateTime?
+
   updates               IncidentUpdate[]
   subscribers           IncidentSubscriber[]
   integrationDeliveries IntegrationDelivery[]
 
   @@index([monitorId])
   @@index([createdById])
+  @@index([acknowledgedById])
   @@map("incident")
 }
 
@@ -203,6 +225,8 @@ model StatusPage {
   primaryColor      String   @default("#7c3aed")
   historyWindowDays Int      @default(90) // 7 | 30 | 90
   isPublished       Boolean  @default(true)
+  // Whether each monitor's tags are shown next to its name on this page.
+  showTags          Boolean  @default(false)
   createdById       String?
   createdBy         User?    @relation(fields: [createdById], references: [id], onDelete: SetNull)
   createdAt         DateTime @default(now())
@@ -340,7 +364,8 @@ model Integration {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  deliveries IntegrationDelivery[]
+  deliveries      IntegrationDelivery[]
+  escalationSteps EscalationStep[]
 
   @@index([createdById])
   @@map("integration")
@@ -366,6 +391,74 @@ model IntegrationDelivery {
   @@index([integrationId, createdAt])
   @@index([status])
   @@map("integration_delivery")
+}
+
+// A named, ordered paging chain — attach to a Monitor (Monitor.escalationPolicyId)
+// to replace the default "broadcast to every enabled Integration" behavior for
+// that monitor's incidents with "page step 1, and if nobody acknowledges within
+// step N's delayMinutes, page step N+1", stopping once the incident is
+// acknowledged or resolved. See src/lib/incidents.ts's escalateOverdueIncidents().
+model EscalationPolicy {
+  id          String   @id @default(cuid())
+  name        String
+  createdById String?
+  createdBy   User?    @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  steps    EscalationStep[]
+  monitors Monitor[]
+
+  @@index([createdById])
+  @@map("escalation_policy")
+}
+
+// One rung of an EscalationPolicy's ladder: after `delayMinutes` of no
+// acknowledgement (counted from the incident opening, or from the previous
+// step firing), page `integration`. `order` is 0-indexed and matches
+// Incident.escalationStep.
+model EscalationStep {
+  id                 String           @id @default(cuid())
+  escalationPolicyId String
+  escalationPolicy   EscalationPolicy @relation(fields: [escalationPolicyId], references: [id], onDelete: Cascade)
+  order              Int              @default(0)
+  delayMinutes       Int
+  integrationId      String
+  integration        Integration      @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+
+  @@unique([escalationPolicyId, order])
+  @@index([escalationPolicyId])
+  @@index([integrationId])
+  @@map("escalation_step")
+}
+
+// A label attachable to monitors (e.g. "production", "third-party") via
+// MonitorTag. Created implicitly — find-or-create by name — whenever a
+// monitor is saved with a tag name that doesn't exist yet (see
+// src/trpc/routers/monitor.ts).
+model Tag {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  color     String   @default("#7c3aed")
+  createdAt DateTime @default(now())
+
+  monitors MonitorTag[]
+
+  @@map("tag")
+}
+
+// Join row: which tags are on which monitor.
+model MonitorTag {
+  id        String  @id @default(cuid())
+  monitorId String
+  monitor   Monitor @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  tagId     String
+  tag       Tag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@unique([monitorId, tagId])
+  @@index([monitorId])
+  @@index([tagId])
+  @@map("monitor_tag")
 }
 
 // Single-row table (id is always "singleton") holding instance-wide config

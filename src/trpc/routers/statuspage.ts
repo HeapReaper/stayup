@@ -51,6 +51,7 @@ export type StatusPageDetail = {
   primaryColor: string;
   historyWindowDays: HistoryWindowDays;
   isPublished: boolean;
+  showTags: boolean;
   groups: StatusPageGroupInput[];
 };
 
@@ -69,6 +70,7 @@ export type PublicMonitorView = {
   status: string;
   uptime: number;
   underMaintenance: boolean;
+  tags: { id: string; name: string; color: string }[];
   days: DayBucket[];
 };
 
@@ -117,6 +119,7 @@ export type PublicStatusPage = {
   primaryColor: string;
   historyWindowDays: HistoryWindowDays;
   overallStatus: OverallStatus;
+  showTags: boolean;
   groups: PublicMonitorGroup[];
   incidents: PublicIncident[];
   maintenanceWindows: PublicMaintenanceWindow[];
@@ -263,6 +266,7 @@ const statusPageInput = z.object({
   primaryColor: z.string().trim().regex(/^#[0-9a-fA-F]{6}$/, 'Use a hex color like #7c3aed'),
   historyWindowDays: historyWindowDaysEnum,
   isPublished: z.boolean(),
+  showTags: z.boolean(),
   groups: z.array(statusPageGroupInput),
 });
 
@@ -338,6 +342,7 @@ export const statusPageRouter = createTRPCRouter({
         primaryColor: page.primaryColor,
         historyWindowDays: page.historyWindowDays as HistoryWindowDays,
         isPublished: page.isPublished,
+        showTags: page.showTags,
         groups,
       };
     }),
@@ -356,6 +361,7 @@ export const statusPageRouter = createTRPCRouter({
             primaryColor: input.primaryColor,
             historyWindowDays: input.historyWindowDays,
             isPublished: input.isPublished,
+            showTags: input.showTags,
             createdById: ctx.session.user.id,
           },
         });
@@ -410,6 +416,7 @@ export const statusPageRouter = createTRPCRouter({
             primaryColor: input.primaryColor,
             historyWindowDays: input.historyWindowDays,
             isPublished: input.isPublished,
+            showTags: input.showTags,
           },
         });
 
@@ -486,7 +493,10 @@ export const statusPageRouter = createTRPCRouter({
         where: { slug: input.slug },
         include: {
           groups: { orderBy: { order: 'asc' } },
-          monitors: { orderBy: { order: 'asc' }, include: { monitor: true } },
+          monitors: {
+            orderBy: { order: 'asc' },
+            include: { monitor: { include: { tags: { include: { tag: true } } } } },
+          },
         },
       });
 
@@ -555,6 +565,7 @@ export const statusPageRouter = createTRPCRouter({
         status: link.monitor.status,
         uptime: link.monitor.uptime,
         underMaintenance: monitorIdsUnderMaintenanceNow.has(link.monitor.id),
+        tags: link.monitor.tags.map(({ tag }) => tag),
         days: bucketByDay(
           checksByMonitor.get(link.monitorId) ?? [],
           incidentsByMonitor.get(link.monitorId) ?? [],
@@ -582,6 +593,7 @@ export const statusPageRouter = createTRPCRouter({
         primaryColor: page.primaryColor,
         historyWindowDays: page.historyWindowDays as HistoryWindowDays,
         overallStatus: computeOverallStatus(page.monitors.map((m) => m.monitor.status)),
+        showTags: page.showTags,
         groups: groupBuckets,
         incidents: incidents.map((incident) => ({
           id: incident.id,

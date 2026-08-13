@@ -89,6 +89,7 @@ type FormState = {
   primaryColor: string;
   historyWindowDays: HistoryWindowDays;
   isPublished: boolean;
+  showTags: boolean;
   groupNames: string[];
   assignment: Record<string, number>; // monitorId -> group index, or UNGROUPED. Absent = not on the page.
   order: string[]; // monitorIds in display order; relative order within a group is what's saved
@@ -106,6 +107,7 @@ function emptyForm(): FormState {
     primaryColor: '#7c3aed',
     historyWindowDays: 90,
     isPublished: true,
+    showTags: false,
     groupNames: [],
     assignment: {},
     order: [],
@@ -144,6 +146,7 @@ function detailToForm(detail: StatusPageDetail): FormState {
     primaryColor: detail.primaryColor,
     historyWindowDays: detail.historyWindowDays,
     isPublished: detail.isPublished,
+    showTags: detail.showTags,
     groupNames,
     assignment,
     order,
@@ -308,6 +311,7 @@ export default function StatusPagesClientPage({ initialStatusPages, monitors }: 
       primaryColor: form.primaryColor,
       historyWindowDays: form.historyWindowDays,
       isPublished: form.isPublished,
+      showTags: form.showTags,
       groups: formToGroups(form),
     };
 
@@ -518,6 +522,19 @@ export default function StatusPagesClientPage({ initialStatusPages, monitors }: 
                     id="sp-published"
                     checked={form.isPublished}
                     onCheckedChange={(checked) => setForm((prev) => ({ ...prev, isPublished: checked }))}
+                  />
+                </div>
+                <div className="flex items-center justify-between rounded-lg border p-3">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="sp-show-tags">Show monitor tags</Label>
+                    <p className="text-xs text-muted-foreground">
+                      Display each monitor's tags next to its name on the public page.
+                    </p>
+                  </div>
+                  <Switch
+                    id="sp-show-tags"
+                    checked={form.showTags}
+                    onCheckedChange={(checked) => setForm((prev) => ({ ...prev, showTags: checked }))}
                   />
                 </div>
               </div>

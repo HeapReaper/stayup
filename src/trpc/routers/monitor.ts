@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
-import type { Monitor as PrismaMonitor } from '@prisma/client';
+import type { Monitor as PrismaMonitor, Prisma } from '@prisma/client';
 import { createTRPCRouter, protectedProcedure } from '../init';
 import { prisma } from '@/lib/prisma';
 import { logAudit } from '@/lib/audit';
@@ -12,6 +12,13 @@ export const monitorIntervalEnum = z.enum(['15s', '30s', '60s', '5m']);
 export type MonitorType = z.infer<typeof monitorTypeEnum>;
 export type MonitorStatus = z.infer<typeof monitorStatusEnum>;
 export type MonitorInterval = z.infer<typeof monitorIntervalEnum>;
+
+const withRelations = {
+  tags: { include: { tag: true } },
+  escalationPolicy: { select: { id: true, name: true } },
+} satisfies Prisma.MonitorInclude;
+
+type RawMonitor = Prisma.MonitorGetPayload<{ include: typeof withRelations }>;
 
 // The `type`/`status`/`interval` columns are plain strings in the DB (SQLite has no
 // native enum support), but every row is written through the validated mutations
@@ -29,9 +36,11 @@ export type Monitor = Omit<
   createdAt: string;
   updatedAt: string;
   lastCheckedAt: string | null;
+  tags: { id: string; name: string; color: string }[];
+  escalationPolicyName: string | null;
 };
 
-function serializeMonitor(monitor: PrismaMonitor): Monitor {
+function serializeMonitor(monitor: RawMonitor): Monitor {
   return {
     ...monitor,
     type: monitor.type as MonitorType,
@@ -40,6 +49,8 @@ function serializeMonitor(monitor: PrismaMonitor): Monitor {
     createdAt: monitor.createdAt.toISOString(),
     updatedAt: monitor.updatedAt.toISOString(),
     lastCheckedAt: monitor.lastCheckedAt ? monitor.lastCheckedAt.toISOString() : null,
+    tags: monitor.tags.map(({ tag }) => tag),
+    escalationPolicyName: monitor.escalationPolicy?.name ?? null,
   };
 }
 
@@ -54,12 +65,35 @@ function normalizeUrl(type: MonitorType, url: string) {
   return trimmed;
 }
 
+/**
+ * Replaces a monitor's tags from the editor's flat name list — find-or-create
+ * per name (case-sensitive exact match; typing "API" twice reuses the same
+ * tag, "API" vs "api" makes two — a known simplification, there's no tag
+ * management UI to merge/rename them), then a full delete+relink so removed
+ * names actually drop off the monitor.
+ */
+async function applyTags(tx: Prisma.TransactionClient, monitorId: string, tagNames: string[]) {
+  await tx.monitorTag.deleteMany({ where: { monitorId } });
+
+  for (const rawName of tagNames) {
+    const name = rawName.trim();
+    if (!name) continue;
+
+    const tag = await tx.tag.upsert({ where: { name }, create: { name }, update: {} });
+    await tx.monitorTag.create({ data: { monitorId, tagId: tag.id } });
+  }
+}
+
 const monitorBaseInput = z.object({
   name: z.string().trim().min(1, 'Name is required').max(120),
   url: z.string().trim().min(1, 'URL or host is required').max(500),
   type: monitorTypeEnum,
   interval: monitorIntervalEnum,
   port: z.coerce.number().int().min(1).max(65535).optional(),
+  // null/'' clears it — this monitor goes back to the default broadcast
+  // notification behavior (see src/lib/incidents.ts's notifyOrEscalate).
+  escalationPolicyId: z.string().nullable().optional(),
+  tagNames: z.array(z.string().trim().min(1).max(40)).max(20).optional().default([]),
 });
 
 const withPortRequiredForPortType = <T extends typeof monitorBaseInput>(schema: T) =>
@@ -77,6 +111,7 @@ export const monitorRouter = createTRPCRouter({
   getAll: protectedProcedure.query(async () => {
     const monitors = await prisma.monitor.findMany({
       orderBy: { createdAt: 'desc' },
+      include: withRelations,
     });
 
     return monitors.map(serializeMonitor);
@@ -87,6 +122,7 @@ export const monitorRouter = createTRPCRouter({
     .query(async ({ input }) => {
       const monitor = await prisma.monitor.findUnique({
         where: { id: input.id },
+        include: withRelations,
       });
 
       if (!monitor) {
@@ -99,15 +135,22 @@ export const monitorRouter = createTRPCRouter({
   create: protectedProcedure
     .input(monitorCreateInput)
     .mutation(async ({ input, ctx }) => {
-      const monitor = await prisma.monitor.create({
-        data: {
-          name: input.name,
-          url: normalizeUrl(input.type, input.url),
-          type: input.type,
-          interval: input.interval,
-          port: input.type === 'Port' ? input.port : null,
-          createdById: ctx.session.user.id,
-        },
+      const monitor = await prisma.$transaction(async (tx) => {
+        const created = await tx.monitor.create({
+          data: {
+            name: input.name,
+            url: normalizeUrl(input.type, input.url),
+            type: input.type,
+            interval: input.interval,
+            port: input.type === 'Port' ? input.port : null,
+            escalationPolicyId: input.escalationPolicyId || null,
+            createdById: ctx.session.user.id,
+          },
+        });
+
+        await applyTags(tx, created.id, input.tagNames);
+
+        return created;
       });
 
       await logAudit({
@@ -118,7 +161,8 @@ export const monitorRouter = createTRPCRouter({
         ipAddress: ctx.ipAddress,
       });
 
-      return serializeMonitor(monitor);
+      const full = await prisma.monitor.findUniqueOrThrow({ where: { id: monitor.id }, include: withRelations });
+      return serializeMonitor(full);
     }),
 
   update: protectedProcedure
@@ -130,15 +174,22 @@ export const monitorRouter = createTRPCRouter({
         throw new TRPCError({ code: 'NOT_FOUND', message: 'Monitor not found' });
       }
 
-      const monitor = await prisma.monitor.update({
-        where: { id: input.id },
-        data: {
-          name: input.name,
-          url: normalizeUrl(input.type, input.url),
-          type: input.type,
-          interval: input.interval,
-          port: input.type === 'Port' ? input.port : null,
-        },
+      const monitor = await prisma.$transaction(async (tx) => {
+        const updated = await tx.monitor.update({
+          where: { id: input.id },
+          data: {
+            name: input.name,
+            url: normalizeUrl(input.type, input.url),
+            type: input.type,
+            interval: input.interval,
+            port: input.type === 'Port' ? input.port : null,
+            escalationPolicyId: input.escalationPolicyId || null,
+          },
+        });
+
+        await applyTags(tx, input.id, input.tagNames);
+
+        return updated;
       });
 
       await logAudit({
@@ -149,7 +200,8 @@ export const monitorRouter = createTRPCRouter({
         ipAddress: ctx.ipAddress,
       });
 
-      return serializeMonitor(monitor);
+      const full = await prisma.monitor.findUniqueOrThrow({ where: { id: monitor.id }, include: withRelations });
+      return serializeMonitor(full);
     }),
 
   delete: protectedProcedure

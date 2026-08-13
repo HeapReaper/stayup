@@ -181,15 +181,25 @@ function UptimeHeatmap({ monitor }: { monitor: PublicMonitorView }) {
   );
 }
 
-function MonitorRow({ monitor }: { monitor: PublicMonitorView }) {
+function MonitorRow({ monitor, showTags }: { monitor: PublicMonitorView; showTags: boolean }) {
   return (
     <div className="py-4 space-y-2">
       <div className="flex items-center justify-between gap-4">
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex items-center gap-2 min-w-0 flex-wrap">
           <span
             className={`h-2 w-2 rounded-full shrink-0 ${monitor.underMaintenance ? 'bg-blue-500' : statusDotClass(monitor.status)}`}
           />
           <span className="font-medium text-sm truncate">{monitor.name}</span>
+          {showTags &&
+            monitor.tags.map((tag) => (
+              <Badge
+                key={tag.id}
+                variant="outline"
+                className="text-[10px] px-1.5 py-0 h-4 font-normal shrink-0"
+              >
+                {tag.name}
+              </Badge>
+            ))}
           {monitor.underMaintenance && (
             <Badge
               variant="secondary"
@@ -451,7 +461,7 @@ function StatusPageBody({ slug, initialData }: StatusPageClientProps) {
                     )}
                     <div className="divide-y rounded-lg border px-4">
                       {group.monitors.map((monitor) => (
-                        <MonitorRow key={monitor.id} monitor={monitor} />
+                        <MonitorRow key={monitor.id} monitor={monitor} showTags={page.showTags} />
                       ))}
                     </div>
                   </div>

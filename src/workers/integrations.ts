@@ -5,6 +5,12 @@
 // those up, attempts delivery via src/lib/integration-delivery.ts, and
 // retries failures up to MAX_ATTEMPTS before giving up.
 //
+// It also owns escalation policies: each tick, escalateOverdueIncidents()
+// (src/lib/incidents.ts) checks every open, unacknowledged incident whose
+// monitor has an EscalationPolicy attached and queues an IntegrationDelivery
+// for whichever step is next due — so escalation pages flow through the
+// exact same retry-up-to-5x queue as everything else here.
+//
 // This doesn't check monitors, so it doesn't build on src/lib/monitor-worker.ts
 // — it's a different domain (delivery queue, not scheduled checks) with its
 // own small poll loop, following the same shape as the other workers.
@@ -16,6 +22,7 @@ import 'dotenv/config';
 import { prisma } from '@/lib/prisma';
 import { logger } from '@/lib/logging';
 import { deliverToIntegration } from '@/lib/integration-delivery';
+import { escalateOverdueIncidents } from '@/lib/incidents';
 import type { Integration, IntegrationDelivery } from '@prisma/client';
 
 const TICK_INTERVAL_MS = 5_000;
@@ -57,6 +64,8 @@ async function processDelivery(delivery: IntegrationDelivery & { integration: In
 }
 
 async function tick(): Promise<void> {
+  await escalateOverdueIncidents();
+
   const pending = await prisma.integrationDelivery.findMany({
     where: { status: 'Pending' },
     orderBy: { createdAt: 'asc' },

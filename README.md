@@ -191,6 +191,13 @@ A different kind of worker delivers outgoing notifications instead of checking m
 |---|---|---|
 | `src/workers/integrations.ts` | `IntegrationDelivery` rows (status `Pending`) queued by `src/lib/incidents.ts` whenever an incident is created or updated | `src/lib/integration-delivery.ts` — Discord/Slack webhook, generic Webhook POST, Telegram Bot API, Email, or PagerDuty Events API v2, depending on the Integration's `type`. Retries up to 5 times before marking a delivery `Failed`. |
 
+Each tick, this same worker also calls `escalateOverdueIncidents()` (`src/lib/incidents.ts`): if a monitor
+has an `EscalationPolicy` attached (`Monitor.escalationPolicyId`), its incidents skip the normal broadcast
+to every enabled Integration and are instead paged through that policy's ordered steps — step 1, then step
+2 after its `delayMinutes` if nobody's acknowledged the incident yet, and so on — stopping as soon as
+someone acknowledges it (`incident.acknowledge`) or it's resolved. Escalation deliveries are just more
+`IntegrationDelivery` rows, so they get the same retry-up-to-5x handling as everything else here.
+
 Run them all with:
 ```bash
 npm run worker:https

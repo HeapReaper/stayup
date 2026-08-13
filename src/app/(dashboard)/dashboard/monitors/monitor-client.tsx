@@ -13,6 +13,8 @@ import {
   XCircle,
   AlertTriangle,
   Copy,
+  X,
+  Tag as TagIcon,
 } from 'lucide-react';
 
 import { useTRPC } from '@/trpc/client';
@@ -59,12 +61,18 @@ interface MonitorsClientPageProps {
   initialMonitors: Monitor[];
 }
 
+// Sentinel for the "no escalation policy" Select option — mirrors NO_MONITOR
+// in incidents-client.tsx (Base UI's Select can't use an empty string value).
+const NO_ESCALATION_POLICY = 'none';
+
 type MonitorFormState = {
   name: string;
   url: string;
   type: MonitorType;
   interval: MonitorInterval;
   port: string;
+  tags: string[];
+  escalationPolicyId: string;
 };
 
 // Base UI's <SelectValue> only resolves a label once its item list has
@@ -92,6 +100,8 @@ function emptyForm(): MonitorFormState {
     type: 'HTTP',
     interval: '60s',
     port: '',
+    tags: [],
+    escalationPolicyId: NO_ESCALATION_POLICY,
   };
 }
 
@@ -102,6 +112,8 @@ function monitorToForm(monitor: Monitor): MonitorFormState {
     type: monitor.type,
     interval: monitor.interval,
     port: monitor.port ? String(monitor.port) : '',
+    tags: monitor.tags.map((tag) => tag.name),
+    escalationPolicyId: monitor.escalationPolicyId ?? NO_ESCALATION_POLICY,
   };
 }
 
@@ -120,6 +132,12 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
   });
   const monitors = monitorsQuery.data;
 
+  const tagsQuery = useQuery(trpc.tag.getAll.queryOptions());
+  const knownTags = tagsQuery.data ?? [];
+
+  const escalationPoliciesQuery = useQuery(trpc.escalationPolicy.getAll.queryOptions());
+  const escalationPolicies = escalationPoliciesQuery.data ?? [];
+
   const [searchQuery, setSearchQuery] = React.useState('');
   const [statusFilter, setStatusFilter] = React.useState('all');
 
@@ -127,6 +145,7 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
   const [editingId, setEditingId] = React.useState<string | null>(null);
   const [form, setForm] = React.useState<MonitorFormState>(emptyForm());
   const [formError, setFormError] = React.useState<string | null>(null);
+  const [tagDraft, setTagDraft] = React.useState('');
 
   const invalidateMonitors = () =>
     queryClient.invalidateQueries({ queryKey: trpc.monitor.getAll.queryKey() });
@@ -136,6 +155,7 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
     setEditingId(null);
     setForm(emptyForm());
     setFormError(null);
+    setTagDraft('');
   };
 
   const createMonitor = useMutation(
@@ -187,8 +207,30 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
     setEditingId(monitor.id);
     setForm(monitorToForm(monitor));
     setFormError(null);
+    setTagDraft('');
     setIsFormOpen(true);
   };
+
+  const addTag = (rawName: string) => {
+    const name = rawName.trim();
+    if (!name || form.tags.includes(name)) return;
+    setForm((prev) => ({ ...prev, tags: [...prev.tags, name] }));
+    setTagDraft('');
+  };
+
+  const removeTag = (name: string) => {
+    setForm((prev) => ({ ...prev, tags: prev.tags.filter((t) => t !== name) }));
+  };
+
+  const tagSuggestions = knownTags
+    .map((t) => t.name)
+    .filter(
+      (name) =>
+        tagDraft.trim().length > 0 &&
+        name.toLowerCase().includes(tagDraft.trim().toLowerCase()) &&
+        !form.tags.includes(name),
+    )
+    .slice(0, 5);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -200,6 +242,8 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
       type: form.type,
       interval: form.interval,
       port: form.type === 'Port' ? Number(form.port) : undefined,
+      tagNames: form.tags,
+      escalationPolicyId: form.escalationPolicyId === NO_ESCALATION_POLICY ? null : form.escalationPolicyId,
     };
 
     if (editingId) {
@@ -335,6 +379,87 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                 </div>
               </div>
 
+              <div className="grid gap-2">
+                <Label htmlFor="tags">Tags</Label>
+                <div className="flex flex-wrap gap-1.5 rounded-md border p-2 min-h-9">
+                  {form.tags.map((name) => (
+                    <Badge key={name} variant="secondary" className="gap-1 pr-1">
+                      {name}
+                      <button
+                        type="button"
+                        onClick={() => removeTag(name)}
+                        className="rounded-full hover:bg-muted-foreground/20"
+                      >
+                        <X className="h-3 w-3" />
+                        <span className="sr-only">Remove {name}</span>
+                      </button>
+                    </Badge>
+                  ))}
+                  <input
+                    id="tags"
+                    className="flex-1 min-w-24 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+                    placeholder={form.tags.length === 0 ? 'production, third-party…' : ''}
+                    value={tagDraft}
+                    onChange={(e) => setTagDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ',') {
+                        e.preventDefault();
+                        addTag(tagDraft);
+                      } else if (e.key === 'Backspace' && tagDraft === '' && form.tags.length > 0) {
+                        removeTag(form.tags[form.tags.length - 1]);
+                      }
+                    }}
+                  />
+                </div>
+                {tagSuggestions.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {tagSuggestions.map((name) => (
+                      <button
+                        key={name}
+                        type="button"
+                        onClick={() => addTag(name)}
+                        className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs text-muted-foreground hover:bg-muted"
+                      >
+                        <TagIcon className="h-3 w-3" />
+                        {name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="grid gap-2">
+                <Label htmlFor="escalation">Escalation policy</Label>
+                <Select
+                  value={form.escalationPolicyId}
+                  onValueChange={(val) => {
+                    if (val) setForm({ ...form, escalationPolicyId: val });
+                  }}
+                >
+                  <SelectTrigger id="escalation">
+                    <SelectValue>
+                      {(val: string) =>
+                        val === NO_ESCALATION_POLICY
+                          ? 'No escalation (use broadcast)'
+                          : (escalationPolicies.find((p) => p.id === val)?.name ?? 'No escalation (use broadcast)')
+                      }
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NO_ESCALATION_POLICY}>No escalation (use broadcast)</SelectItem>
+                    {escalationPolicies.map((policy) => (
+                      <SelectItem key={policy.id} value={policy.id}>
+                        {policy.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Leave as-is to notify every enabled integration on an incident. Pick a policy to
+                  page its steps in order instead.
+                </p>
+              </div>
+
               {formError && <p className="text-sm text-destructive">{formError}</p>}
             </div>
 
@@ -419,6 +544,15 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                         {monitor.port ? `:${monitor.port}` : ''}
                         {monitor.type === 'HTTP' && <ExternalLink className="h-3 w-3" />}
                       </a>
+                      {monitor.tags.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {monitor.tags.map((tag) => (
+                            <Badge key={tag.id} variant="outline" className="text-[10px] px-1.5 py-0 h-4 font-normal">
+                              {tag.name}
+                            </Badge>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </TableCell>
 

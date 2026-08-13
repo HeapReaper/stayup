@@ -10,6 +10,7 @@ import {
   createIncident,
   postIncidentUpdate,
   resolveIncident,
+  acknowledgeIncident,
   type IncidentImpact,
   type IncidentStatus,
 } from '@/lib/incidents';
@@ -28,6 +29,9 @@ export type IncidentSummary = {
   createdAt: string;
   updatedAt: string;
   latestUpdate: { message: string; status: IncidentStatus; createdAt: string } | null;
+  acknowledgedAt: string | null;
+  acknowledgedBy: { id: string; name: string } | null;
+  escalationStep: number;
 };
 
 export type IncidentUpdateItem = {
@@ -47,6 +51,7 @@ export type IncidentDetail = IncidentSummary & {
 const summaryInclude = {
   monitor: { select: { id: true, name: true } },
   createdBy: { select: { id: true, name: true } },
+  acknowledgedBy: { select: { id: true, name: true } },
   updates: {
     orderBy: { createdAt: 'desc' as const },
     take: 1,
@@ -75,6 +80,9 @@ function serializeSummary(incident: RawSummary): IncidentSummary {
           createdAt: latest.createdAt.toISOString(),
         }
       : null,
+    acknowledgedAt: incident.acknowledgedAt ? incident.acknowledgedAt.toISOString() : null,
+    acknowledgedBy: incident.acknowledgedBy,
+    escalationStep: incident.escalationStep,
   };
 }
 
@@ -96,6 +104,7 @@ export const incidentRouter = createTRPCRouter({
         include: {
           monitor: { select: { id: true, name: true } },
           createdBy: { select: { id: true, name: true } },
+          acknowledgedBy: { select: { id: true, name: true } },
           updates: {
             orderBy: { createdAt: 'asc' },
             include: { author: { select: { id: true, name: true } } },
@@ -118,6 +127,9 @@ export const incidentRouter = createTRPCRouter({
         createdAt: incident.createdAt.toISOString(),
         updatedAt: incident.updatedAt.toISOString(),
         latestUpdate: null,
+        acknowledgedAt: incident.acknowledgedAt ? incident.acknowledgedAt.toISOString() : null,
+        acknowledgedBy: incident.acknowledgedBy,
+        escalationStep: incident.escalationStep,
         updates: incident.updates.map((update) => ({
           id: update.id,
           status: update.status as IncidentStatus,
@@ -210,6 +222,31 @@ export const incidentRouter = createTRPCRouter({
         actorId: ctx.session.user.id,
         actorName: ctx.session.user.name,
         action: 'RESOLVED_INCIDENT',
+        target: incident.title,
+        ipAddress: ctx.ipAddress,
+      });
+
+      return { id: incident.id };
+    }),
+
+  /**
+   * Marks an incident as acknowledged — the halting condition for
+   * src/lib/incidents.ts's escalateOverdueIncidents(). No-op (not an error)
+   * if it's already acknowledged, so double-clicking is safe.
+   */
+  acknowledge: protectedProcedure
+    .input(z.object({ incidentId: z.string() }))
+    .mutation(async ({ input, ctx }) => {
+      const incident = await acknowledgeIncident(input.incidentId, ctx.session.user.id);
+
+      if (!incident) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'Incident not found' });
+      }
+
+      await logAudit({
+        actorId: ctx.session.user.id,
+        actorName: ctx.session.user.name,
+        action: 'ACKNOWLEDGED_INCIDENT',
         target: incident.title,
         ipAddress: ctx.ipAddress,
       });

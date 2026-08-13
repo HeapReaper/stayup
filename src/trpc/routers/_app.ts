@@ -8,6 +8,8 @@ import { integrationRouter } from './integration';
 import { logsRouter } from './logs';
 import { settingsRouter } from './settings';
 import { maintenanceRouter } from './maintenance';
+import { escalationPolicyRouter } from './escalationPolicy';
+import { tagRouter } from './tag';
 import { helloRouter } from '@/trpc/routers/hello';
 
 export const appRouter = createTRPCRouter({
@@ -20,6 +22,8 @@ export const appRouter = createTRPCRouter({
   logs: logsRouter,
   settings: settingsRouter,
   maintenance: maintenanceRouter,
+  escalationPolicy: escalationPolicyRouter,
+  tag: tagRouter,
 });
 
 // export type definition of API

@@ -17,6 +17,8 @@ import {
   FileText,
   Save,
   Globe,
+  BadgeCheck,
+  ChevronsUp,
 } from 'lucide-react';
 
 import { useTRPC } from '@/trpc/client';
@@ -219,6 +221,12 @@ export default function IncidentsClientPage({ initialIncidents, monitors }: Inci
     }),
   );
 
+  const acknowledgeIncident = useMutation(
+    trpc.incident.acknowledge.mutationOptions({
+      onSuccess: (_, variables) => invalidateAll(variables.incidentId),
+    }),
+  );
+
   const setPostmortem = useMutation(
     trpc.incident.setPostmortem.mutationOptions({
       onSuccess: () => {
@@ -288,6 +296,10 @@ export default function IncidentsClientPage({ initialIncidents, monitors }: Inci
 
   const handleQuickResolve = (id: string) => {
     resolveIncident.mutate({ incidentId: id });
+  };
+
+  const handleAcknowledge = (id: string) => {
+    acknowledgeIncident.mutate({ incidentId: id });
   };
 
   const handleDeleteIncident = (id: string) => {
@@ -435,9 +447,31 @@ export default function IncidentsClientPage({ initialIncidents, monitors }: Inci
                 <SheetDescription>
                   {detail.monitor ? `Monitor: ${detail.monitor.name}` : 'No monitor linked'}
                 </SheetDescription>
-                <div className="flex items-center gap-2 pt-1">
+                <div className="flex items-center gap-2 pt-1 flex-wrap">
                   <ImpactBadge impact={detail.impact} />
                   <StatusBadge status={detail.status} />
+                  {detail.status !== 'Resolved' &&
+                    (detail.acknowledgedAt ? (
+                      <Badge
+                        variant="secondary"
+                        className="bg-sky-500/15 text-sky-600 dark:text-sky-400 gap-1"
+                      >
+                        <BadgeCheck className="h-3.5 w-3.5" />
+                        Acknowledged{detail.acknowledgedBy ? ` by ${detail.acknowledgedBy.name}` : ''}
+                      </Badge>
+                    ) : (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="gap-1.5 h-6 px-2 text-xs"
+                        onClick={() => handleAcknowledge(detail.id)}
+                        disabled={acknowledgeIncident.isPending}
+                      >
+                        <BadgeCheck className="h-3.5 w-3.5" />
+                        Acknowledge
+                      </Button>
+                    ))}
                 </div>
               </SheetHeader>
 
@@ -654,7 +688,29 @@ export default function IncidentsClientPage({ initialIncidents, monitors }: Inci
                   </TableCell>
 
                   <TableCell>
-                    <StatusBadge status={incident.status} />
+                    <div className="flex flex-col gap-1 items-start">
+                      <StatusBadge status={incident.status} />
+                      {incident.status !== 'Resolved' &&
+                        (incident.acknowledgedAt ? (
+                          <Badge
+                            variant="secondary"
+                            className="bg-sky-500/15 text-sky-600 dark:text-sky-400 gap-1 text-[10px] px-1.5 py-0 h-4"
+                          >
+                            <BadgeCheck className="h-2.5 w-2.5" />
+                            Ack&apos;d{incident.acknowledgedBy ? ` by ${incident.acknowledgedBy.name}` : ''}
+                          </Badge>
+                        ) : (
+                          incident.escalationStep > 0 && (
+                            <Badge
+                              variant="secondary"
+                              className="bg-amber-500/15 text-amber-600 dark:text-amber-400 gap-1 text-[10px] px-1.5 py-0 h-4"
+                            >
+                              <ChevronsUp className="h-2.5 w-2.5" />
+                              Escalated (step {incident.escalationStep})
+                            </Badge>
+                          )
+                        ))}
+                    </div>
                   </TableCell>
 
                   {/* Reported by */}
@@ -698,6 +754,12 @@ export default function IncidentsClientPage({ initialIncidents, monitors }: Inci
                       <DropdownMenuContent align="end">
                         <DropdownMenuGroup>
                           <DropdownMenuLabel>Options</DropdownMenuLabel>
+                          {incident.status !== 'Resolved' && !incident.acknowledgedAt && (
+                            <DropdownMenuItem onClick={() => handleAcknowledge(incident.id)}>
+                              <BadgeCheck className="mr-2 h-4 w-4 text-sky-500" />
+                              Acknowledge
+                            </DropdownMenuItem>
+                          )}
                           {incident.status !== 'Resolved' && (
                             <DropdownMenuItem onClick={() => handleQuickResolve(incident.id)}>
                               <CheckCircle2 className="mr-2 h-4 w-4 text-emerald-500" />
