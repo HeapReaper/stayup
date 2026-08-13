@@ -1,8 +1,6 @@
 import type { Metadata } from 'next';
 import { Geist, Geist_Mono, Inter } from 'next/font/google';
 import './globals.css';
-import Navbar from '@/components/core/navbar';
-import Footer from '@/components/core/footer';
 import { cn } from "@/lib/utils";
 import { ThemeProvider as NextThemesProvider } from 'next-themes';
 import { TooltipProvider } from '@/components/ui/tooltip';
