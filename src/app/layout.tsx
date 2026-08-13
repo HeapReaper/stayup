@@ -21,8 +21,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'NextTemp',
-  description: 'The NextJS template i like',
+  title: 'StayUp',
+  description: 'Uptime monitor the way i like it',
 };
 
 export default function RootLayout({
