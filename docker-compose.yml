@@ -5,21 +5,21 @@
 #   cp .env.example .env   # fill in BETTER_AUTH_SECRET, POSTGRES_PASSWORD, etc.
 #   docker compose up --build
 #
-# `web` and every `worker-*` service run from the SAME image (see Dockerfile)
-# — only the `command:` differs. DB_PROVIDER/DB_URL/REDIS_URL are forced to
-# the in-network Postgres/Redis hostnames below regardless of what a local
-# `.env` (meant for `npm run dev`) might otherwise say.
+# `web` and every `worker-*` service build from the SAME Dockerfile (see
+# Dockerfile) but different targets/commands: `web` is the Node/Next.js app
+# (target `runner`), each `worker-*` is a statically-linked Go binary (target
+# `worker-runner`) — no Node runtime in those containers at all, which is the
+# whole point of the Go rewrite (a few MB of RSS per worker instead of a full
+# V8 heap). DB_PROVIDER/DB_URL/REDIS_URL are forced to the in-network
+# Postgres/Redis hostnames below regardless of what a local `.env` (meant for
+# `npm run dev`) might otherwise say.
 #
-# No dedicated one-shot `migrate` service on purpose: each service below runs
-# `prisma migrate deploy` itself before its actual command. That's safe to do
-# from all 6 containers at once — Prisma serializes concurrent `migrate
-# deploy` calls with a DB-level advisory lock, so whichever gets there first
-# applies the migrations and the rest just see "already up to date". This
-# used to be one shared `migrate` service that everything else waited on via
-# `condition: service_completed_successfully`, but some deployment platforms
-# (e.g. Coolify) don't handle an intentionally-exiting one-shot container in
-# a compose stack well — every service here stays running, matching what
-# those platforms expect.
+# Only `web` runs `prisma migrate deploy` — the Go workers don't carry Prisma
+# (or Node) at all. Every worker-* service depends on `web` being healthy
+# (not just started), and `web`'s healthcheck only passes once it's actually
+# serving requests — i.e. after its migrate-deploy-then-start command has
+# already applied the schema — so workers never race a cold, unmigrated
+# database.
 
 x-app: &app
   build: .
@@ -34,6 +34,17 @@ x-app: &app
       condition: service_healthy
   volumes:
     - logs:/app/logs
+
+x-worker: &worker
+  <<: *app
+  build:
+    context: .
+    target: worker-runner
+  depends_on:
+    postgres:
+      condition: service_healthy
+    web:
+      condition: service_healthy
 
 services:
   postgres:
@@ -59,6 +70,9 @@ services:
 
   web:
     <<: *app
+    build:
+      context: .
+      target: runner
     ports:
       - "3000:3000"
     command: ["sh", "-c", "npx prisma migrate deploy && npm start"]
@@ -70,29 +84,29 @@ services:
       start_period: 30s
 
   worker-https:
-    <<: *app
-    command: ["sh", "-c", "npx prisma migrate deploy && npx tsx src/workers/https.ts"]
+    <<: *worker
+    command: ["/usr/local/bin/https"]
 
   worker-port:
-    <<: *app
-    command: ["sh", "-c", "npx prisma migrate deploy && npx tsx src/workers/port.ts"]
+    <<: *worker
+    command: ["/usr/local/bin/port"]
 
   worker-ping:
-    <<: *app
-    # Belt-and-suspenders for the OS `ping` binary the worker shells out to —
+    <<: *worker
+    # Belt-and-suspenders for the raw ICMP socket the ping worker opens —
     # Docker's default capability set already includes NET_RAW, but some
     # hardened hosts/runtimes drop it.
     cap_add:
       - NET_RAW
-    command: ["sh", "-c", "npx prisma migrate deploy && npx tsx src/workers/ping.ts"]
+    command: ["/usr/local/bin/ping"]
 
   worker-dns:
-    <<: *app
-    command: ["sh", "-c", "npx prisma migrate deploy && npx tsx src/workers/dns.ts"]
+    <<: *worker
+    command: ["/usr/local/bin/dns"]
 
   worker-integrations:
-    <<: *app
-    command: ["sh", "-c", "npx prisma migrate deploy && npx tsx src/workers/integrations.ts"]
+    <<: *worker
+    command: ["/usr/local/bin/integrations"]
 
 volumes:
   postgres-data:

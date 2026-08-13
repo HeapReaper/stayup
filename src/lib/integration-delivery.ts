@@ -1,8 +1,9 @@
-// Shared delivery logic for the Integrations feature, used by both
-// src/trpc/routers/integration.ts (the "Send test" button — delivers
-// immediately, synchronously) and src/workers/integrations.ts (delivers
-// queued IntegrationDelivery rows). Keeping this in one place means a test
-// send and a real alert go out exactly the same way.
+// Delivery logic for the Integrations feature's "Send test" button
+// (src/trpc/routers/integration.ts) — delivers immediately, synchronously.
+// Queued IntegrationDelivery rows (real alerts) are delivered by the Go
+// integrations worker instead (worker/internal/delivery, worker/cmd/integrations)
+// — a separate but behaviorally-equivalent port of the same per-channel logic
+// this file implements, so a test send and a real alert go out the same way.
 import { logger } from '@/lib/logging';
 import { sendEmail } from '@/lib/email';
 import { sendDiscordWebhook } from '@/lib/discord';

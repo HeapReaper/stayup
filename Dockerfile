@@ -1,12 +1,11 @@
-# One image, six services (see docker-compose.yml): `web` runs
-# `prisma migrate deploy && next start`, the five `worker-*` services each run
-# `prisma migrate deploy` then their src/workers/*.ts file via tsx (safe to
-# run concurrently from all six — Prisma serializes it with a DB-level
-# advisory lock). All six need the full source tree and full node_modules
-# (including dev dependencies — tsx is only needed at runtime for the
-# workers), so this deliberately skips Next's `standalone` output trimming:
-# that only traces what the Next.js app itself imports, and would drop `tsx`
-# and anything only a worker uses.
+# Two images from one Dockerfile (see docker-compose.yml): `web` (target
+# `runner`) runs `prisma migrate deploy && next start`; the five `worker-*`
+# services (target `worker-runner`) each run one statically-linked Go binary
+# built from worker/ — no Node/V8 involved, which is the whole point (RAM
+# footprint per worker container drops from a full Node runtime to a few MB).
+# `web`'s stages deliberately skip Next's `standalone` output trimming (that
+# only traces what the Next.js app itself imports) since it no longer needs
+# to — the workers aren't part of this image's Node dependency graph anymore.
 FROM node:20-alpine AS base
 # openssl: Prisma's generated client needs it on Alpine.
 # python3/make/g++: better-sqlite3 is still an unconditional import in
@@ -41,10 +40,6 @@ RUN --mount=type=cache,target=/app/.next/cache npm run build
 
 FROM base AS runner
 ENV NODE_ENV=production
-# The ping worker shells out to the OS `ping` binary (see src/workers/ping.ts
-# for why) — Alpine's busybox includes one, but install iputils explicitly
-# so it isn't left to chance.
-RUN apk add --no-cache iputils
 
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/.next ./.next
@@ -57,6 +52,34 @@ COPY --from=builder /app/src ./src
 
 EXPOSE 3000
 
-# Overridden by docker-compose.yml's `command:` for every service, including
-# `web` — this is just a sane default if the image is ever run standalone.
+# Overridden by docker-compose.yml's `command:` for `web`; a sane default if
+# this target is ever run standalone.
 CMD ["sh", "-c", "npx prisma migrate deploy && npm start"]
+
+# ---- Go workers ----
+
+FROM golang:1.25-alpine AS go-builder
+WORKDIR /src/worker
+COPY worker/go.mod worker/go.sum ./
+RUN --mount=type=cache,target=/root/go/pkg/mod go mod download
+COPY worker/ .
+# CGO_ENABLED=0: both DB drivers (pgx, modernc.org/sqlite) and the ping
+# worker's ICMP library are pure Go, so every binary stays static — no libc
+# dependency to match at runtime, which is what lets worker-runner below be
+# just `alpine` + `ca-certificates` instead of needing glibc/musl-dev shims.
+RUN --mount=type=cache,target=/root/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux sh -c '\
+    for cmd in https port ping dns integrations; do \
+      go build -ldflags="-s -w" -o /out/$cmd ./cmd/$cmd; \
+    done'
+
+FROM alpine:3.20 AS worker-runner
+# ca-certificates: every worker talks TLS outbound (SMTP, Discord/Slack/
+# Telegram/PagerDuty webhooks, Postgres) and needs a trust store to verify it.
+RUN apk add --no-cache ca-certificates
+COPY --from=go-builder /out/ /usr/local/bin/
+WORKDIR /app
+
+# Overridden by docker-compose.yml's `command:` for every worker-* service;
+# https is just a sane default if this target is ever run standalone.
+CMD ["/usr/local/bin/https"]

@@ -49,3 +49,8 @@ test.ts
 # SQLite
 dev.db
 database.db
+
+# Go workers (worker/) — go.mod/go.sum are versioned, build output and
+# `go run` logs aren't
+/worker/bin
+/worker/logs

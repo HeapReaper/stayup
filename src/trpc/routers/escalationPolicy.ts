@@ -3,9 +3,10 @@
 // (monitor.escalationPolicyId — see monitor.ts) to replace the default
 // "broadcast to every enabled Integration" behavior for that monitor's
 // incidents with "page step 1, and if nobody acknowledges within step N's
-// delayMinutes, page step N+1". Actual paging happens in
-// src/lib/incidents.ts's escalateOverdueIncidents(), polled from
-// src/workers/integrations.ts.
+// delayMinutes, page step N+1". Actual paging happens in the Go
+// integrations worker (worker/internal/incidents's EscalateOverdueIncidents,
+// polled from worker/cmd/integrations) — a Go port of what used to be
+// src/lib/incidents.ts's escalateOverdueIncidents()/src/workers/integrations.ts.
 import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
 import type { Prisma } from '@prisma/client';

@@ -165,62 +165,60 @@ async function exampleUsage() {
 The helper file can be found in `src/lib/redis.ts`.
 
 ### Workers
-Long-running checks (e.g. pinging monitors) run as standalone scripts in `src/workers/`, separate from the
-Next.js server. They're run with [`tsx`](https://github.com/privatenumber/tsx), which understands the
-`@/*` path alias from `tsconfig.json`.
+Long-running checks (e.g. pinging monitors) run as standalone Go binaries in `worker/`, a separate Go
+module living alongside the Next.js app, not inside it — talking to the same Postgres/SQLite database
+directly (hand-written SQL, no Prisma) via `DB_PROVIDER`/`DB_URL`, same as `src/lib/prisma.ts`. They used to
+be `tsx`-run TypeScript scripts in `src/workers/`; they were ported to Go purely for the RAM savings — a
+Node/V8 process per worker vs. a few MB of RSS for a static Go binary.
 
-Each worker only implements "how do I check one monitor" — the polling loop, writing the `MonitorCheck`
-row (the "pings"), rolling the result up onto the monitor's `status`/`responseTime`/`uptime`/`lastCheckedAt`,
-and opening/updating an incident when a monitor goes Down/Degraded, all live once in
-`src/lib/monitor-worker.ts` and are shared by every worker below.
+Each worker only implements "how do I check one monitor" (`worker/internal/checkers`) — the polling loop,
+writing the `MonitorCheck` row (the "pings"), rolling the result up onto the monitor's
+`status`/`responseTime`/`uptime`/`lastCheckedAt`, and opening/updating an incident when a monitor goes
+Down/Degraded, all live once in `worker/internal/runner` and are shared by every worker below.
 
 | Worker | Monitor type | How it checks |
 |---|---|---|
-| `src/workers/https.ts` | `HTTP` | `fetch()`s the URL |
-| `src/workers/port.ts` | `Port` | Raw TCP connect to `host:port` |
-| `src/workers/ping.ts` | `Ping` | Shells out to the OS `ping` binary (Node has no built-in ICMP — see comments in the file) |
-| `src/workers/dns.ts` | `DNS` | Resolves the hostname's A record(s) via `node:dns/promises` |
+| `worker/cmd/https` | `HTTP` | GETs the URL |
+| `worker/cmd/port` | `Port` | Raw TCP connect to `host:port` |
+| `worker/cmd/ping` | `Ping` | Native ICMP echo request (needs `CAP_NET_RAW` — granted in `docker-compose.yml`) |
+| `worker/cmd/dns` | `DNS` | Resolves the hostname's A record(s) |
 
 The Settings page's Monitoring Defaults tab (request timeout, latency threshold) is read live by each of
-these on every check via `src/lib/settings.ts`'s `getSettings()` — save a new value there and it applies on
+these on every check via `worker/internal/settings`'s `Get()` — save a new value there and it applies on
 the very next check, no restart needed.
 
 A different kind of worker delivers outgoing notifications instead of checking monitors:
 
 | Worker | Polls | Delivers via |
 |---|---|---|
-| `src/workers/integrations.ts` | `IntegrationDelivery` rows (status `Pending`) queued by `src/lib/incidents.ts` whenever an incident is created or updated | `src/lib/integration-delivery.ts` — Discord/Slack webhook, generic Webhook POST, Telegram Bot API, Email, or PagerDuty Events API v2, depending on the Integration's `type`. Retries up to 5 times before marking a delivery `Failed`. |
+| `worker/cmd/integrations` | `IntegrationDelivery` rows (status `Pending`) queued by `src/lib/incidents.ts` (dashboard actions) or `worker/internal/incidents` (automatic incidents) whenever an incident is created or updated | `worker/internal/delivery` — Discord/Slack webhook, generic Webhook POST, Telegram Bot API, Email, Push, or PagerDuty Events API v2, depending on the Integration's `type`. Retries up to 5 times before marking a delivery `Failed`. |
 
-Each tick, this same worker also calls `escalateOverdueIncidents()` (`src/lib/incidents.ts`): if a monitor
-has an `EscalationPolicy` attached (`Monitor.escalationPolicyId`), its incidents skip the normal broadcast
-to every enabled Integration and are instead paged through that policy's ordered steps — step 1, then step
-2 after its `delayMinutes` if nobody's acknowledged the incident yet, and so on — stopping as soon as
-someone acknowledges it (`incident.acknowledge`) or it's resolved. Escalation deliveries are just more
+Each tick, this same worker also calls `EscalateOverdueIncidents` (`worker/internal/incidents`): if a
+monitor has an `EscalationPolicy` attached (`Monitor.escalationPolicyId`), its incidents skip the normal
+broadcast to every enabled Integration and are instead paged through that policy's ordered steps — step 1,
+then step 2 after its `delayMinutes` if nobody's acknowledged the incident yet, and so on — stopping as soon
+as someone acknowledges it (`incident.acknowledge`) or it's resolved. Escalation deliveries are just more
 `IntegrationDelivery` rows, so they get the same retry-up-to-5x handling as everything else here.
 
 Run them all with:
 ```bash
-npm run worker:https
-npm run worker:port
-npm run worker:ping
-npm run worker:dns
-npm run worker:integrations
-# or, to auto-restart on file changes during development:
-npm run worker:https:watch
-npm run worker:port:watch
-npm run worker:ping:watch
-npm run worker:dns:watch
-npm run worker:integrations:watch
+cd worker
+go run ./cmd/https
+go run ./cmd/port
+go run ./cmd/ping   # needs CAP_NET_RAW, i.e. `sudo` or an equivalent, outside Docker
+go run ./cmd/dns
+go run ./cmd/integrations
 ```
 
-Note: these are plain `tsx` processes, not hot-reloaded by Next.js — if you edit worker code (or
-`src/lib/monitor-worker.ts`/`src/lib/incidents.ts`/`src/lib/integration-delivery.ts`) while one is already
-running, restart it (or use the `:watch` variant) to pick up the change.
+Note: unlike `next dev`, nothing here hot-reloads — if you edit worker code while one is already running,
+restart it to pick up the change. `go build -o bin/<name> ./cmd/<name>` from `worker/` produces a standalone
+binary in the gitignored `worker/bin/` if you'd rather not `go run` each time.
 
 ### Docker
-`docker-compose.yml` runs the whole stack: Postgres, Redis, the Next.js app, and all four workers above —
-`web` and every `worker-*` service build from the same image (see `Dockerfile`) and only differ in their
-`command:`.
+`docker-compose.yml` runs the whole stack: Postgres, Redis, the Next.js app, and all five workers above.
+`web` and every `worker-*` service build from the same `Dockerfile` but different targets: `web` is the
+Node/Next.js image (target `runner`), each `worker-*` is a small `alpine` image holding only that worker's
+static Go binary (target `worker-runner`) — no Node runtime in those containers at all.
 
 ```bash
 cp .env.example .env   # fill in BETTER_AUTH_SECRET, POSTGRES_PASSWORD, SMTP_*, etc.
@@ -235,16 +233,18 @@ A few things worth knowing:
 - **Two migration histories.** Because the SQL is provider-specific, SQLite and Postgres each have their
   own migration folder — `src/prisma/schemas/migrations/sqlite/` and `.../migrations/postgresql/` — selected
   automatically via `prisma.config.ts`'s `migrations.path`, based on `DB_PROVIDER`.
-- **No dedicated `migrate` service.** Each of `web`/`worker-*` runs `prisma migrate deploy` itself before
-  its actual command — safe to do concurrently from all five, since Prisma serializes it with a DB-level
-  advisory lock. This used to be one shared one-shot `migrate` service the others waited on, but some
-  deployment platforms (Coolify, at least) don't reliably handle an intentionally-exiting container inside
-  a compose stack — the deploy would hang on `web`/the workers never leaving "Created", then fail with
-  `Error response from daemon: No such container: <id>` once whatever was polling the exited `migrate`
-  container's status couldn't find it anymore. Every service here stays running instead.
-- The Postgres migration history was generated and schema-validated, but not applied against a live
-  Postgres instance in the environment this was built in (no Docker available there) — worth a close look
-  the first time you run `docker compose up`.
+- **No dedicated `migrate` service.** Only `web` runs `prisma migrate deploy` (the Go workers don't carry
+  Prisma, or Node, at all); every `worker-*` service `depends_on: web: condition: service_healthy`, and
+  `web`'s healthcheck only passes once it's actually serving requests — i.e. after `migrate deploy` has
+  already applied the schema — so workers never race a cold, unmigrated database. This all runs as
+  long-lived services on purpose (no one-shot container that exits after migrating): some deployment
+  platforms (Coolify, at least) don't reliably handle an intentionally-exiting container inside a compose
+  stack — the deploy would hang on `web` never leaving "Created", then fail with
+  `Error response from daemon: No such container: <id>` once whatever was polling its status couldn't find
+  it anymore.
+- Verified end to end with a real `docker compose up --build`: `web` applies the Postgres migration
+  history cleanly, and all five Go workers check monitors, open/recover incidents, and retry/deliver
+  Integration notifications correctly against it.
 
 ### Shadcn UI
 You can change the theme by going to [ui.shadcn.com/create](https://ui.shadcn.com/create).  
