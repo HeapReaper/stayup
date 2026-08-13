@@ -18,7 +18,10 @@ WORKDIR /app
 
 FROM base AS deps
 COPY package.json package-lock.json ./
-RUN npm ci
+# Cache mount: persists npm's package cache across deploys on the build host,
+# independent of layer invalidation — a plain `RUN npm ci` re-downloads
+# everything whenever package-lock.json changes, this doesn't.
+RUN --mount=type=cache,target=/root/.npm npm ci
 
 FROM base AS builder
 COPY --from=deps /app/node_modules ./node_modules
@@ -30,7 +33,11 @@ COPY . .
 ENV DB_PROVIDER=postgresql
 ENV DB_URL=postgresql://user:password@localhost:5432/placeholder
 RUN npx prisma generate
-RUN npm run build
+# Cache mount for Next's own incremental build cache. `COPY . .` above
+# invalidates every deploy (source always changed), so without this the
+# entire `next build` recompiles from zero every time — with it, only
+# changed files are rebuilt.
+RUN --mount=type=cache,target=/app/.next/cache npm run build
 
 FROM base AS runner
 ENV NODE_ENV=production
