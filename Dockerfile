@@ -49,6 +49,7 @@ COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/tsconfig.json ./tsconfig.json
 COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
 COPY --from=builder /app/src ./src
+COPY --from=builder /app/scripts ./scripts
 
 # Documentation only — doesn't restrict the actual bind port, which follows
 # $PORT (default 3000; see .env/.env.example and the `web` service's `ports:`
