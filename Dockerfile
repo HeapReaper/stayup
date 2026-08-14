@@ -50,6 +50,9 @@ COPY --from=builder /app/tsconfig.json ./tsconfig.json
 COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
 COPY --from=builder /app/src ./src
 
+# Documentation only — doesn't restrict the actual bind port, which follows
+# $PORT (default 3000; see .env/.env.example and the `web` service's `ports:`
+# in docker-compose.yml) via the `dev`/`start` npm scripts.
 EXPOSE 3000
 
 # Overridden by docker-compose.yml's `command:` for `web`; a sane default if
