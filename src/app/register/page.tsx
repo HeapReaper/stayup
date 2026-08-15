@@ -9,12 +9,6 @@ import RegisterClientPage from '@/app/register/register-client';
 export const dynamic = 'force-dynamic';
 
 export default async function RegisterPage() {
-  // Self-service registration is only available for the very first account —
-  // afterward, new users can only be created from /dashboard/users by
-  // someone already signed in. This is also enforced at the API level (see
-  // the `hooks.before` check in src/lib/auth.ts) so it can't be bypassed by
-  // calling the auth endpoint directly; this redirect just avoids showing a
-  // form that would fail on submit.
   const existingUserCount = await prisma.user.count();
 
   if (existingUserCount > 0) {
