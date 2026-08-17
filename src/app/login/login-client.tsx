@@ -22,10 +22,11 @@ import { Label } from '@/components/ui/label';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 
 type LoginPage = {
-  existingUser: boolean
+  existingUser: boolean;
+  callbackUrl?: string | null;
 }
 
-export default function SignInClientPage({ existingUser }: LoginPage) {
+export default function SignInClientPage({ existingUser, callbackUrl }: LoginPage) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<{ email?: string; password?: string }>({});
@@ -64,7 +65,7 @@ export default function SignInClientPage({ existingUser }: LoginPage) {
       if (res.error) {
         setError(res.error.message || 'Something went wrong.');
       } else {
-        router.push('/dashboard');
+        router.push(callbackUrl || '/dashboard');
       }
     } catch {
       setError('An unexpected error occurred.');
@@ -91,7 +92,7 @@ export default function SignInClientPage({ existingUser }: LoginPage) {
                 Welcome Back
               </CardTitle>
               <CardDescription className="text-sm">
-                Sign in to your NextTemp account
+                {callbackUrl ? 'Sign in to view this status page' : 'Sign in to your NextTemp account'}
               </CardDescription>
             </CardHeader>
 

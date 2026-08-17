@@ -29,6 +29,7 @@ export type StatusPageSummary = {
   theme: StatusPageTheme;
   historyWindowDays: HistoryWindowDays;
   isPublished: boolean;
+  requireLogin: boolean;
   monitorCount: number;
   subscriberCount: number;
   overallStatus: OverallStatus;
@@ -52,6 +53,7 @@ export type StatusPageDetail = {
   historyWindowDays: HistoryWindowDays;
   isPublished: boolean;
   showTags: boolean;
+  requireLogin: boolean;
   groups: StatusPageGroupInput[];
 };
 
@@ -267,6 +269,7 @@ const statusPageInput = z.object({
   historyWindowDays: historyWindowDaysEnum,
   isPublished: z.boolean(),
   showTags: z.boolean(),
+  requireLogin: z.boolean(),
   groups: z.array(statusPageGroupInput),
 });
 
@@ -301,6 +304,7 @@ export const statusPageRouter = createTRPCRouter({
       theme: page.theme as StatusPageTheme,
       historyWindowDays: page.historyWindowDays as HistoryWindowDays,
       isPublished: page.isPublished,
+      requireLogin: page.requireLogin,
       monitorCount: page.monitors.length,
       subscriberCount: page._count.subscribers,
       overallStatus: computeOverallStatus(page.monitors.map((m) => m.monitor.status)),
@@ -343,6 +347,7 @@ export const statusPageRouter = createTRPCRouter({
         historyWindowDays: page.historyWindowDays as HistoryWindowDays,
         isPublished: page.isPublished,
         showTags: page.showTags,
+        requireLogin: page.requireLogin,
         groups,
       };
     }),
@@ -362,6 +367,7 @@ export const statusPageRouter = createTRPCRouter({
             historyWindowDays: input.historyWindowDays,
             isPublished: input.isPublished,
             showTags: input.showTags,
+            requireLogin: input.requireLogin,
             createdById: ctx.session.user.id,
           },
         });
@@ -417,6 +423,7 @@ export const statusPageRouter = createTRPCRouter({
             historyWindowDays: input.historyWindowDays,
             isPublished: input.isPublished,
             showTags: input.showTags,
+            requireLogin: input.requireLogin,
           },
         });
 
@@ -488,7 +495,7 @@ export const statusPageRouter = createTRPCRouter({
 
   getPublicBySlug: baseProcedure
     .input(z.object({ slug: z.string() }))
-    .query(async ({ input }): Promise<PublicStatusPage> => {
+    .query(async ({ input, ctx }): Promise<PublicStatusPage> => {
       const page = await prisma.statusPage.findUnique({
         where: { slug: input.slug },
         include: {
@@ -502,6 +509,13 @@ export const statusPageRouter = createTRPCRouter({
 
       if (!page || !page.isPublished) {
         throw new TRPCError({ code: 'NOT_FOUND', message: 'Status page not found' });
+      }
+
+      // Private pages only reveal their content to a signed-in dashboard
+      // user — surfaced as UNAUTHORIZED so the route can redirect to /login
+      // instead of hiding the page's existence like NOT_FOUND does.
+      if (page.requireLogin && !ctx.session?.user) {
+        throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Sign in to view this status page' });
       }
 
       const monitorIds = page.monitors.map((m) => m.monitorId);

@@ -15,6 +15,7 @@ import {
   XCircle,
   Activity,
   Users,
+  Lock,
   Copy,
   X,
   ChevronUp,
@@ -90,6 +91,7 @@ type FormState = {
   historyWindowDays: HistoryWindowDays;
   isPublished: boolean;
   showTags: boolean;
+  requireLogin: boolean;
   groupNames: string[];
   assignment: Record<string, number>; // monitorId -> group index, or UNGROUPED. Absent = not on the page.
   order: string[]; // monitorIds in display order; relative order within a group is what's saved
@@ -108,6 +110,7 @@ function emptyForm(): FormState {
     historyWindowDays: 90,
     isPublished: true,
     showTags: false,
+    requireLogin: false,
     groupNames: [],
     assignment: {},
     order: [],
@@ -147,6 +150,7 @@ function detailToForm(detail: StatusPageDetail): FormState {
     historyWindowDays: detail.historyWindowDays,
     isPublished: detail.isPublished,
     showTags: detail.showTags,
+    requireLogin: detail.requireLogin,
     groupNames,
     assignment,
     order,
@@ -312,6 +316,7 @@ export default function StatusPagesClientPage({ initialStatusPages, monitors }: 
       historyWindowDays: form.historyWindowDays,
       isPublished: form.isPublished,
       showTags: form.showTags,
+      requireLogin: form.requireLogin,
       groups: formToGroups(form),
     };
 
@@ -522,6 +527,20 @@ export default function StatusPagesClientPage({ initialStatusPages, monitors }: 
                     id="sp-published"
                     checked={form.isPublished}
                     onCheckedChange={(checked) => setForm((prev) => ({ ...prev, isPublished: checked }))}
+                  />
+                </div>
+                <div className="flex items-center justify-between rounded-lg border p-3">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="sp-require-login">Require login to view</Label>
+                    <p className="text-xs text-muted-foreground">
+                      Only visitors signed in with a dashboard account can view this page. Others are
+                      redirected to sign in.
+                    </p>
+                  </div>
+                  <Switch
+                    id="sp-require-login"
+                    checked={form.requireLogin}
+                    onCheckedChange={(checked) => setForm((prev) => ({ ...prev, requireLogin: checked }))}
                   />
                 </div>
                 <div className="flex items-center justify-between rounded-lg border p-3">
@@ -837,7 +856,15 @@ export default function StatusPagesClientPage({ initialStatusPages, monitors }: 
                 <TableRow key={page.id}>
                   <TableCell>
                     <div className="flex flex-col">
-                      <span className="font-semibold text-sm">{page.name}</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-semibold text-sm">{page.name}</span>
+                        {page.requireLogin && (
+                          <Badge variant="outline" className="text-[10px] px-1 py-0 h-4 gap-1">
+                            <Lock className="h-2.5 w-2.5" />
+                            Login required
+                          </Badge>
+                        )}
+                      </div>
                       <a
                         href={`/status/${page.slug}`}
                         target="_blank"

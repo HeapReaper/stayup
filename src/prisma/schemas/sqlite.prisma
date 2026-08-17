@@ -227,6 +227,10 @@ model StatusPage {
   isPublished       Boolean  @default(true)
   // Whether each monitor's tags are shown next to its name on this page.
   showTags          Boolean  @default(false)
+  // If true, only visitors signed in with a dashboard account can view this
+  // page — unauthenticated visitors are redirected to /login. Enforced in
+  // statusPage.getPublicBySlug (src/trpc/routers/statuspage.ts).
+  requireLogin      Boolean  @default(false)
   createdById       String?
   createdBy         User?    @relation(fields: [createdById], references: [id], onDelete: SetNull)
   createdAt         DateTime @default(now())

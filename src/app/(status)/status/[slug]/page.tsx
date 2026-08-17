@@ -1,4 +1,4 @@
-import { notFound } from 'next/navigation';
+import { notFound, redirect } from 'next/navigation';
 import { TRPCError } from '@trpc/server';
 import StatusPageClient from '@/app/(status)/status/[slug]/status-page-client';
 import { caller } from '@/trpc/server';
@@ -16,6 +16,9 @@ export default async function StatusPageRoute({ params }: StatusPageRouteProps) 
   } catch (error) {
     if (error instanceof TRPCError && error.code === 'NOT_FOUND') {
       notFound();
+    }
+    if (error instanceof TRPCError && error.code === 'UNAUTHORIZED') {
+      redirect(`/login?callbackUrl=${encodeURIComponent(`/status/${slug}`)}`);
     }
     throw error;
   }
