@@ -126,13 +126,53 @@ func checkOne(ctx context.Context, s *store.Store, opts Options, cfg settings.Se
 		uptime = math.Round(float64(up)/float64(total)*10_000) / 100
 	}
 
-	if err := s.UpdateCheckResult(ctx, monitor.ID, result.Status, result.ResponseTime, uptime, checkedAt); err != nil {
+	// One failed probe is not proof of an outage — a dropped ICMP packet, a
+	// DNS hiccup, a dropped keep-alive or a momentary 502 mid-deploy all look
+	// identical to a real failure from a single check. Roll up the *confirmed*
+	// status instead, so a blip no longer flips the monitor to Down and pages
+	// everyone.
+	reported, err := confirmedStatus(ctx, s, cfg, monitor, result.Status)
+	if err != nil {
+		return err
+	}
+
+	if err := s.UpdateCheckResult(ctx, monitor.ID, reported, result.ResponseTime, uptime, checkedAt); err != nil {
 		return err
 	}
 
 	logResult(opts.WorkerLabel, monitor, result)
-	syncIncidentForResult(ctx, s, opts.WorkerLabel, monitor, result.Status, result.Message)
+	if reported != result.Status {
+		logging.Info(fmt.Sprintf("[%s] %s: %s check not yet confirmed (fewer than %d failures in a row) — holding status at %s",
+			opts.WorkerLabel, monitor.Name, strings.ToLower(result.Status), cfg.FailedAttemptsThreshold, reported))
+		return nil
+	}
+	syncIncidentForResult(ctx, s, opts.WorkerLabel, monitor, reported, result.Message)
 	return nil
+}
+
+// confirmedStatus applies the instance-wide "Failed Attempts Before Alert"
+// threshold (AppSettings.failedAttemptsThreshold) to a fresh check result: a
+// Down/Degraded result is only reported as such once that many checks in a row
+// have failed, and is otherwise held at "Up". The check row itself is always
+// written verbatim, so the ping history and the uptime percentage still count
+// every individual failure — only the monitor's rolled-up status and its
+// incident are debounced.
+//
+// The default threshold is 1, which reports every failure immediately.
+func confirmedStatus(ctx context.Context, s *store.Store, cfg settings.Settings, monitor store.Monitor, status string) (string, error) {
+	if status == "Up" || cfg.FailedAttemptsThreshold <= 1 {
+		return status, nil
+	}
+
+	// Runs after this tick's CreateCheck, so the current result is included.
+	failures, err := s.TrailingFailureCount(ctx, monitor.ID, cfg.FailedAttemptsThreshold)
+	if err != nil {
+		return "", err
+	}
+	if failures < cfg.FailedAttemptsThreshold {
+		return "Up", nil
+	}
+	return status, nil
 }
 
 func logResult(workerLabel string, monitor store.Monitor, result store.CheckResult) {

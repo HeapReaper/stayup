@@ -111,10 +111,11 @@ type StatusPageSubscriber struct {
 // AppSettings mirrors the `app_settings` singleton row's columns the workers
 // read.
 type AppSettings struct {
-	ID               string
-	SupportEmail     *string
-	HTTPTimeoutSecs  int
-	LatencyThreshold int
-	VapidPublicKey   *string
-	VapidPrivateKey  *string
+	ID                      string
+	SupportEmail            *string
+	HTTPTimeoutSecs         int
+	FailedAttemptsThreshold int
+	LatencyThreshold        int
+	VapidPublicKey          *string
+	VapidPrivateKey         *string
 }

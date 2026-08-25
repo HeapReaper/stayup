@@ -11,7 +11,14 @@ import (
 	"stayup/worker/internal/store"
 )
 
-// Ping sends a single ICMP echo request — mirrors performCheck() in
+const (
+	// Echo requests per check, and the gap between them. Three packets 200ms
+	// apart stays well inside the shortest (15s) check interval.
+	pingPacketCount    = 3
+	pingPacketInterval = 200 * time.Millisecond
+)
+
+// Ping sends a short burst of ICMP echo requests — mirrors performCheck() in
 // src/workers/ping.ts, but natively rather than shelling out to the OS
 // `ping` binary: pro-bing opens a raw ICMP socket directly (needs
 // CAP_NET_RAW, already granted to the ping worker container — see
@@ -29,7 +36,12 @@ func Ping(ctx context.Context, cfg settings.Settings, monitor store.Monitor) sto
 		msg := err.Error()
 		return store.CheckResult{Status: "Down", ResponseTime: 0, Message: &msg}
 	}
-	pinger.Count = 1
+	// Send a small burst rather than a single packet: ICMP is lossy by
+	// design, and one dropped packet on an otherwise healthy host is the
+	// classic false "down". The host counts as reachable if *any* echo comes
+	// back, so ordinary packet loss no longer reads as an outage.
+	pinger.Count = pingPacketCount
+	pinger.Interval = pingPacketInterval
 	pinger.Timeout = time.Duration(cfg.HTTPTimeoutSecs) * time.Second
 	pinger.SetPrivileged(true)
 
@@ -42,6 +54,7 @@ func Ping(ctx context.Context, cfg settings.Settings, monitor store.Monitor) sto
 
 	stats := pinger.Statistics()
 	if stats.PacketsRecv == 0 {
+		// Every packet in the burst was lost.
 		msg := "Host unreachable"
 		return store.CheckResult{Status: "Down", ResponseTime: responseTime, Message: &msg}
 	}

@@ -33,3 +33,38 @@ func (s *Store) UptimeCounts(ctx context.Context, monitorID string, windowStart 
 	}
 	return total, up, nil
 }
+
+// TrailingFailureCount reports how many of a monitor's most recent checks
+// failed (status != "Up"), counting back from the newest and stopping at the
+// first successful check. It never looks further back than limit checks, so a
+// caller asking "were the last N in a row failures?" can compare the result
+// against N directly.
+func (s *Store) TrailingFailureCount(ctx context.Context, monitorID string, limit int) (int, error) {
+	rows, err := s.db.QueryContext(ctx, s.q(`
+		SELECT status
+		FROM monitor_check
+		WHERE "monitorId" = ?
+		ORDER BY "checkedAt" DESC
+		LIMIT ?
+	`), monitorID, limit)
+	if err != nil {
+		return 0, fmt.Errorf("store: trailing failure count: %w", err)
+	}
+	defer rows.Close()
+
+	failures := 0
+	for rows.Next() {
+		var status string
+		if err := rows.Scan(&status); err != nil {
+			return 0, fmt.Errorf("store: scan monitor check status: %w", err)
+		}
+		if status == "Up" {
+			break
+		}
+		failures++
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("store: trailing failure count: %w", err)
+	}
+	return failures, nil
+}

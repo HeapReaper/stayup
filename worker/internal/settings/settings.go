@@ -17,11 +17,15 @@ import (
 )
 
 type Settings struct {
-	SupportEmail     *string
-	HTTPTimeoutSecs  int
-	LatencyThreshold int
-	VapidPublicKey   string
-	VapidPrivateKey  string
+	SupportEmail    *string
+	HTTPTimeoutSecs int
+	// How many checks in a row must fail before a monitor is reported as
+	// Down/Degraded — the Settings page's "Failed Attempts Before Alert".
+	// Always >= 1; 1 means "alert on the first failed check".
+	FailedAttemptsThreshold int
+	LatencyThreshold        int
+	VapidPublicKey          string
+	VapidPrivateKey         string
 }
 
 func generateAPIKey() (string, error) {
@@ -68,12 +72,20 @@ func Get(ctx context.Context, s *store.Store) (Settings, error) {
 		row.VapidPrivateKey = &privateKey
 	}
 
+	// Rows written before the column had a default (or hand-edited to 0)
+	// would otherwise disable checking entirely, so floor it at 1.
+	threshold := row.FailedAttemptsThreshold
+	if threshold < 1 {
+		threshold = 1
+	}
+
 	return Settings{
-		SupportEmail:     row.SupportEmail,
-		HTTPTimeoutSecs:  row.HTTPTimeoutSecs,
-		LatencyThreshold: row.LatencyThreshold,
-		VapidPublicKey:   *row.VapidPublicKey,
-		VapidPrivateKey:  *row.VapidPrivateKey,
+		SupportEmail:            row.SupportEmail,
+		HTTPTimeoutSecs:         row.HTTPTimeoutSecs,
+		FailedAttemptsThreshold: threshold,
+		LatencyThreshold:        row.LatencyThreshold,
+		VapidPublicKey:          *row.VapidPublicKey,
+		VapidPrivateKey:         *row.VapidPrivateKey,
 	}, nil
 }
 

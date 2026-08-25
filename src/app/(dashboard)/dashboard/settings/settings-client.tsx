@@ -351,8 +351,9 @@ export default function SettingsClientPage({ initialSettings }: SettingsClientPa
                       }
                     />
                     <p className="text-xs text-muted-foreground">
-                      Stored and shown here; not yet enforced by the workers, which currently open an
-                      incident on the first failed check.
+                      How many checks in a row must fail before a monitor is marked down and an
+                      incident opens. Raise this to stop one-off blips from alerting; every
+                      individual failure is still recorded and still counts against uptime.
                     </p>
                   </div>
 

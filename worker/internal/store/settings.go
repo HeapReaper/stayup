@@ -16,10 +16,10 @@ func (s *Store) GetSettings(ctx context.Context) (*AppSettings, error) {
 	var supportEmail, vapidPub, vapidPriv sql.NullString
 
 	err := s.queryRow(ctx, `
-		SELECT id, "supportEmail", "httpTimeoutSeconds", "latencyThresholdMs", "vapidPublicKey", "vapidPrivateKey"
+		SELECT id, "supportEmail", "httpTimeoutSeconds", "failedAttemptsThreshold", "latencyThresholdMs", "vapidPublicKey", "vapidPrivateKey"
 		FROM app_settings
 		WHERE id = 'singleton'
-	`).Scan(&settings.ID, &supportEmail, &settings.HTTPTimeoutSecs, &settings.LatencyThreshold, &vapidPub, &vapidPriv)
+	`).Scan(&settings.ID, &supportEmail, &settings.HTTPTimeoutSecs, &settings.FailedAttemptsThreshold, &settings.LatencyThreshold, &vapidPub, &vapidPriv)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
