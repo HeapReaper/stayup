@@ -1,293 +1,340 @@
-# NextTemp
-A NextJS template made the way i like it.
+# StayUp
 
+Self-hosted uptime monitoring, incident management and public status pages.
+
+StayUp checks your HTTP endpoints, TCP ports, hosts (ICMP) and DNS records on a schedule, opens and
+resolves incidents automatically, pages you through Discord/Slack/Telegram/PagerDuty/e-mail/web-push,
+and publishes a customer-facing status page with uptime history, incident timelines and scheduled
+maintenance notices.
+
+It's a Next.js dashboard plus a set of small standalone Go workers that share one database. No SaaS,
+no agent to install on the monitored machines — one `docker compose up` and you're running.
 
 ---
 
-## Get Started
+## Features
 
-### Installation
+| | |
+|---|---|
+| **Monitors** | HTTP(s), Ping (ICMP), Port (raw TCP) and DNS checks, at 15s/30s/60s/5m intervals. Per-monitor tags, uptime % over a rolling 30-day window, response-time history and a full ping log. |
+| **Incidents** | Opened automatically when a monitor goes Down/Degraded and moved to *Monitoring* on recovery, or created by hand. Impact levels, a status timeline (Investigating → Identified → Monitoring → Resolved), acknowledgement, and post-mortems that can be drafted privately and published later. |
+| **Status pages** | Multiple pages, each with its own slug, branding (logo, primary colour, theme), ordered monitor groups, history window (7/30/90 days) and incident feed. Optionally reachable on a custom domain, or locked to signed-in users only. |
+| **Maintenance windows** | Scheduled windows that suppress incident creation for the covered monitors while active, and show as "Scheduled maintenance" on the status page instead of an outage. |
+| **Integrations** | Discord, Slack, generic Webhook, Telegram, E-mail, PagerDuty (Events API v2) and browser Web Push. Queued, retried up to 5×, with a delivery log. |
+| **Escalation policies** | Ordered paging chains ("page on-call, then the team channel after 10 minutes if nobody acknowledged") attachable per monitor. |
+| **Subscribers** | E-mail/Discord subscribers per status page, and e-mail subscribers per incident, notified on every incident update. |
+| **Logs & audit trail** | Every check, every notification delivery and every significant dashboard action, with actor and IP. |
+| **Users** | Invite-only. The first account is created through `/register`; after that self-service sign-up is closed and further users are created from the dashboard. |
 
-- Use git clone on  `git@gitlab.com:HeapReaper/nexttemp.git` or download the repo on https://gitlab.com/HeapReaper/nexttemp
-- Put in the repo directory or initiate a repo
-- Run `npm install`
-- Copy `.env.example` to `.env`
-- Fill in: `DB_URL` and make a long `BETTER_AUTH_SECRET` secret
-- Run `npx prisma generate` to generate prisma client
-- Run `npx prisma migrate dev` to apply the schema to the database
-- Run `npm run dev` to start the development server
+## Stack
 
-## Working with NextTemp
+- **Next.js 16** (App Router, React 19, React Compiler) + **TypeScript**
+- **tRPC 11** + **TanStack Query** for the API layer
+- **Prisma 7** with driver adapters — **SQLite** (dev) or **PostgreSQL** (production)
+- **better-auth** (e-mail/password) for sessions
+- **Tailwind CSS 4** + **shadcn/ui** (Base UI) + Lucide + Framer Motion + Recharts
+- **Go 1.25** for the monitor-check and notification workers (`worker/`)
+- **Biome** for lint/format, **Winston** for logging, **React Email** + Nodemailer for mail
 
-### Middleware
-By default in `src/middleware.ts`, `/dashboard` is protected for logged-in users only.
-Here is also sends an welcome e-mail.
+---
 
-### Logging
-To use logging, you can use it like this: 
-```ts
-import { logger } from '@/lib/logging';
-
-// logger.error() and logger.debug() are also possible
-logger.info(`[Mail] Welcome email successfully send to ${to}!`);
+## Architecture
 
 ```
-The helper for it can be found in `src/lib/logging.ts`
-
-### TRPC
-To create a new procedure, make a new file in `src/trpc/routers`, like `user.ts`.  
-Add the following to it (or similar):
-```ts
-import { z } from 'zod';
-import { baseProcedure, createTRPCRouter } from '../init';
-
-export const userRouter = createTRPCRouter({
-  getAll: baseProcedure.query(async () => {
-    return [{ id: '1', name: 'Kelvin' }];
-  }),
-  getById: baseProcedure
-    .input(z.object({ id: z.string() }))
-    .query(async (opts) => {
-      return { id: opts.input.id, name: 'Kelvin' };
-    }),
-});
+                          ┌──────────────────────────┐
+   browser ──────────────►│  Next.js app  (src/)     │
+                          │  dashboard, status pages │
+                          │  tRPC API, better-auth   │
+                          └────────────┬─────────────┘
+                                       │ Prisma
+                          ┌────────────▼─────────────┐
+                          │  PostgreSQL  or  SQLite  │
+                          └────────────▲─────────────┘
+                                       │ hand-written SQL (no Prisma)
+   ┌───────────────────────────────────┴────────────────────────────────────┐
+   │  Go workers (worker/) — one process each, no Node runtime              │
+   │  https · port · ping · dns   →  check monitors, write pings/incidents  │
+   │  integrations                →  deliver queued notifications, escalate │
+   └───────────────────────────────────┬────────────────────────────────────┘
+                                       ▼
+                    Discord · Slack · Telegram · PagerDuty · SMTP · Web Push
 ```
 
-To Query it, there are 2 ways:  
-Server side:
-```ts
-import { caller } from '@/trpc/server';
+The database is the only thing the app and the workers share — there is no RPC between them. The
+dashboard queues work by writing rows (`IntegrationDelivery`), and the workers pick them up on their
+next poll. That's also why the workers can be scaled, restarted or run on another host independently
+of the web app.
 
-const query = await caller.hello.world({ text: 'Kelvin' });
-console.log(query.greeting);
+Two code paths deliberately mirror each other, and must stay behaviourally identical:
+
+| TypeScript (dashboard actions) | Go (automatic, worker-driven) |
+|---|---|
+| `src/lib/incidents.ts` | `worker/internal/incidents` |
+| `src/lib/integration-delivery.ts` | `worker/internal/delivery` + `worker/internal/notify` |
+| `src/lib/maintenance.ts` | `worker/internal/maintenance` |
+| `src/lib/settings.ts` | `worker/internal/settings` |
+| `src/lib/prisma.ts` | `worker/internal/db` |
+
+A manually created incident and an automatically detected one produce the same incident, timeline and
+notification records.
+
+---
+
+## Getting started
+
+### Requirements
+
+- Node.js 20+
+- Go 1.25+ (only if you want to run the workers outside Docker)
+- Optionally Docker + Docker Compose (runs everything, including Postgres and Redis)
+
+### Local development
+
+```bash
+git clone git@gitlab.com:HeapReaper/stayup.git
+cd stayup
+npm install
+
+cp .env.example .env          # set BETTER_AUTH_SECRET, DB_URL, SMTP_*, ...
+npx prisma generate           # generates the client for $DB_PROVIDER
+npx prisma migrate dev        # applies the migration history for $DB_PROVIDER
+
+npm run dev                   # http://localhost:3000
 ```
 
-Client side:
-```ts
-import { useTRPC } from '@/trpc/client';
-import { useQuery } from '@tanstack/react-query';
+Open `/register` and create the first account — that's the only time the public sign-up form works.
+Every further user is created from **Dashboard → Users**.
 
-const trpc = useTRPC();
+The workers are separate processes; start the ones you need in their own terminals:
 
-const { data, isLoading, error } = useQuery(
-  trpc.hello.world.queryOptions({ text: 'Kelvin'})
-)
-
-{data?.greeting}
-```
-
-To make a procedure only accessible for logged in users, use the  
-`protectedProcedure` instead of `baseProcedure`.
-
-### Email
-You can send e-mails server-side like this::
-```ts
-import { sendEmail } from '@/lib/email';
-
-await sendEmail({
-    to: user.email,
-    subject: 'Welcome to NextTemp!',
-    react: WelcomeEmail({ name: user.name }),
-});
-```
-
-### Zod
-To validate user input, you can use Zod like this::
-```ts
-import { z } from 'zod';
-
-export const loginSchema = z.object({
-  email: z
-    .string()
-    .min(1, 'Email is required')
-    .email('Invalid email address'),
-  password: z
-    .string()
-    .min(1, 'Password is required')
-});
-
-export type loginInput = z.infer<typeof loginSchema>;
-```
-
-And then validate like this::
-```ts
-import { loginSchema } from '@/validations/auth';
-
-const rawData = {
-  email: formData.get('email') as string,
-  password: formData.get('password') as string,
-};
-
-const validationResult = loginSchema.safeParse(rawData);
-
-if (!validationResult.success) {
-  const formattedErrors = validationResult.error.format();
-  setFieldErrors({
-    email: formattedErrors.email?._errors[0],
-    password: formattedErrors.password?._errors[0],
-  });
-  return;
-}
-```
-
-To save schema's, there is the `src/validations` directory.
-
-### Prisma
-It has built in support for SQLite and PostgreSQL.  
-To change database, edit `.env` and edit `src/lib/auth.ts` to use the correct provider (found in `.env.example`)  
-
-You can run database queries like this:: 
-```ts
-import { prisma } from '@/lib/prisma';
-
-await prisma.user.findFirst({
-    where: {
-        email: form.email
-    }
-});
-```
-The helper file can be found in `src/lib/prisma.ts`.
-
-### Redis
-You can use Redis like this::
-```ts
-import { redis } from '@/lib/redis';
-
-async function exampleUsage() {
-  await redis.set('user:123:theme', 'dark');
-
-  const theme = await redis.get('user:123:theme');
-  console.log(theme);
-
-  await redis.del('user:123:theme');
-}
-```
-The helper file can be found in `src/lib/redis.ts`.
-
-### Workers
-Long-running checks (e.g. pinging monitors) run as standalone Go binaries in `worker/`, a separate Go
-module living alongside the Next.js app, not inside it — talking to the same Postgres/SQLite database
-directly (hand-written SQL, no Prisma) via `DB_PROVIDER`/`DB_URL`, same as `src/lib/prisma.ts`. They used to
-be `tsx`-run TypeScript scripts in `src/workers/`; they were ported to Go purely for the RAM savings — a
-Node/V8 process per worker vs. a few MB of RSS for a static Go binary.
-
-Each worker only implements "how do I check one monitor" (`worker/internal/checkers`) — the polling loop,
-writing the `MonitorCheck` row (the "pings"), rolling the result up onto the monitor's
-`status`/`responseTime`/`uptime`/`lastCheckedAt`, and opening/updating an incident when a monitor goes
-Down/Degraded, all live once in `worker/internal/runner` and are shared by every worker below.
-
-| Worker | Monitor type | How it checks |
-|---|---|---|
-| `worker/cmd/https` | `HTTP` | GETs the URL |
-| `worker/cmd/port` | `Port` | Raw TCP connect to `host:port` |
-| `worker/cmd/ping` | `Ping` | Native ICMP echo request (needs `CAP_NET_RAW` — granted in `docker-compose.yml`) |
-| `worker/cmd/dns` | `DNS` | Resolves the hostname's A record(s) |
-
-The Settings page's Monitoring Defaults tab (request timeout, latency threshold) is read live by each of
-these on every check via `worker/internal/settings`'s `Get()` — save a new value there and it applies on
-the very next check, no restart needed.
-
-A different kind of worker delivers outgoing notifications instead of checking monitors:
-
-| Worker | Polls | Delivers via |
-|---|---|---|
-| `worker/cmd/integrations` | `IntegrationDelivery` rows (status `Pending`) queued by `src/lib/incidents.ts` (dashboard actions) or `worker/internal/incidents` (automatic incidents) whenever an incident is created or updated | `worker/internal/delivery` — Discord/Slack webhook, generic Webhook POST, Telegram Bot API, Email, Push, or PagerDuty Events API v2, depending on the Integration's `type`. Retries up to 5 times before marking a delivery `Failed`. |
-
-Each tick, this same worker also calls `EscalateOverdueIncidents` (`worker/internal/incidents`): if a
-monitor has an `EscalationPolicy` attached (`Monitor.escalationPolicyId`), its incidents skip the normal
-broadcast to every enabled Integration and are instead paged through that policy's ordered steps — step 1,
-then step 2 after its `delayMinutes` if nobody's acknowledged the incident yet, and so on — stopping as soon
-as someone acknowledges it (`incident.acknowledge`) or it's resolved. Escalation deliveries are just more
-`IntegrationDelivery` rows, so they get the same retry-up-to-5x handling as everything else here.
-
-Run them all with:
 ```bash
 cd worker
 go run ./cmd/https
 go run ./cmd/port
-go run ./cmd/ping   # needs CAP_NET_RAW, i.e. `sudo` or an equivalent, outside Docker
+go run ./cmd/ping          # opens a raw ICMP socket — needs CAP_NET_RAW (sudo) outside Docker
 go run ./cmd/dns
 go run ./cmd/integrations
 ```
 
-Note: unlike `next dev`, nothing here hot-reloads — if you edit worker code while one is already running,
-restart it to pick up the change. `go build -o bin/<name> ./cmd/<name>` from `worker/` produces a standalone
-binary in the gitignored `worker/bin/` if you'd rather not `go run` each time.
+Nothing in `worker/` hot-reloads: restart a worker after editing its code. `go build -o bin/<name>
+./cmd/<name>` writes a standalone binary to the gitignored `worker/bin/`.
 
 ### Docker
-`docker-compose.yml` runs the whole stack: Postgres, Redis, the Next.js app, and all five workers above.
-`web` and every `worker-*` service build from the same `Dockerfile` but different targets: `web` is the
-Node/Next.js image (target `runner`), each `worker-*` is a small `alpine` image holding only that worker's
-static Go binary (target `worker-runner`) — no Node runtime in those containers at all.
+
+`docker-compose.yml` runs the whole stack: Postgres, Redis, the Next.js app and all five workers.
 
 ```bash
 cp .env.example .env   # fill in BETTER_AUTH_SECRET, POSTGRES_PASSWORD, SMTP_*, etc.
 docker compose up --build
 ```
 
+`web` and every `worker-*` service build from the same `Dockerfile` but different targets: `web` is
+the Node/Next.js image (target `runner`), each `worker-*` is a small `alpine` image holding only that
+worker's static Go binary (target `worker-runner`) — no Node runtime in those containers at all.
+
 A few things worth knowing:
-- **Postgres only.** The compose file forces `DB_PROVIDER=postgresql` and points `DB_URL`/`REDIS_URL` at
-  the in-network `postgres`/`redis` hostnames, regardless of what your `.env` has for local `npm run dev`
-  (which defaults to SQLite). Running multiple worker containers against a shared SQLite file is exactly
-  the kind of concurrent-writer situation SQLite isn't built for.
-- **Two migration histories.** Because the SQL is provider-specific, SQLite and Postgres each have their
-  own migration folder — `src/prisma/schemas/migrations/sqlite/` and `.../migrations/postgresql/` — selected
-  automatically via `prisma.config.ts`'s `migrations.path`, based on `DB_PROVIDER`.
-- **No dedicated `migrate` service.** Only `web` runs `prisma migrate deploy` (the Go workers don't carry
-  Prisma, or Node, at all); every `worker-*` service `depends_on: web: condition: service_healthy`, and
-  `web`'s healthcheck only passes once it's actually serving requests — i.e. after `migrate deploy` has
-  already applied the schema — so workers never race a cold, unmigrated database. This all runs as
-  long-lived services on purpose (no one-shot container that exits after migrating): some deployment
-  platforms (Coolify, at least) don't reliably handle an intentionally-exiting container inside a compose
-  stack — the deploy would hang on `web` never leaving "Created", then fail with
-  `Error response from daemon: No such container: <id>` once whatever was polling its status couldn't find
-  it anymore.
-- Verified end to end with a real `docker compose up --build`: `web` applies the Postgres migration
-  history cleanly, and all five Go workers check monitors, open/recover incidents, and retry/deliver
-  Integration notifications correctly against it.
 
-### Shadcn UI
-You can change the theme by going to [ui.shadcn.com/create](https://ui.shadcn.com/create).  
-After changing the style, go to `get code` and `existing project` and copy the command and execute it.  
-All components can be found in `src/components/ui`.
+- **Postgres only.** Compose forces `DB_PROVIDER=postgresql` and points `DB_URL`/`REDIS_URL` at the
+  in-network `postgres`/`redis` hostnames, regardless of what your `.env` says for local `npm run dev`
+  (which defaults to SQLite). Running five worker containers against one SQLite file is exactly the
+  concurrent-writer situation SQLite isn't built for.
+- **No dedicated `migrate` service.** Only `web` runs `prisma migrate deploy` (the Go workers carry
+  neither Prisma nor Node); every `worker-*` service waits for `web` to become *healthy*, and that
+  healthcheck only passes once it's serving requests — i.e. after migrations were applied — so workers
+  never race a cold database. Everything stays a long-lived service on purpose: some platforms
+  (Coolify) don't reliably handle an intentionally-exiting one-shot container inside a compose stack.
+- **`PORT`** is honoured by the app, the compose port mapping and the healthcheck (default 3000).
 
-### Framer Motion
-You can use Framer Motion client side like this: 
-```tsx
-import { motion } from 'framer-motion';
-
-<motion.div
-  // Initial state (before animation starts)
-  initial={{ opacity: 0, scale: 0.8 }}
-  // Target state (animated into on mount)
-  animate={{ opacity: 1, scale: 1 }}
-  // Interactive hover state
-  whileHover={{ scale: 1.05 }}
-  // Interactive click/tap state
-  whileTap={{ scale: 0.95 }}
-  // Animation physics (spring physics for natural movement)
-  transition={{
-    type: 'spring',
-    stiffness: 260,
-    damping: 20,
-  }}
-  className="cursor-pointer rounded-2xl bg-primary p-8 text-primary-foreground shadow-lg"
->
-  <h3 className="text-xl font-bold">Framer Motion Card</h3>
-  <p className="mt-2 text-sm text-primary-foreground/80">
-    Hover over me or click on me!
-  </p>
-</motion.div>
-```
-
-### Lucide React
-You can use Lucide React like this
-```tsx
-import { RefreshCw } from 'lucide-react';
-
-<button className="group flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-primary-foreground font-medium">
-  <span>Refresh</span>
-  <RefreshCw className="h-4 w-4 transition-transform duration-300 group-hover:rotate-180" />
-</button>
-```
 ---
+
+## Configuration
+
+Two layers, on purpose:
+
+**`.env` — infrastructure**, read at process start by both the app and the workers.
+
+| Variable | Notes |
+|---|---|
+| `DB_PROVIDER` | `sqlite` or `postgresql`. Selects the Prisma schema *and* migration folder. |
+| `DB_URL` | `file:./dev.db` or `postgresql://user:pass@host:5432/stayup?schema=public` |
+| `BETTER_AUTH_SECRET` | Long random string. Required. |
+| `BETTER_AUTH_URL` | Public origin of the app; also used to recognise this app's own hostname during custom-domain rewrites. |
+| `PORT` | Port `next dev`/`next start` binds to (default 3000). |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` | Fallback mail transport. |
+| `REDIS_URL` | Optional; a helper exists (`src/lib/redis.ts`) but nothing depends on it yet. |
+| `LOG_LEVEL` | `debug` \| `info` \| `warning` \| `error` |
+| `POSTGRES_PASSWORD` | Docker Compose only — the password of the `postgres` container. |
+
+**Dashboard → Settings — runtime behaviour**, stored in the single-row `AppSettings` table and read
+live by the workers on every tick. Changing these takes effect on the *next check*, no restart:
+
+- *General* — organisation name, timezone, support e-mail
+- *Monitoring defaults* — default interval, HTTP timeout, failed attempts before alerting, latency
+  threshold (above it a check reports **Degraded**), SSL/cert-expiry toggles
+- *SMTP* — overrides the `.env` mail settings, with a "send test e-mail" button
+- *API* — API key and webhook signing secret (regeneratable), plus the auto-generated VAPID key pair
+  used for Web Push
+
+---
+
+## How the monitoring loop works
+
+1. Each check worker polls the DB every 5s for monitors of its type whose `interval` has elapsed
+   (`worker/internal/runner`), and checks all due ones concurrently.
+2. Every check writes a `MonitorCheck` row — the raw "ping" history, always recorded verbatim.
+3. The monitor's rolled-up `status`, `responseTime`, `lastCheckedAt` and 30-day `uptime` are
+   recomputed from those rows.
+4. A Down/Degraded result is only *reported* as such once `failedAttemptsThreshold` checks in a row
+   have failed (default 1 = immediately). Below the threshold the monitor is held at **Up** — a single
+   dropped packet or a 502 mid-deploy shouldn't page anyone. The ping history and uptime % still count
+   every individual failure.
+5. A confirmed Down/Degraded opens an incident, unless the monitor is inside an active maintenance
+   window. Recovery moves the open incident to *Monitoring* (a human still resolves it).
+6. Each incident event either broadcasts to every enabled integration, or — if the monitor has an
+   escalation policy — pages that policy's steps one by one until someone acknowledges. Either way it
+   becomes a `Pending` `IntegrationDelivery` row.
+7. `worker/cmd/integrations` polls that queue every 5s, delivers each row through its channel, and
+   retries up to 5 times before marking it `Failed`. Everything lands in **Dashboard → Logs**.
+
+| Worker | Monitor type | How it checks |
+|---|---|---|
+| `worker/cmd/https` | `HTTP` | GETs the URL, 2xx = up |
+| `worker/cmd/port` | `Port` | Raw TCP connect to `host:port` |
+| `worker/cmd/ping` | `Ping` | Burst of 3 native ICMP echoes; any reply = reachable |
+| `worker/cmd/dns` | `DNS` | Resolves the hostname's A record(s) |
+| `worker/cmd/integrations` | — | Delivers queued notifications and drives escalation |
+
+---
+
+## Project structure
+
+```
+src/
+  app/
+    (public)/            /            → redirects to /login
+    (dashboard)/         /dashboard/* → monitors, incidents, maintenance, status pages,
+                                        integrations, escalations, users, logs, settings
+    (status)/            /status/[slug] → the public status page
+    login/ register/ logout/
+    api/auth/[...all]/   better-auth handler
+    api/trpc/[trpc]/     tRPC handler
+    api/public/status-domain/  custom-domain → slug lookup used by the proxy
+  components/core/       sidebar, navbar, footer, auto-refresh
+  components/ui/         shadcn/ui primitives
+  emails/                React Email templates
+  lib/                   prisma, auth, settings, incidents, integration-delivery, maintenance,
+                         email, discord, push, audit, logging, redis
+  prisma/schemas/        sqlite.prisma + postgresql.prisma, each with its own migrations/ folder
+  trpc/                  init.ts (context + procedures), client/server helpers, routers/
+  validations/           Zod schemas
+  proxy.ts               auth redirects + custom-domain rewrite (Next middleware)
+
+worker/                  separate Go module
+  cmd/{https,port,ping,dns,integrations}/   one binary each
+  internal/checkers/     "how do I check one monitor" per type
+  internal/runner/       shared poll → check → persist → incident-sync loop
+  internal/store/        hand-written SQL for both providers
+  internal/{db,settings,incidents,maintenance,delivery,notify,logging,ids}/
+```
+
+Every dashboard page is split into a server component (`page.tsx`, fetches via the direct tRPC
+`caller`) and a client component (`*-client.tsx`, mutations and interactivity).
+
+---
+
+## Working in this codebase
+
+### tRPC
+
+Add a router in `src/trpc/routers/` and register it in `_app.ts`. Use `protectedProcedure` for
+anything behind the dashboard, `baseProcedure` only for genuinely public endpoints (the status page
+and its subscribe forms).
+
+```ts
+export const exampleRouter = createTRPCRouter({
+  getAll: protectedProcedure.query(async () => prisma.monitor.findMany()),
+});
+```
+
+Server side (React Server Components):
+
+```ts
+import { caller } from '@/trpc/server';
+const monitors = await caller.monitor.getAll();
+```
+
+Client side:
+
+```tsx
+const trpc = useTRPC();
+const { data, isLoading } = useQuery(trpc.monitor.getAll.queryOptions());
+```
+
+No superjson transformer is configured, so `Date`s must be serialised to ISO strings inside the
+router — see `serializeMonitor` in `src/trpc/routers/monitor.ts`.
+
+### Database
+
+Schemas live in `src/prisma/schemas/{sqlite,postgresql}.prisma` and are kept in sync by hand; a
+schema change means writing **both** and generating a migration in **both** histories
+(`src/prisma/schemas/migrations/<provider>/`). `prisma.config.ts` picks the pair based on
+`DB_PROVIDER`. The Go workers don't use Prisma — a new column they need must also be added to the
+relevant query in `worker/internal/store/`.
+
+### Logging
+
+```ts
+import { logger } from '@/lib/logging';
+logger.info('[Mail] Welcome email sent');   // also .error() / .debug()
+```
+
+Writes to the console and to `logs/`. The Go side has the same interface in `worker/internal/logging`.
+
+### E-mail
+
+```ts
+import { sendEmail } from '@/lib/email';
+await sendEmail({ to, subject: 'Welcome', react: WelcomeEmail({ name }) });
+```
+
+Templates are React Email components in `src/emails/`. The workers send mail themselves through
+`worker/internal/notify` with plain Go templates — a template change usually needs to be made twice.
+
+### Audit logging
+
+Every significant mutation records one:
+
+```ts
+await logAudit({ actorId, actorName, action: 'CREATED_MONITOR', target: monitor.name, ipAddress: ctx.ipAddress });
+```
+
+### UI
+
+shadcn/ui components live in `src/components/ui/` (style `base-nova`, base colour `mauve`). Re-theme
+via [ui.shadcn.com/create](https://ui.shadcn.com/create) → *Get code* → *Existing project*.
+
+### Lint & format
+
+```bash
+npm run lint      # biome check
+npm run format    # biome format --write
+cd worker && go vet ./... && gofmt -l .
+```
+
+---
+
+## Deployment notes
+
+- **Custom status-page domains.** Setting `customDomain` on a status page makes `src/proxy.ts`
+  rewrite requests for that host to `/status/<slug>`. Pointing the DNS record at this app and
+  terminating TLS for it is the operator's job.
+- **Behind a reverse proxy.** Internal calls use `http://127.0.0.1:$PORT` on purpose: with TLS
+  terminated at the edge, dialling the public origin would attempt TLS against a plaintext server.
+- **Web Push** needs a service worker at `public/sw.js`; the browser registers `/sw.js` from the
+  Integrations page. VAPID keys are generated automatically on first use.
+- **Incident links in worker-sent e-mails** currently hardcode `http://localhost:3000/dashboard/incidents`
+  (`worker/internal/incidents`).
+
+## License
+
+See [LICENSE](LICENSE).
