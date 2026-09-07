@@ -415,6 +415,12 @@ TypeScript side.
 - **Incident links in worker-sent e-mails** currently hardcode `http://localhost:3000/dashboard/incidents`
   (`worker/internal/incidents`).
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, what to run before pushing, and how to add a
+migration without breaking the other provider's history. [AGENTS.md](AGENTS.md) is the architecture
+guide behind it — worth reading first whether you're a person or an AI assistant.
+
 ## License
 
-See [LICENSE](LICENSE).
+Apache-2.0 — see [LICENSE](LICENSE).
