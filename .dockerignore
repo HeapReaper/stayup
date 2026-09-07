@@ -21,8 +21,8 @@ database.db
 *.tsbuildinfo
 
 Dockerfile
-docker-compose.yml
 docker-compose.yaml
+docker-compose.build.yml
 .dockerignore
 
 README.md

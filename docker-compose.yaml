@@ -1,10 +1,13 @@
-# StayUp — deployable stack, pulling pre-built images from the GitLab
-# container registry. Nothing is built locally, so this file works on its own:
-# no repo checkout, no build context, no .env file next to it. Import it by
-# URL in Portainer / Coolify / Dokploy, or run it directly:
+# StayUp — the stack you deploy. Pulls pre-built images from the GitLab
+# container registry, so nothing is built locally and this file works on its
+# own: no repo checkout, no build context, no .env file next to it. Import it
+# by URL in Portainer / Coolify / Dokploy, or run it directly:
 #
-#   curl -O https://gitlab.com/HeapReaper/stayup/-/raw/main/docker-compose.prod.yml
-#   BETTER_AUTH_SECRET=... POSTGRES_PASSWORD=... docker compose -f docker-compose.prod.yml up -d
+#   curl -O https://gitlab.com/HeapReaper/stayup/-/raw/main/docker-compose.yaml
+#   BETTER_AUTH_SECRET=... POSTGRES_PASSWORD=... docker compose up -d
+#
+# Contributors building from source want docker-compose.build.yml instead
+# (`docker compose -f docker-compose.build.yml up --build`).
 #
 # Two variables have no default on purpose — the stack refuses to start
 # without them rather than booting with a guessable secret:
@@ -31,7 +34,7 @@
 # the public sign-up form ever creates. Everyone after that is invited from
 # Dashboard → Users.
 #
-# To upgrade: `docker compose -f docker-compose.prod.yml pull && ... up -d`.
+# To upgrade: `docker compose pull && docker compose up -d`.
 # `web` runs `prisma migrate deploy` on every start, so schema changes apply
 # themselves, and the workers wait for it to be healthy before starting.
 

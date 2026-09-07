@@ -41,7 +41,8 @@ go run ./cmd/https            # or port | ping | dns | integrations | janitor
 `worker/` hot-reloads — restart it after an edit.
 
 To work against Postgres instead, set `DB_PROVIDER=postgresql` and a `DB_URL`, or run the whole stack
-with `docker compose up --build`.
+from your checkout with `docker compose -f docker-compose.build.yml up --build`. (The default
+`docker-compose.yaml` is the deploy file — it pulls published images and builds nothing.)
 
 ---
 
@@ -66,8 +67,8 @@ If you changed the Dockerfile or either compose file:
 ```bash
 docker build --check --target runner .
 docker build --check --target worker-runner .
-docker compose config > /dev/null
-docker compose -f docker-compose.prod.yml config > /dev/null   # from an empty dir, so a local .env can't mask a missing default
+docker compose -f docker-compose.build.yml config > /dev/null
+docker compose config > /dev/null   # copy docker-compose.yaml to an empty dir first, so a local .env can't mask a missing default
 ```
 
 **A note on Biome:** the repository does not currently pass `npm run lint` cleanly — there's a large
@@ -142,9 +143,9 @@ dashboard's manual actions in TypeScript, the automatic ones in Go. Those pairs 
 break this project**: a manually created incident and an automatically detected one must produce the
 same rows, the same timeline and the same notifications.
 
-The same goes for the two compose files: `docker-compose.yml` (builds from source) and
-`docker-compose.prod.yml` (pulls published images) describe the same stack, and the production one
-must stay standalone — no `build:`, no `env_file:`, no relative paths — because people import it
+The same goes for the two compose files: `docker-compose.build.yml` (builds from source) and
+`docker-compose.yaml` (pulls published images, and is what `docker compose up` uses by default)
+describe the same stack, and the deploy one must stay standalone — no `build:`, no `env_file:`, no relative paths — because people import it
 straight from a URL.
 
 Timestamps: always write UTC (`db.TimeArg` handles it). Prisma maps `DateTime` to a timezone-less

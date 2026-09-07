@@ -26,8 +26,8 @@ configuration lives in the single-row `AppSettings` table, which the workers re-
 | `src/prisma/schemas/` | `sqlite.prisma` and `postgresql.prisma` **plus one migration folder each**. |
 | `src/proxy.ts` | Next middleware: auth redirects + custom-domain rewrite. |
 | `Dockerfile` | Both images: `runner` (web) and `worker-runner` (all six Go binaries). |
-| `docker-compose.yml` | Builds from source — the contributor stack. |
-| `docker-compose.prod.yml` | Pulls published images — the *user* stack, imported by URL. Standalone: no build context, no `.env`, no local paths. |
+| `docker-compose.build.yml` | Builds from source — the contributor stack. |
+| `docker-compose.yaml` | Pulls published images — the *user* stack, imported by URL. Standalone: no build context, no `.env`, no local paths. |
 | `.gitlab-ci.yml` | SAST + secret detection, and the two image-build jobs. |
 | `worker/cmd/*` | One `main.go` per binary: `https`, `port`, `ping`, `dns`, `integrations`, `janitor`. |
 | `worker/internal/checkers/` | "How do I check one monitor" — one function per monitor type. |
@@ -84,8 +84,8 @@ configuration lives in the single-row `AppSettings` table, which the workers re-
    the monitor's *rolled-up* status is debounced by `failedAttemptsThreshold`
    (`confirmedStatus` in `worker/internal/runner/runner.go`). Don't "fix" uptime by not writing rows.
 
-9. **Two compose files, kept in step.** `docker-compose.yml` (build from source) and
-   `docker-compose.prod.yml` (published images) describe the same stack. A change to services,
+9. **Two compose files, kept in step.** `docker-compose.build.yml` (build from source) and
+   `docker-compose.yaml` (published images) describe the same stack. A change to services,
    commands, capabilities, healthchecks or environment in one belongs in the other too. The prod
    file must stay standalone — no `build:`, no `env_file:`, no relative paths — or importing it
    by URL breaks. Adding a worker binary means touching the `for cmd in …` loop in the
@@ -120,13 +120,14 @@ go build -o bin/https ./cmd/https
 go vet ./... && go test ./...
 
 # everything, built from source
-docker compose up --build
+docker compose -f docker-compose.build.yml up --build
 
 # everything, from the published images (what users run)
-BETTER_AUTH_SECRET=... POSTGRES_PASSWORD=... docker compose -f docker-compose.prod.yml up -d
+BETTER_AUTH_SECRET=... POSTGRES_PASSWORD=... docker compose up -d
 
 # validate before committing either compose file / the Dockerfile
-docker compose -f docker-compose.prod.yml config    # run it from an empty dir: a local .env would mask a missing default
+docker compose config                       # copy it to an empty dir first: a local .env would mask a missing default
+docker compose -f docker-compose.build.yml config
 docker build --check --target runner .
 docker build --check --target worker-runner .
 ```
@@ -168,7 +169,7 @@ builds — so run them yourself before pushing.
 1. `worker/internal/checkers/<type>.go` implementing `runner.PerformCheck`.
 2. `worker/cmd/<type>/main.go` — copy an existing one, change the three labels.
 3. Add the binary to the `for cmd in …` loop in `Dockerfile` and a `worker-<type>` service in
-   **both** `docker-compose.yml` and `docker-compose.prod.yml`.
+   **both** `docker-compose.build.yml` and `docker-compose.yaml`.
 4. Extend `monitorTypeEnum` in `src/trpc/routers/monitor.ts` and `normalizeUrl`, plus the monitor form.
    Per-type request options belong behind `httpOptionsFor()`-style blanking so they can't leak
    between types.
@@ -186,7 +187,7 @@ builds — so run them yourself before pushing.
 **A release**: push to `main` (publishes `:latest` + `:<short-sha>`) or push a git tag (also
 publishes `:<tag>`). Both images are built by `.gitlab-ci.yml`; users pin via `STAYUP_VERSION`.
 Anything a new version needs beyond a schema migration — a new env var, a new service — must be
-reflected in `docker-compose.prod.yml`'s header comment, since that file is the deploy
+reflected in `docker-compose.yaml`'s header comment, since that file is the deploy
 documentation for people who never clone the repo.
 
 **A schema change**: edit both `.prisma` files → `DB_PROVIDER=sqlite npx prisma migrate dev` →

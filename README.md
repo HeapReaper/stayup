@@ -131,12 +131,13 @@ Nothing in `worker/` hot-reloads: restart a worker after editing its code. `go b
 
 ### Docker (build from source)
 
-`docker-compose.yml` runs the whole stack: Postgres, Redis, the Next.js app and all six workers.
-Use it when you're changing the code; to just *run* StayUp, use the pre-built images below instead.
+`docker-compose.build.yml` runs the whole stack — Postgres, Redis, the Next.js app and all six
+workers — built from your checkout. Use it when you're changing the code; to just *run* StayUp, use
+the pre-built images below instead (that's what the default `docker-compose.yaml` does).
 
 ```bash
 cp .env.example .env   # fill in BETTER_AUTH_SECRET, POSTGRES_PASSWORD, SMTP_*, etc.
-docker compose up --build
+docker compose -f docker-compose.build.yml up --build
 ```
 
 `web` and every `worker-*` service build from the same `Dockerfile` but different targets: `web` is
@@ -171,20 +172,20 @@ Every push to `main` and every git tag publishes two images to the GitLab contai
 Tags: `latest` (tip of `main`), the release tag on tagged builds, and the commit short SHA on every
 build. Pin `latest` for a rolling install, or a tag for a reproducible one.
 
-**`docker-compose.prod.yml` is the deploy file.** It builds nothing, references no local paths and
-needs no `.env` next to it, so it can be imported straight from a URL in Portainer, Coolify, Dokploy
-or anything else that consumes a compose file:
+**`docker-compose.yaml` — the repo's default compose file — is the deploy file.** It builds nothing,
+references no local paths and needs no `.env` next to it, so it can be imported straight from a URL
+in Portainer, Coolify, Dokploy or anything else that consumes a compose file:
 
 ```
-https://gitlab.com/HeapReaper/stayup/-/raw/main/docker-compose.prod.yml
+https://gitlab.com/HeapReaper/stayup/-/raw/main/docker-compose.yaml
 ```
 
 or, on a plain Docker host:
 
 ```bash
-curl -O https://gitlab.com/HeapReaper/stayup/-/raw/main/docker-compose.prod.yml
+curl -O https://gitlab.com/HeapReaper/stayup/-/raw/main/docker-compose.yaml
 BETTER_AUTH_SECRET="$(openssl rand -base64 32)" POSTGRES_PASSWORD='pick-one' \
-  docker compose -f docker-compose.prod.yml up -d
+  docker compose up -d
 ```
 
 `BETTER_AUTH_SECRET` and `POSTGRES_PASSWORD` are the only required variables — the stack refuses to
@@ -198,8 +199,8 @@ creates.
 Upgrading is a pull plus a recreate:
 
 ```bash
-docker compose -f docker-compose.prod.yml pull
-docker compose -f docker-compose.prod.yml up -d
+docker compose pull
+docker compose up -d
 ```
 
 `web` runs `prisma migrate deploy` on every start, so schema changes apply themselves, and the

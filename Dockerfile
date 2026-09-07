@@ -6,10 +6,10 @@
 # binaries live in that one worker image; which one a container runs is just
 # its `command:`.
 #
-# Built from source by docker-compose.yml, and published to the GitLab
+# Built from source by docker-compose.build.yml, and published to the GitLab
 # container registry as <registry>/web and <registry>/worker by
 # .gitlab-ci.yml's `build:web`/`build:worker` jobs — those images are what
-# docker-compose.prod.yml pulls.
+# docker-compose.yaml pulls.
 # `web`'s stages deliberately skip Next's `standalone` output trimming (that
 # only traces what the Next.js app itself imports) since it no longer needs
 # to — the workers aren't part of this image's Node dependency graph anymore.
@@ -80,10 +80,10 @@ COPY --from=builder /app/scripts ./scripts
 
 # Documentation only — doesn't restrict the actual bind port, which follows
 # $PORT (default 3000; see .env/.env.example and the `web` service's `ports:`
-# in docker-compose.yml) via the `dev`/`start` npm scripts.
+# in both compose files) via the `dev`/`start` npm scripts.
 EXPOSE 3000
 
-# Overridden by docker-compose.yml's `command:` for `web`; a sane default if
+# Overridden by the compose files' `command:` for `web`; a sane default if
 # this target is ever run standalone.
 CMD ["sh", "-c", "npx prisma migrate deploy && npm start"]
 
@@ -127,6 +127,6 @@ LABEL org.opencontainers.image.title="StayUp worker" \
       org.opencontainers.image.version="$BUILD_VERSION" \
       org.opencontainers.image.revision="$BUILD_REVISION"
 
-# Overridden by docker-compose.yml's `command:` for every worker-* service;
+# Overridden by the compose files' `command:` for every worker-* service;
 # https is just a sane default if this target is ever run standalone.
 CMD ["/usr/local/bin/https"]

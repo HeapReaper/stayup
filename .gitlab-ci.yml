@@ -21,7 +21,7 @@ secret_detection:
 
 # ---- Container images ----
 #
-# Publishes the two images docker-compose.prod.yml pulls, both from the one
+# Publishes the two images docker-compose.yaml pulls, both from the one
 # Dockerfile in this repo:
 #
 #   $CI_REGISTRY_IMAGE/web      (target `runner`)        — Next.js app

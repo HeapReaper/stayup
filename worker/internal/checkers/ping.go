@@ -22,7 +22,7 @@ const (
 // src/workers/ping.ts, but natively rather than shelling out to the OS
 // `ping` binary: pro-bing opens a raw ICMP socket directly (needs
 // CAP_NET_RAW, already granted to the ping worker container — see
-// docker-compose.yml), so there's no process-spawn per check and no
+// the compose files), so there's no process-spawn per check and no
 // locale-dependent output to avoid parsing.
 func Ping(ctx context.Context, cfg settings.Settings, monitor store.Monitor) store.CheckResult {
 	host := strings.TrimSpace(monitor.URL)

@@ -1,9 +1,11 @@
-# Runs the whole stack: Postgres, Redis, the Next.js app, and all six
-# monitor-check/notification workers.
+# Runs the whole stack — Postgres, Redis, the Next.js app, and all six
+# monitor-check/notification workers — built from THIS checkout. For working
+# on StayUp; to just run it, use docker-compose.yaml, which pulls the
+# pre-built images from the registry instead of compiling anything.
 #
 # Quick start:
 #   cp .env.example .env   # fill in BETTER_AUTH_SECRET, POSTGRES_PASSWORD, etc.
-#   docker compose up --build
+#   docker compose -f docker-compose.build.yml up --build
 #
 # `web` and every `worker-*` service build from the SAME Dockerfile (see
 # Dockerfile) but different targets/commands: `web` is the Node/Next.js app
