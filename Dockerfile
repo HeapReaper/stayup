@@ -1,8 +1,15 @@
-# Two images from one Dockerfile (see docker-compose.yml): `web` (target
-# `runner`) runs `prisma migrate deploy && next start`; the five `worker-*`
-# services (target `worker-runner`) each run one statically-linked Go binary
-# built from worker/ — no Node/V8 involved, which is the whole point (RAM
-# footprint per worker container drops from a full Node runtime to a few MB).
+# Two images from one Dockerfile: `web` (target `runner`) runs
+# `prisma migrate deploy && next start`; the five `worker-*` services (target
+# `worker-runner`) each run one statically-linked Go binary built from
+# worker/ — no Node/V8 involved, which is the whole point (RAM footprint per
+# worker container drops from a full Node runtime to a few MB). All five
+# binaries live in that one worker image; which one a container runs is just
+# its `command:`.
+#
+# Built from source by docker-compose.yml, and published to the GitLab
+# container registry as <registry>/web and <registry>/worker by
+# .gitlab-ci.yml's `build:web`/`build:worker` jobs — those images are what
+# docker-compose.prod.yml pulls.
 # `web`'s stages deliberately skip Next's `standalone` output trimming (that
 # only traces what the Next.js app itself imports) since it no longer needs
 # to — the workers aren't part of this image's Node dependency graph anymore.
@@ -41,6 +48,19 @@ RUN --mount=type=cache,target=/app/.next/cache npm run build
 FROM base AS runner
 ENV NODE_ENV=production
 
+# Populated by CI (.gitlab-ci.yml) with the git tag/short SHA and the full
+# commit SHA; both default to "dev" so a plain local `docker build` needs no
+# extra flags. Declared here rather than globally so changing them only
+# invalidates this last layer, not the whole build.
+ARG BUILD_VERSION=dev
+ARG BUILD_REVISION=dev
+LABEL org.opencontainers.image.title="StayUp web" \
+      org.opencontainers.image.description="StayUp dashboard, API and public status pages" \
+      org.opencontainers.image.source="https://gitlab.com/HeapReaper/stayup" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.version="$BUILD_VERSION" \
+      org.opencontainers.image.revision="$BUILD_REVISION"
+
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
@@ -62,7 +82,14 @@ CMD ["sh", "-c", "npx prisma migrate deploy && npm start"]
 
 # ---- Go workers ----
 
-FROM golang:1.25-alpine AS go-builder
+# --platform=$BUILDPLATFORM: build the binaries on the *builder's* native
+# architecture and cross-compile to the target one below, instead of emulating
+# the whole toolchain under QEMU — Go cross-compiles for free, emulation
+# doesn't. Only matters for multi-arch `docker buildx build --platform`; a
+# plain single-arch build behaves exactly as before.
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS go-builder
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src/worker
 COPY worker/go.mod worker/go.sum ./
 RUN --mount=type=cache,target=/root/go/pkg/mod go mod download
@@ -72,7 +99,7 @@ COPY worker/ .
 # dependency to match at runtime, which is what lets worker-runner below be
 # just `alpine` + `ca-certificates` instead of needing glibc/musl-dev shims.
 RUN --mount=type=cache,target=/root/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux sh -c '\
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} sh -c '\
     for cmd in https port ping dns integrations; do \
       go build -ldflags="-s -w" -o /out/$cmd ./cmd/$cmd; \
     done'
@@ -83,6 +110,15 @@ FROM alpine:3.20 AS worker-runner
 RUN apk add --no-cache ca-certificates
 COPY --from=go-builder /out/ /usr/local/bin/
 WORKDIR /app
+
+ARG BUILD_VERSION=dev
+ARG BUILD_REVISION=dev
+LABEL org.opencontainers.image.title="StayUp worker" \
+      org.opencontainers.image.description="StayUp monitor-check and notification workers (https, port, ping, dns, integrations)" \
+      org.opencontainers.image.source="https://gitlab.com/HeapReaper/stayup" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.version="$BUILD_VERSION" \
+      org.opencontainers.image.revision="$BUILD_REVISION"
 
 # Overridden by docker-compose.yml's `command:` for every worker-* service;
 # https is just a sane default if this target is ever run standalone.

@@ -119,9 +119,10 @@ go run ./cmd/integrations
 Nothing in `worker/` hot-reloads: restart a worker after editing its code. `go build -o bin/<name>
 ./cmd/<name>` writes a standalone binary to the gitignored `worker/bin/`.
 
-### Docker
+### Docker (build from source)
 
 `docker-compose.yml` runs the whole stack: Postgres, Redis, the Next.js app and all five workers.
+Use it when you're changing the code; to just *run* StayUp, use the pre-built images below instead.
 
 ```bash
 cp .env.example .env   # fill in BETTER_AUTH_SECRET, POSTGRES_PASSWORD, SMTP_*, etc.
@@ -144,6 +145,59 @@ A few things worth knowing:
   never race a cold database. Everything stays a long-lived service on purpose: some platforms
   (Coolify) don't reliably handle an intentionally-exiting one-shot container inside a compose stack.
 - **`PORT`** is honoured by the app, the compose port mapping and the healthcheck (default 3000).
+
+---
+
+## Deploying with pre-built images
+
+Every push to `main` and every git tag publishes two images to the GitLab container registry
+(`.gitlab-ci.yml`), both built from the one `Dockerfile` in this repo:
+
+| Image | Contains |
+|---|---|
+| `registry.gitlab.com/heapreaper/stayup/web` | the Next.js app (dashboard, API, status pages) |
+| `registry.gitlab.com/heapreaper/stayup/worker` | all five Go binaries — the `command:` decides which one a container runs |
+
+Tags: `latest` (tip of `main`), the release tag on tagged builds, and the commit short SHA on every
+build. Pin `latest` for a rolling install, or a tag for a reproducible one.
+
+**`docker-compose.prod.yml` is the deploy file.** It builds nothing, references no local paths and
+needs no `.env` next to it, so it can be imported straight from a URL in Portainer, Coolify, Dokploy
+or anything else that consumes a compose file:
+
+```
+https://gitlab.com/HeapReaper/stayup/-/raw/main/docker-compose.prod.yml
+```
+
+or, on a plain Docker host:
+
+```bash
+curl -O https://gitlab.com/HeapReaper/stayup/-/raw/main/docker-compose.prod.yml
+BETTER_AUTH_SECRET="$(openssl rand -base64 32)" POSTGRES_PASSWORD='pick-one' \
+  docker compose -f docker-compose.prod.yml up -d
+```
+
+`BETTER_AUTH_SECRET` and `POSTGRES_PASSWORD` are the only required variables — the stack refuses to
+start without them rather than booting with a guessable secret. Optional ones (all documented at the
+top of the file): `STAYUP_VERSION` (image tag, default `latest`), `STAYUP_REGISTRY`, `PORT`,
+`BETTER_AUTH_URL` (set this to your public origin in production), `LOG_LEVEL` and `SMTP_*`.
+
+Then open the app and register — that first account is the only one the public sign-up form ever
+creates.
+
+Upgrading is a pull plus a recreate:
+
+```bash
+docker compose -f docker-compose.prod.yml pull
+docker compose -f docker-compose.prod.yml up -d
+```
+
+`web` runs `prisma migrate deploy` on every start, so schema changes apply themselves, and the
+workers wait for it to report healthy before they touch the database.
+
+The published stack ships Postgres, the app and the five workers — no Redis, since nothing reads or
+writes it yet. Images are `linux/amd64`; see the `PLATFORMS` variable in `.gitlab-ci.yml` for
+building `linux/arm64` as well.
 
 ---
 
@@ -325,6 +379,10 @@ cd worker && go vet ./... && gofmt -l .
 
 ## Deployment notes
 
+- **Images and CI.** `.gitlab-ci.yml` builds `web` (target `runner`) and `worker` (target
+  `worker-runner`) with buildx, caching to a `:buildcache` tag in the registry, and pushes them with
+  the job token — no registry credentials to configure. Non-default branches can build the images
+  manually from an MR pipeline without moving `latest`.
 - **Custom status-page domains.** Setting `customDomain` on a status page makes `src/proxy.ts`
   rewrite requests for that host to `/status/<slug>`. Pointing the DNS record at this app and
   terminating TLS for it is the operator's job.

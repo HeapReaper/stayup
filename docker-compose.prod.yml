@@ -1,0 +1,133 @@
+# StayUp — deployable stack, pulling pre-built images from the GitLab
+# container registry. Nothing is built locally, so this file works on its own:
+# no repo checkout, no build context, no .env file next to it. Import it by
+# URL in Portainer / Coolify / Dokploy, or run it directly:
+#
+#   curl -O https://gitlab.com/HeapReaper/stayup/-/raw/main/docker-compose.prod.yml
+#   BETTER_AUTH_SECRET=... POSTGRES_PASSWORD=... docker compose -f docker-compose.prod.yml up -d
+#
+# Two variables have no default on purpose — the stack refuses to start
+# without them rather than booting with a guessable secret:
+#
+#   BETTER_AUTH_SECRET   long random string; signs session cookies.
+#                        Generate with: openssl rand -base64 32
+#   POSTGRES_PASSWORD    password for the bundled Postgres container.
+#
+# Everything else is optional (defaults in brackets):
+#
+#   STAYUP_VERSION       image tag to run [latest] — pin to a release tag
+#   STAYUP_REGISTRY      registry/namespace holding the images
+#                        [registry.gitlab.com/heapreaper/stayup]
+#   PORT                 host + container port for the web UI [3000]
+#   BETTER_AUTH_URL      public origin, e.g. https://status.example.com
+#                        [http://localhost:$PORT]. Set this in production:
+#                        it's also how the app recognises its own hostname
+#                        when serving status pages on custom domains.
+#   LOG_LEVEL            error | warning | info | debug [info]
+#   SMTP_HOST/_PORT/_USER/_PASS/_FROM   fallback mail transport; can also be
+#                        configured (and overridden) in Dashboard → Settings.
+#
+# First run: open the app and register — that first account is the only one
+# the public sign-up form ever creates. Everyone after that is invited from
+# Dashboard → Users.
+#
+# To upgrade: `docker compose -f docker-compose.prod.yml pull && ... up -d`.
+# `web` runs `prisma migrate deploy` on every start, so schema changes apply
+# themselves, and the workers wait for it to be healthy before starting.
+
+x-app-env: &app-env
+  DB_PROVIDER: postgresql
+  DB_URL: postgresql://stayup:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/stayup
+  BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?set BETTER_AUTH_SECRET (openssl rand -base64 32)}
+  BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:${PORT:-3000}}
+  PORT: ${PORT:-3000}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USER: ${SMTP_USER:-}
+  SMTP_PASS: ${SMTP_PASS:-}
+  SMTP_FROM: ${SMTP_FROM:-StayUp <noreply@example.com>}
+
+# Every worker is the same image with a different command, and none of them
+# may start against a database that hasn't been migrated yet — hence waiting
+# for `web` to be *healthy*, not merely started (only `web` carries Prisma).
+x-worker: &worker
+  image: ${STAYUP_REGISTRY:-registry.gitlab.com/heapreaper/stayup}/worker:${STAYUP_VERSION:-latest}
+  restart: unless-stopped
+  environment: *app-env
+  volumes:
+  - logs:/app/logs
+  depends_on:
+    postgres:
+      condition: service_healthy
+    web:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: stayup
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: stayup
+    volumes:
+    - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stayup"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web:
+    image: ${STAYUP_REGISTRY:-registry.gitlab.com/heapreaper/stayup}/web:${STAYUP_VERSION:-latest}
+    restart: unless-stopped
+    environment: *app-env
+    ports:
+    - "${PORT:-3000}:${PORT:-3000}"
+    volumes:
+    - logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["sh", "-c", "npx prisma migrate deploy && npm start"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:${PORT:-3000}/login >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # HTTP(s) monitors — GETs each URL.
+  worker-https:
+    <<: *worker
+    command: ["/usr/local/bin/https"]
+
+  # Port monitors — raw TCP connect to host:port.
+  worker-port:
+    <<: *worker
+    command: ["/usr/local/bin/port"]
+
+  # Ping monitors — native ICMP echo requests. NET_RAW is in Docker's default
+  # capability set already; it's listed explicitly for hardened hosts and
+  # runtimes that drop it, where ping checks would otherwise fail outright.
+  worker-ping:
+    <<: *worker
+    cap_add:
+    - NET_RAW
+    command: ["/usr/local/bin/ping"]
+
+  # DNS monitors — resolves each hostname's A record(s).
+  worker-dns:
+    <<: *worker
+    command: ["/usr/local/bin/dns"]
+
+  # Not a monitor checker: delivers queued notifications (Discord, Slack,
+  # Webhook, Telegram, Email, PagerDuty, Push) and drives escalation policies.
+  worker-integrations:
+    <<: *worker
+    command: ["/usr/local/bin/integrations"]
+
+volumes:
+  postgres-data:
+  logs:

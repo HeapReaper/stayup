@@ -25,6 +25,10 @@ configuration lives in the single-row `AppSettings` table, which the workers re-
 | `src/lib/` | Server-side domain logic and clients (prisma, auth, settings, incidents, integration-delivery, maintenance, email, discord, push, audit, logging, redis). |
 | `src/prisma/schemas/` | `sqlite.prisma` and `postgresql.prisma` **plus one migration folder each**. |
 | `src/proxy.ts` | Next middleware: auth redirects + custom-domain rewrite. |
+| `Dockerfile` | Both images: `runner` (web) and `worker-runner` (all five Go binaries). |
+| `docker-compose.yml` | Builds from source — the contributor stack. |
+| `docker-compose.prod.yml` | Pulls published images — the *user* stack, imported by URL. Standalone: no build context, no `.env`, no local paths. |
+| `.gitlab-ci.yml` | SAST + secret detection, and the two image-build jobs. |
 | `worker/cmd/*` | One `main.go` per binary: `https`, `port`, `ping`, `dns`, `integrations`. |
 | `worker/internal/checkers/` | "How do I check one monitor" — one function per monitor type. |
 | `worker/internal/runner/` | The shared poll → check → persist → roll-up → incident-sync loop. |
@@ -78,7 +82,14 @@ configuration lives in the single-row `AppSettings` table, which the workers re-
    the monitor's *rolled-up* status is debounced by `failedAttemptsThreshold`
    (`confirmedStatus` in `worker/internal/runner/runner.go`). Don't "fix" uptime by not writing rows.
 
-9. **`src/proxy.ts` must not import Prisma.** It runs in the middleware runtime; it reaches data over
+9. **Two compose files, kept in step.** `docker-compose.yml` (build from source) and
+   `docker-compose.prod.yml` (published images) describe the same stack. A change to services,
+   commands, capabilities, healthchecks or environment in one belongs in the other too. The prod
+   file must stay standalone — no `build:`, no `env_file:`, no relative paths — or importing it
+   by URL breaks. Adding a worker binary means touching the `for cmd in …` loop in the
+   `Dockerfile` and adding a service to **both** compose files.
+
+10. **`src/proxy.ts` must not import Prisma.** It runs in the middleware runtime; it reaches data over
    loopback HTTP (`http://127.0.0.1:$PORT`, never `request.nextUrl.origin` — behind a TLS-terminating
    proxy that origin is `https://` while the process only speaks plain HTTP).
 
@@ -101,8 +112,16 @@ go run ./cmd/https             # or port | ping | dns | integrations
 go build -o bin/https ./cmd/https
 go vet ./... && gofmt -l .
 
-# everything
+# everything, built from source
 docker compose up --build
+
+# everything, from the published images (what users run)
+BETTER_AUTH_SECRET=... POSTGRES_PASSWORD=... docker compose -f docker-compose.prod.yml up -d
+
+# validate before committing either compose file / the Dockerfile
+docker compose -f docker-compose.prod.yml config    # run it from an empty dir: a local .env would mask a missing default
+docker build --check --target runner .
+docker build --check --target worker-runner .
 ```
 
 There is **no test suite**. Verify changes by running the affected worker and/or the dashboard and
@@ -149,6 +168,12 @@ watching `logs/` and the Logs page. `ping` needs `CAP_NET_RAW` (i.e. `sudo`) out
 1. `src/app/(dashboard)/dashboard/<name>/{page.tsx,<name>-client.tsx}`.
 2. A router in `src/trpc/routers/`, registered in `_app.ts`, all `protectedProcedure`.
 3. An entry in the `navigation` array in `src/components/core/sidebar.tsx`.
+
+**A release**: push to `main` (publishes `:latest` + `:<short-sha>`) or push a git tag (also
+publishes `:<tag>`). Both images are built by `.gitlab-ci.yml`; users pin via `STAYUP_VERSION`.
+Anything a new version needs beyond a schema migration — a new env var, a new service — must be
+reflected in `docker-compose.prod.yml`'s header comment, since that file is the deploy
+documentation for people who never clone the repo.
 
 **A schema change**: edit both `.prisma` files → `DB_PROVIDER=sqlite npx prisma migrate dev` →
 `DB_PROVIDER=postgresql npx prisma migrate dev` → update `worker/internal/store/` if a worker reads
