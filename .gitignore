@@ -51,6 +51,8 @@ dev.db
 database.db
 
 # Go workers (worker/) — go.mod/go.sum are versioned, build output and
-# `go run` logs aren't
+# `go run` logs aren't. The nested pattern is for `go test`, which runs each
+# package in its own directory, so internal/logging drops a logs/ there.
 /worker/bin
 /worker/logs
+worker/**/logs/

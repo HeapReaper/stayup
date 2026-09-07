@@ -128,6 +128,13 @@ services:
     <<: *worker
     command: ["/usr/local/bin/integrations"]
 
+  # Housekeeping: rolls each finished day of checks up into a daily summary,
+  # then deletes raw checks and finished notifications past their retention
+  # (Dashboard → Settings → Monitoring). One pass at startup, then one per day.
+  worker-janitor:
+    <<: *worker
+    command: ["/usr/local/bin/janitor"]
+
 volumes:
   postgres-data:
   logs:

@@ -94,9 +94,35 @@ model Monitor {
   status        String              @default("Up") // Up | Down | Degraded
   interval      String              @default("60s") // 15s | 30s | 60s | 5m
   port          Int?
+  // Paused monitors keep their history and stay on status pages, but no
+  // worker checks them: the check workers filter on this column
+  // (ListByType in worker/internal/store), so pausing takes effect within one
+  // tick — no restart, no incident, no deletion of past checks.
+  enabled       Boolean             @default(true)
   uptime        Float               @default(100)
   responseTime  Int?
   lastCheckedAt DateTime?
+  // --- HTTP monitor options (ignored by the Ping/Port/DNS workers) ---
+  // How the request is made. `requestHeaders` is a JSON object
+  // ({"Authorization": "Bearer ..."}) kept as text because it's only ever
+  // read back verbatim; the monitor router validates it's parseable on write.
+  method          String   @default("GET") // GET | HEAD | POST | PUT | PATCH | DELETE
+  requestHeaders  String?
+  requestBody     String?
+  followRedirects Boolean  @default(true)
+  // Which response codes count as up: comma-separated codes and/or inclusive
+  // ranges ("200", "200,201", "200-204,301"). Null/empty keeps the original
+  // behavior — any 2xx is up, everything else is down.
+  expectedStatusCodes String?
+  // Content assertion: the check fails unless the response body contains
+  // `keyword` — or, with keywordInverted, unless it doesn't. Only the first
+  // megabyte of the body is searched (see worker/internal/checkers/http.go).
+  keyword         String?
+  keywordInverted Boolean  @default(false)
+  // NotAfter of the TLS certificate seen on the most recent check, or null if
+  // that check wasn't HTTPS. Written by the https worker; read by the
+  // "Certificate Expiry Warning" logic and shown in the monitors list.
+  certExpiresAt   DateTime?
   createdById   String?
   createdBy     User?               @relation(fields: [createdById], references: [id], onDelete: SetNull)
   // Optional paging chain — if set, an open incident on this monitor is paged
@@ -108,6 +134,7 @@ model Monitor {
   createdAt     DateTime            @default(now())
   updatedAt     DateTime            @updatedAt
   checks              MonitorCheck[]
+  dailyStats          MonitorDailyStat[]
   incidents           Incident[]
   statusPages         StatusPageMonitor[]
   maintenanceWindows  MaintenanceWindowMonitor[]
@@ -133,6 +160,30 @@ model MonitorCheck {
 
   @@index([monitorId, checkedAt])
   @@map("monitor_check")
+}
+
+// One row per monitor per UTC day: that day's MonitorCheck rows, aggregated
+// by worker/cmd/janitor once the day is over. It exists so that pruning raw
+// checks doesn't erase status-page history — a 90-day status page keeps
+// working on a 7-day raw retention. The public status page prefers these
+// rows and only falls back to raw checks for days that have no rollup yet
+// (i.e. today, which is still in progress).
+model MonitorDailyStat {
+  id              String   @id @default(cuid())
+  monitorId       String
+  monitor         Monitor  @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  day             DateTime // UTC midnight of the day being summarized
+  totalChecks     Int
+  upChecks        Int
+  degradedChecks  Int
+  downChecks      Int
+  avgResponseTime Int?
+  uptime          Float
+  createdAt       DateTime @default(now())
+
+  @@unique([monitorId, day])
+  @@index([day])
+  @@map("monitor_daily_stat")
 }
 
 model Incident {
@@ -192,9 +243,9 @@ model IncidentUpdate {
   @@map("incident_update")
 }
 
-// Email subscribers for incident notifications. Self-serve "Subscribe to
-// updates" is a future feature — rows here can currently only exist if seeded
-// directly — but every incident update already emails whoever is in here.
+// Email subscribers for incident notifications, added by the "Notify me"
+// button on the public status page (incident.subscribe). Every incident
+// update emails everyone in here. There's no unsubscribe flow yet.
 model IncidentSubscriber {
   id         String   @id @default(cuid())
   incidentId String
@@ -479,8 +530,21 @@ model AppSettings {
   httpTimeoutSeconds       Int      @default(30)
   failedAttemptsThreshold  Int      @default(1)
   latencyThresholdMs       Int      @default(2000)
+  // sslCheckEnabled off = don't verify TLS certificates at all (self-signed
+  // and expired certs still count as up). On, a cert the Go TLS stack
+  // rejects fails the check like any other connection error.
   sslCheckEnabled          Boolean  @default(true)
+  // certExpiryWarningEnabled on = an HTTPS monitor whose certificate expires
+  // within certExpiryWarningDays reports Degraded (and so opens an incident)
+  // while it's still serving traffic fine.
   certExpiryWarningEnabled Boolean  @default(true)
+  certExpiryWarningDays    Int      @default(14)
+  // Retention, enforced once a day by worker/cmd/janitor: raw MonitorCheck
+  // rows and finished (Sent/Failed) IntegrationDelivery rows older than this
+  // are deleted. MonitorDailyStat rollups are never pruned, so status-page
+  // history outlives the raw checks it was built from.
+  checkRetentionDays       Int      @default(90)
+  deliveryRetentionDays    Int      @default(30)
   smtpHost                 String?
   smtpPort                 Int?
   smtpUser                 String?

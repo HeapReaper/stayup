@@ -1,4 +1,4 @@
-# Runs the whole stack: Postgres, Redis, the Next.js app, and all five
+# Runs the whole stack: Postgres, Redis, the Next.js app, and all six
 # monitor-check/notification workers.
 #
 # Quick start:
@@ -107,6 +107,12 @@ services:
   worker-integrations:
     <<: *worker
     command: ["/usr/local/bin/integrations"]
+
+  # Retention + daily rollups. Idle almost all the time: one pass at startup,
+  # then one per UTC day.
+  worker-janitor:
+    <<: *worker
+    command: ["/usr/local/bin/janitor"]
 
 volumes:
   postgres-data:

@@ -8,10 +8,12 @@ import { logAudit } from '@/lib/audit';
 export const monitorTypeEnum = z.enum(['HTTP', 'Ping', 'Port', 'DNS']);
 export const monitorStatusEnum = z.enum(['Up', 'Down', 'Degraded']);
 export const monitorIntervalEnum = z.enum(['15s', '30s', '60s', '5m']);
+export const monitorMethodEnum = z.enum(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE']);
 
 export type MonitorType = z.infer<typeof monitorTypeEnum>;
 export type MonitorStatus = z.infer<typeof monitorStatusEnum>;
 export type MonitorInterval = z.infer<typeof monitorIntervalEnum>;
+export type MonitorMethod = z.infer<typeof monitorMethodEnum>;
 
 const withRelations = {
   tags: { include: { tag: true } },
@@ -28,14 +30,16 @@ type RawMonitor = Prisma.MonitorGetPayload<{ include: typeof withRelations }>;
 // (no superjson transformer is configured, so Dates go over the wire as strings).
 export type Monitor = Omit<
   PrismaMonitor,
-  'type' | 'status' | 'interval' | 'createdAt' | 'updatedAt' | 'lastCheckedAt'
+  'type' | 'status' | 'interval' | 'method' | 'createdAt' | 'updatedAt' | 'lastCheckedAt' | 'certExpiresAt'
 > & {
   type: MonitorType;
   status: MonitorStatus;
   interval: MonitorInterval;
+  method: MonitorMethod;
   createdAt: string;
   updatedAt: string;
   lastCheckedAt: string | null;
+  certExpiresAt: string | null;
   tags: { id: string; name: string; color: string }[];
   escalationPolicyName: string | null;
 };
@@ -46,9 +50,11 @@ function serializeMonitor(monitor: RawMonitor): Monitor {
     type: monitor.type as MonitorType,
     status: monitor.status as MonitorStatus,
     interval: monitor.interval as MonitorInterval,
+    method: monitor.method as MonitorMethod,
     createdAt: monitor.createdAt.toISOString(),
     updatedAt: monitor.updatedAt.toISOString(),
     lastCheckedAt: monitor.lastCheckedAt ? monitor.lastCheckedAt.toISOString() : null,
+    certExpiresAt: monitor.certExpiresAt ? monitor.certExpiresAt.toISOString() : null,
     tags: monitor.tags.map(({ tag }) => tag),
     escalationPolicyName: monitor.escalationPolicy?.name ?? null,
   };
@@ -84,6 +90,38 @@ async function applyTags(tx: Prisma.TransactionClient, monitorId: string, tagNam
   }
 }
 
+// Accepted-status-code spec: comma-separated three-digit codes and/or
+// inclusive ranges, e.g. "200", "200,201", "200-204,301". Parsed by
+// statusCodeAccepted() in worker/internal/checkers/http.go — validated here so
+// a typo surfaces in the form instead of silently failing every check.
+const STATUS_CODE_SPEC = /^\s*[1-5]\d{2}(\s*-\s*[1-5]\d{2})?(\s*,\s*[1-5]\d{2}(\s*-\s*[1-5]\d{2})?)*\s*$/;
+
+/** Stored as text and handed to the worker verbatim, so it has to be a flat JSON object of strings. */
+function isHeaderJsonObject(value: string): boolean {
+  try {
+    const parsed = JSON.parse(value);
+    return (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      !Array.isArray(parsed) &&
+      Object.values(parsed).every((v) => typeof v === 'string')
+    );
+  } catch {
+    return false;
+  }
+}
+
+// Empty strings from the form mean "not set" for every one of these — they're
+// nullable columns, and '' would otherwise be a keyword that matches nothing
+// or a status spec that accepts nothing.
+const optionalText = (max: number) =>
+  z
+    .string()
+    .trim()
+    .max(max)
+    .optional()
+    .transform((value) => value || null);
+
 const monitorBaseInput = z.object({
   name: z.string().trim().min(1, 'Name is required').max(120),
   url: z.string().trim().min(1, 'URL or host is required').max(500),
@@ -94,18 +132,70 @@ const monitorBaseInput = z.object({
   // notification behavior (see src/lib/incidents.ts's notifyOrEscalate).
   escalationPolicyId: z.string().nullable().optional(),
   tagNames: z.array(z.string().trim().min(1).max(40)).max(20).optional().default([]),
+
+  // HTTP-only request options. Accepted (and stored) for every type so the
+  // form can stay simple, but blanked out below for Ping/Port/DNS, whose
+  // workers ignore them entirely.
+  method: monitorMethodEnum.optional().default('GET'),
+  requestHeaders: optionalText(4000).refine((value) => value === null || isHeaderJsonObject(value), {
+    message: 'Headers must be a JSON object of string values, e.g. {"Authorization": "Bearer …"}',
+  }),
+  requestBody: optionalText(10_000),
+  followRedirects: z.boolean().optional().default(true),
+  expectedStatusCodes: optionalText(200).refine((value) => value === null || STATUS_CODE_SPEC.test(value), {
+    message: 'Use status codes or ranges, e.g. "200", "200,201" or "200-204,301"',
+  }),
+  keyword: optionalText(200),
+  keywordInverted: z.boolean().optional().default(false),
 });
 
 const withPortRequiredForPortType = <T extends typeof monitorBaseInput>(schema: T) =>
-  schema.refine((data) => data.type !== 'Port' || typeof data.port === 'number', {
-    message: 'Port is required for Port monitors',
-    path: ['port'],
-  });
+  schema
+    .refine((data) => data.type !== 'Port' || typeof data.port === 'number', {
+      message: 'Port is required for Port monitors',
+      path: ['port'],
+    })
+    // A HEAD response has no body, so a keyword assertion on one could only
+    // ever fail — catch that here rather than letting it look like an outage.
+    .refine((data) => !data.keyword || data.method !== 'HEAD', {
+      message: 'A HEAD request has no response body to search for a keyword',
+      path: ['keyword'],
+    });
 
 const monitorCreateInput = withPortRequiredForPortType(monitorBaseInput);
 const monitorUpdateInput = withPortRequiredForPortType(
   monitorBaseInput.extend({ id: z.string() }),
 );
+
+/**
+ * The HTTP-only columns, reduced to their defaults for monitor types whose
+ * workers don't read them — so switching a monitor from HTTP to Ping doesn't
+ * leave a stale keyword or status-code spec behind, waiting to surprise
+ * whoever switches it back.
+ */
+function httpOptionsFor(input: z.infer<typeof monitorBaseInput>) {
+  if (input.type !== 'HTTP') {
+    return {
+      method: 'GET',
+      requestHeaders: null,
+      requestBody: null,
+      followRedirects: true,
+      expectedStatusCodes: null,
+      keyword: null,
+      keywordInverted: false,
+    };
+  }
+
+  return {
+    method: input.method,
+    requestHeaders: input.requestHeaders,
+    requestBody: input.requestBody,
+    followRedirects: input.followRedirects,
+    expectedStatusCodes: input.expectedStatusCodes,
+    keyword: input.keyword,
+    keywordInverted: input.keywordInverted,
+  };
+}
 
 export const monitorRouter = createTRPCRouter({
   getAll: protectedProcedure.query(async () => {
@@ -145,6 +235,7 @@ export const monitorRouter = createTRPCRouter({
             port: input.type === 'Port' ? input.port : null,
             escalationPolicyId: input.escalationPolicyId || null,
             createdById: ctx.session.user.id,
+            ...httpOptionsFor(input),
           },
         });
 
@@ -184,6 +275,10 @@ export const monitorRouter = createTRPCRouter({
             interval: input.interval,
             port: input.type === 'Port' ? input.port : null,
             escalationPolicyId: input.escalationPolicyId || null,
+            ...httpOptionsFor(input),
+            // A monitor that stops being HTTP can't have a meaningful
+            // certificate expiry any more.
+            ...(input.type === 'HTTP' ? {} : { certExpiresAt: null }),
           },
         });
 
@@ -201,6 +296,38 @@ export const monitorRouter = createTRPCRouter({
       });
 
       const full = await prisma.monitor.findUniqueOrThrow({ where: { id: monitor.id }, include: withRelations });
+      return serializeMonitor(full);
+    }),
+
+  /**
+   * Pause or resume a monitor. Pausing only stops the workers from picking it
+   * up (they filter on `enabled`); the monitor keeps its history, its uptime
+   * figure and its place on any status page, and any incident it already has
+   * open stays open — nobody's outage disappears because someone hit pause.
+   */
+  setEnabled: protectedProcedure
+    .input(z.object({ id: z.string(), enabled: z.boolean() }))
+    .mutation(async ({ input, ctx }) => {
+      const existing = await prisma.monitor.findUnique({ where: { id: input.id } });
+
+      if (!existing) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'Monitor not found' });
+      }
+
+      await prisma.monitor.update({
+        where: { id: input.id },
+        data: { enabled: input.enabled },
+      });
+
+      await logAudit({
+        actorId: ctx.session.user.id,
+        actorName: ctx.session.user.name,
+        action: input.enabled ? 'RESUMED_MONITOR' : 'PAUSED_MONITOR',
+        target: existing.name,
+        ipAddress: ctx.ipAddress,
+      });
+
+      const full = await prisma.monitor.findUniqueOrThrow({ where: { id: input.id }, include: withRelations });
       return serializeMonitor(full);
     }),
 

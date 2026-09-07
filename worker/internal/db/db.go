@@ -119,13 +119,21 @@ func (d *DB) Rebind(query string) string {
 }
 
 // TimeArg converts a time.Time into the right bound-parameter representation
-// for this provider. Postgres/pgx takes time.Time natively. SQLite (via
-// Prisma's Boolean/DateTime mapping) stores DateTime columns as TEXT — match
-// the exact format Prisma writes (UTC, millisecond precision, "Z" suffix) so
-// rows written by Go and by the Next.js app stay interchangeable.
+// for this provider. Both branches normalize to UTC first: Prisma maps
+// DateTime to a *timezone-less* column on both providers (TIMESTAMP(3) on
+// Postgres, TEXT on SQLite) and always writes UTC into it, so a Go process
+// running in any other zone would otherwise store wall-clock times that read
+// back hours off — enough for a worker to decide a monitor isn't due yet, or
+// for the janitor to prune the wrong side of a retention cutoff. Under Docker
+// (TZ=UTC) the difference is invisible, which is exactly what makes it worth
+// pinning down here.
+//
+// The SQLite branch additionally matches the exact text format Prisma writes
+// (millisecond precision, "Z" suffix), so rows written by Go and by the
+// Next.js app stay comparable as strings.
 func (d *DB) TimeArg(t time.Time) any {
 	if d.Provider == Postgres {
-		return t
+		return t.UTC()
 	}
 	return t.UTC().Format("2006-01-02T15:04:05.000Z")
 }

@@ -15,10 +15,13 @@ import {
   Copy,
   X,
   Tag as TagIcon,
+  Pause,
+  Play,
+  ShieldAlert,
 } from 'lucide-react';
 
 import { useTRPC } from '@/trpc/client';
-import type { Monitor, MonitorType, MonitorInterval } from '@/trpc/routers/monitor';
+import type { Monitor, MonitorType, MonitorInterval, MonitorMethod } from '@/trpc/routers/monitor';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -56,6 +59,8 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Textarea } from '@/components/ui/textarea';
+import { Switch } from '@/components/ui/switch';
 
 interface MonitorsClientPageProps {
   initialMonitors: Monitor[];
@@ -73,6 +78,15 @@ type MonitorFormState = {
   port: string;
   tags: string[];
   escalationPolicyId: string;
+  // HTTP-only; kept in the form for every type (the server blanks them out
+  // for Ping/Port/DNS) so switching type back and forth doesn't lose input.
+  method: MonitorMethod;
+  requestHeaders: string;
+  requestBody: string;
+  followRedirects: boolean;
+  expectedStatusCodes: string;
+  keyword: string;
+  keywordInverted: boolean;
 };
 
 // Base UI's <SelectValue> only resolves a label once its item list has
@@ -102,6 +116,13 @@ function emptyForm(): MonitorFormState {
     port: '',
     tags: [],
     escalationPolicyId: NO_ESCALATION_POLICY,
+    method: 'GET',
+    requestHeaders: '',
+    requestBody: '',
+    followRedirects: true,
+    expectedStatusCodes: '',
+    keyword: '',
+    keywordInverted: false,
   };
 }
 
@@ -114,12 +135,33 @@ function monitorToForm(monitor: Monitor): MonitorFormState {
     port: monitor.port ? String(monitor.port) : '',
     tags: monitor.tags.map((tag) => tag.name),
     escalationPolicyId: monitor.escalationPolicyId ?? NO_ESCALATION_POLICY,
+    method: monitor.method,
+    requestHeaders: monitor.requestHeaders ?? '',
+    requestBody: monitor.requestBody ?? '',
+    followRedirects: monitor.followRedirects,
+    expectedStatusCodes: monitor.expectedStatusCodes ?? '',
+    keyword: monitor.keyword ?? '',
+    keywordInverted: monitor.keywordInverted,
   };
 }
 
 function formatLastChecked(date: Date | string | null) {
   if (!date) return 'Never checked';
   return new Date(date).toLocaleString();
+}
+
+// Only surfaced once it's close enough to act on — a certificate with months
+// left is noise in a table you scan for outages.
+const CERT_EXPIRY_NOTICE_DAYS = 30;
+
+function certExpiryNotice(certExpiresAt: string | null): string | null {
+  if (!certExpiresAt) return null;
+
+  const days = Math.floor((new Date(certExpiresAt).getTime() - Date.now()) / 86_400_000);
+  if (days > CERT_EXPIRY_NOTICE_DAYS) return null;
+  if (days < 0) return 'Certificate expired';
+  if (days === 0) return 'Certificate expires today';
+  return `Certificate expires in ${days} day${days === 1 ? '' : 's'}`;
 }
 
 export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPageProps) {
@@ -184,14 +226,26 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
     }),
   );
 
+  const setMonitorEnabled = useMutation(
+    trpc.monitor.setEnabled.mutationOptions({
+      onSuccess: () => invalidateMonitors(),
+    }),
+  );
+
   // Filter by search query & status tab
   const filteredMonitors = monitors.filter((m) => {
     const matchesSearch =
       m.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       m.url.toLowerCase().includes(searchQuery.toLowerCase());
 
+    // A paused monitor keeps its last known status, so it would otherwise
+    // still show up under Up/Down — it belongs in exactly one tab.
     const matchesStatus =
-      statusFilter === 'all' || m.status.toLowerCase() === statusFilter.toLowerCase();
+      statusFilter === 'all'
+        ? true
+        : statusFilter === 'paused'
+          ? !m.enabled
+          : m.enabled && m.status.toLowerCase() === statusFilter.toLowerCase();
 
     return matchesSearch && matchesStatus;
   });
@@ -244,6 +298,13 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
       port: form.type === 'Port' ? Number(form.port) : undefined,
       tagNames: form.tags,
       escalationPolicyId: form.escalationPolicyId === NO_ESCALATION_POLICY ? null : form.escalationPolicyId,
+      method: form.method,
+      requestHeaders: form.requestHeaders,
+      requestBody: form.requestBody,
+      followRedirects: form.followRedirects,
+      expectedStatusCodes: form.expectedStatusCodes,
+      keyword: form.keyword,
+      keywordInverted: form.keywordInverted,
     };
 
     if (editingId) {
@@ -428,6 +489,112 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                 )}
               </div>
 
+              {form.type === 'HTTP' && (
+                <div className="grid gap-4 rounded-lg border p-3">
+                  <div className="space-y-0.5">
+                    <Label className="text-sm font-medium">Request &amp; assertions</Label>
+                    <p className="text-xs text-muted-foreground">
+                      Leave these alone for a plain availability check: a GET that counts any 2xx as up.
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="grid gap-2">
+                      <Label htmlFor="method">Method</Label>
+                      <Select
+                        value={form.method}
+                        onValueChange={(val) => {
+                          if (val) setForm({ ...form, method: val as MonitorMethod });
+                        }}
+                      >
+                        <SelectTrigger id="method">
+                          <SelectValue>{(val: MonitorMethod) => val}</SelectValue>
+                        </SelectTrigger>
+                        <SelectContent>
+                          {(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'] as const).map((method) => (
+                            <SelectItem key={method} value={method}>
+                              {method}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <div className="grid gap-2">
+                      <Label htmlFor="expectedStatusCodes">Expected status</Label>
+                      <Input
+                        id="expectedStatusCodes"
+                        placeholder="Any 2xx"
+                        value={form.expectedStatusCodes}
+                        onChange={(e) => setForm({ ...form, expectedStatusCodes: e.target.value })}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid gap-2">
+                    <Label htmlFor="keyword">Response must contain</Label>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        id="keyword"
+                        placeholder='e.g. "healthy"'
+                        value={form.keyword}
+                        onChange={(e) => setForm({ ...form, keyword: e.target.value })}
+                      />
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <Switch
+                          id="keywordInverted"
+                          checked={form.keywordInverted}
+                          onCheckedChange={(checked) => setForm({ ...form, keywordInverted: checked })}
+                        />
+                        <Label htmlFor="keywordInverted" className="text-xs font-normal">
+                          Invert
+                        </Label>
+                      </div>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      The check fails when the body doesn't contain this text — or, inverted, when it
+                      does. Only the first megabyte of the response is searched.
+                    </p>
+                  </div>
+
+                  <div className="grid gap-2">
+                    <Label htmlFor="requestHeaders">Headers (JSON)</Label>
+                    <Textarea
+                      id="requestHeaders"
+                      rows={2}
+                      className="font-mono text-xs"
+                      placeholder='{"Authorization": "Bearer …"}'
+                      value={form.requestHeaders}
+                      onChange={(e) => setForm({ ...form, requestHeaders: e.target.value })}
+                    />
+                  </div>
+
+                  {form.method !== 'GET' && form.method !== 'HEAD' && (
+                    <div className="grid gap-2">
+                      <Label htmlFor="requestBody">Request body</Label>
+                      <Textarea
+                        id="requestBody"
+                        rows={2}
+                        className="font-mono text-xs"
+                        value={form.requestBody}
+                        onChange={(e) => setForm({ ...form, requestBody: e.target.value })}
+                      />
+                    </div>
+                  )}
+
+                  <div className="flex items-center justify-between">
+                    <Label htmlFor="followRedirects" className="text-sm font-normal">
+                      Follow redirects
+                    </Label>
+                    <Switch
+                      id="followRedirects"
+                      checked={form.followRedirects}
+                      onCheckedChange={(checked) => setForm({ ...form, followRedirects: checked })}
+                    />
+                  </div>
+                </div>
+              )}
+
               <div className="grid gap-2">
                 <Label htmlFor="escalation">Escalation policy</Label>
                 <Select
@@ -498,6 +665,9 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
             <TabsTrigger value="down">
               Down ({monitors.filter((m) => m.status === 'Down').length})
             </TabsTrigger>
+            <TabsTrigger value="paused">
+              Paused ({monitors.filter((m) => !m.enabled).length})
+            </TabsTrigger>
           </TabsList>
         </Tabs>
       </div>
@@ -524,7 +694,7 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
               </TableRow>
             ) : (
               filteredMonitors.map((monitor) => (
-                <TableRow key={monitor.id}>
+                <TableRow key={monitor.id} className={monitor.enabled ? undefined : 'opacity-60'}>
                   {/* Name + URL */}
                   <TableCell>
                     <div className="flex flex-col">
@@ -544,6 +714,12 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                         {monitor.port ? `:${monitor.port}` : ''}
                         {monitor.type === 'HTTP' && <ExternalLink className="h-3 w-3" />}
                       </a>
+                      {certExpiryNotice(monitor.certExpiresAt) && (
+                        <span className="text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1 mt-0.5">
+                          <ShieldAlert className="h-3 w-3" />
+                          {certExpiryNotice(monitor.certExpiresAt)}
+                        </span>
+                      )}
                       {monitor.tags.length > 0 && (
                         <div className="flex flex-wrap gap-1 mt-1">
                           {monitor.tags.map((tag) => (
@@ -558,6 +734,12 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
 
                   {/* Status Badge */}
                   <TableCell>
+                    {!monitor.enabled ? (
+                      <Badge variant="secondary" className="gap-1.5">
+                        <Pause className="h-3.5 w-3.5" />
+                        Paused
+                      </Badge>
+                    ) : (
                     <Badge
                       variant="secondary"
                       className={
@@ -573,6 +755,7 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                       {monitor.status === 'Down' && <XCircle className="h-3.5 w-3.5" />}
                       {monitor.status}
                     </Badge>
+                    )}
                   </TableCell>
 
                   {/* Uptime Percentage */}
@@ -626,6 +809,23 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                           <DropdownMenuItem onClick={() => openEdit(monitor)}>
                             <Pencil className="mr-2 h-4 w-4" />
                             Edit
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            onClick={() =>
+                              setMonitorEnabled.mutate({ id: monitor.id, enabled: !monitor.enabled })
+                            }
+                          >
+                            {monitor.enabled ? (
+                              <>
+                                <Pause className="mr-2 h-4 w-4" />
+                                Pause checks
+                              </>
+                            ) : (
+                              <>
+                                <Play className="mr-2 h-4 w-4" />
+                                Resume checks
+                              </>
+                            )}
                           </DropdownMenuItem>
                         </DropdownMenuGroup>
                         <DropdownMenuSeparator />
