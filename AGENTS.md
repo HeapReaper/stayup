@@ -25,15 +25,17 @@ configuration lives in the single-row `AppSettings` table, which the workers re-
 | `src/lib/` | Server-side domain logic and clients (prisma, auth, settings, incidents, integration-delivery, maintenance, email, discord, push, audit, logging, redis). |
 | `src/prisma/schemas/` | `sqlite.prisma` and `postgresql.prisma` **plus one migration folder each**. |
 | `src/proxy.ts` | Next middleware: auth redirects + custom-domain rewrite. |
-| `Dockerfile` | Both images: `runner` (web) and `worker-runner` (all five Go binaries). |
+| `Dockerfile` | Both images: `runner` (web) and `worker-runner` (all six Go binaries). |
 | `docker-compose.yml` | Builds from source — the contributor stack. |
 | `docker-compose.prod.yml` | Pulls published images — the *user* stack, imported by URL. Standalone: no build context, no `.env`, no local paths. |
 | `.gitlab-ci.yml` | SAST + secret detection, and the two image-build jobs. |
-| `worker/cmd/*` | One `main.go` per binary: `https`, `port`, `ping`, `dns`, `integrations`. |
+| `worker/cmd/*` | One `main.go` per binary: `https`, `port`, `ping`, `dns`, `integrations`, `janitor`. |
 | `worker/internal/checkers/` | "How do I check one monitor" — one function per monitor type. |
 | `worker/internal/runner/` | The shared poll → check → persist → roll-up → incident-sync loop. |
 | `worker/internal/store/` | All SQL. Both providers, one query string each. |
 | `worker/internal/{incidents,delivery,notify,maintenance,settings,db,logging,ids}/` | Go counterparts of the matching `src/lib/` files. |
+| `worker/internal/store/janitor.go` | Retention + rollup SQL. The one part of the Go side with no TypeScript counterpart — the dashboard never prunes or aggregates. |
+| `public/sw.js` | Service worker for Web Push. Third place the push payload shape is written down, after `src/lib/push.ts` and `worker/internal/notify/push.go`. |
 
 ## 3. Invariants — break these and things silently diverge
 
@@ -89,7 +91,12 @@ configuration lives in the single-row `AppSettings` table, which the workers re-
    by URL breaks. Adding a worker binary means touching the `for cmd in …` loop in the
    `Dockerfile` and adding a service to **both** compose files.
 
-10. **`src/proxy.ts` must not import Prisma.** It runs in the middleware runtime; it reaches data over
+10. **Never prune before rolling up.** `cmd/janitor` summarizes each finished day into
+    `MonitorDailyStat` *and then* deletes raw checks past their retention, in that order, because the
+    rollup is the only thing that survives the delete — the public status page reads rollups for past
+    days and raw checks only for today. Reordering those two steps silently erases history.
+
+11. **`src/proxy.ts` must not import Prisma.** It runs in the middleware runtime; it reaches data over
    loopback HTTP (`http://127.0.0.1:$PORT`, never `request.nextUrl.origin` — behind a TLS-terminating
    proxy that origin is `https://` while the process only speaks plain HTTP).
 
@@ -110,7 +117,7 @@ npx prisma migrate deploy      # production
 # workers (from worker/)
 go run ./cmd/https             # or port | ping | dns | integrations
 go build -o bin/https ./cmd/https
-go vet ./... && gofmt -l .
+go vet ./... && go test ./...
 
 # everything, built from source
 docker compose up --build
@@ -124,8 +131,13 @@ docker build --check --target runner .
 docker build --check --target worker-runner .
 ```
 
-There is **no test suite**. Verify changes by running the affected worker and/or the dashboard and
-watching `logs/` and the Logs page. `ping` needs `CAP_NET_RAW` (i.e. `sudo`) outside Docker.
+The only tests are `worker/internal/checkers/http_test.go` (the HTTP checker's request options,
+status-code spec and certificate-expiry logic). Everything else is verified by running the affected
+worker and/or the dashboard and watching `logs/` and the Logs page. `ping` needs `CAP_NET_RAW` (i.e.
+`sudo`) outside Docker.
+
+CI runs neither the Go tests nor the build — it only does SAST, secret detection, and the two image
+builds — so run them yourself before pushing.
 
 ## 5. Conventions
 
@@ -156,8 +168,10 @@ watching `logs/` and the Logs page. `ping` needs `CAP_NET_RAW` (i.e. `sudo`) out
 1. `worker/internal/checkers/<type>.go` implementing `runner.PerformCheck`.
 2. `worker/cmd/<type>/main.go` — copy an existing one, change the three labels.
 3. Add the binary to the `for cmd in …` loop in `Dockerfile` and a `worker-<type>` service in
-   `docker-compose.yml`.
+   **both** `docker-compose.yml` and `docker-compose.prod.yml`.
 4. Extend `monitorTypeEnum` in `src/trpc/routers/monitor.ts` and `normalizeUrl`, plus the monitor form.
+   Per-type request options belong behind `httpOptionsFor()`-style blanking so they can't leak
+   between types.
 
 **A new integration channel**
 1. Add it to `integrationTypeEnum` (`src/trpc/routers/integration.ts`) and the form UI.
@@ -181,15 +195,22 @@ or writes the column.
 
 ## 7. Known rough edges (don't mistake these for bugs to "fix" silently)
 
-- `public/sw.js` **does not exist** in the repo, but `integrations-client.tsx` registers `/sw.js`
-  for Web Push. Push registration will fail until that file is added.
 - `worker/internal/incidents` hardcodes `http://localhost:3000/dashboard/incidents` as the incident
   link in worker-sent e-mails.
 - `src/lib/redis.ts` and `REDIS_URL` are a leftover from the NextTemp template — Redis is running in
   compose but nothing reads or writes it.
 - `src/trpc/routers/hello.ts` is template scaffolding.
-- `IncidentSubscriber` rows can't be created from the UI's own flow yet, but every incident update
-  already e-mails whoever is in that table.
+- **Inert configuration.** Some `AppSettings` fields are still editable in the UI but read by
+  nothing: `defaultCheckInterval` (the monitor form doesn't use it as its default), `timezone`
+  (timestamps render in the viewer's locale), and `apiKey` / `webhookSigningSecret` (there is no
+  public API to authenticate, and outgoing webhooks aren't signed).
+- **Uptime is still raw-check based.** `runner`'s 30-day uptime percentage counts `MonitorCheck`
+  rows, not rollups, so a `checkRetentionDays` below 30 quietly narrows the window it covers. The
+  status page's day bars don't have this problem — they prefer rollups.
+- **The check workers don't claim work.** `runner.tick` selects every due monitor of its type with
+  no lease or lock, so running two replicas of the same worker double-checks every monitor.
+- Incident subscribers can subscribe ("Notify me" on the public status page) but there is no
+  unsubscribe flow, and no double opt-in.
 - `package.json` is still named `my-app`.
 - `src/lib/email.ts` sets `tls.rejectUnauthorized: false` for the fallback SMTP transport.
 

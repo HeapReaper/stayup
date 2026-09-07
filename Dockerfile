@@ -1,8 +1,8 @@
 # Two images from one Dockerfile: `web` (target `runner`) runs
-# `prisma migrate deploy && next start`; the five `worker-*` services (target
+# `prisma migrate deploy && next start`; the six `worker-*` services (target
 # `worker-runner`) each run one statically-linked Go binary built from
 # worker/ — no Node/V8 involved, which is the whole point (RAM footprint per
-# worker container drops from a full Node runtime to a few MB). All five
+# worker container drops from a full Node runtime to a few MB). All six
 # binaries live in that one worker image; which one a container runs is just
 # its `command:`.
 #
@@ -24,6 +24,13 @@ WORKDIR /app
 
 FROM base AS deps
 COPY package.json package-lock.json ./
+# better-sqlite3 publishes no musl prebuild, so npm ci always falls through to
+# `node-gyp rebuild` here. Left to itself node-gyp downloads the matching node
+# headers from unofficial-builds.nodejs.org — a host that regularly resets the
+# connection and takes the whole build with it. The node image already ships
+# those headers under /usr/local/include/node, so point node-gyp at them and
+# the build stops touching the network for this at all.
+ENV npm_config_nodedir=/usr/local
 # Cache mount: persists npm's package cache across deploys on the build host,
 # independent of layer invalidation — a plain `RUN npm ci` re-downloads
 # everything whenever package-lock.json changes, this doesn't.
@@ -100,7 +107,7 @@ COPY worker/ .
 # just `alpine` + `ca-certificates` instead of needing glibc/musl-dev shims.
 RUN --mount=type=cache,target=/root/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} sh -c '\
-    for cmd in https port ping dns integrations; do \
+    for cmd in https port ping dns integrations janitor; do \
       go build -ldflags="-s -w" -o /out/$cmd ./cmd/$cmd; \
     done'
 

@@ -25,7 +25,7 @@ secret_detection:
 # Dockerfile in this repo:
 #
 #   $CI_REGISTRY_IMAGE/web      (target `runner`)        — Next.js app
-#   $CI_REGISTRY_IMAGE/worker   (target `worker-runner`) — all five Go binaries
+#   $CI_REGISTRY_IMAGE/worker   (target `worker-runner`) — all six Go binaries
 #
 # Tags per build: the short SHA always, plus `latest` on the default branch
 # and the git tag itself on a tagged pipeline. So a deployment can pin

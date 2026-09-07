@@ -182,12 +182,28 @@ async function applyGroups(
 /** Buckets a monitor's checks (and incidents) into one entry per day for the last `days` days. */
 function bucketByDay(
   checks: { status: string; checkedAt: Date }[],
+  dailyStats: { day: Date; upChecks: number; degradedChecks: number; downChecks: number }[],
   incidents: { title: string; createdAt: Date }[],
   days: number,
 ): DayBucket[] {
+  // Rollups first, raw checks only for days without one. A finished day always
+  // has a rollup (worker/cmd/janitor writes it the following night) and may no
+  // longer have any raw checks at all, since those are pruned on their own
+  // retention; today has raw checks and no rollup yet. Preferring the rollup
+  // also means the bar for a past day can't change as its checks age out.
   const checkBuckets = new Map<string, { up: number; down: number; degraded: number }>();
+  for (const stat of dailyStats) {
+    checkBuckets.set(stat.day.toISOString().slice(0, 10), {
+      up: stat.upChecks,
+      down: stat.downChecks,
+      degraded: stat.degradedChecks,
+    });
+  }
+
   for (const check of checks) {
     const key = check.checkedAt.toISOString().slice(0, 10);
+    if (dailyStats.some((stat) => stat.day.toISOString().slice(0, 10) === key)) continue;
+
     const bucket = checkBuckets.get(key) ?? { up: 0, down: 0, degraded: 0 };
     if (check.status === 'Down') bucket.down += 1;
     else if (check.status === 'Degraded') bucket.degraded += 1;
@@ -526,11 +542,17 @@ export const statusPageRouter = createTRPCRouter({
 
       const now = new Date();
 
-      const [checks, incidents, maintenanceWindows] = await Promise.all([
+      const [checks, dailyStats, incidents, maintenanceWindows] = await Promise.all([
         monitorIds.length
           ? prisma.monitorCheck.findMany({
               where: { monitorId: { in: monitorIds }, checkedAt: { gte: windowStart } },
               select: { monitorId: true, status: true, checkedAt: true },
+            })
+          : Promise.resolve([]),
+        monitorIds.length
+          ? prisma.monitorDailyStat.findMany({
+              where: { monitorId: { in: monitorIds }, day: { gte: windowStart } },
+              select: { monitorId: true, day: true, upChecks: true, degradedChecks: true, downChecks: true },
             })
           : Promise.resolve([]),
         monitorIds.length
@@ -564,6 +586,13 @@ export const statusPageRouter = createTRPCRouter({
         checksByMonitor.set(check.monitorId, list);
       }
 
+      const dailyStatsByMonitor = new Map<string, typeof dailyStats>();
+      for (const stat of dailyStats) {
+        const list = dailyStatsByMonitor.get(stat.monitorId) ?? [];
+        list.push(stat);
+        dailyStatsByMonitor.set(stat.monitorId, list);
+      }
+
       const incidentsByMonitor = new Map<string, typeof incidents>();
       for (const incident of incidents) {
         if (!incident.monitorId) continue;
@@ -582,6 +611,7 @@ export const statusPageRouter = createTRPCRouter({
         tags: link.monitor.tags.map(({ tag }) => tag),
         days: bucketByDay(
           checksByMonitor.get(link.monitorId) ?? [],
+          dailyStatsByMonitor.get(link.monitorId) ?? [],
           incidentsByMonitor.get(link.monitorId) ?? [],
           page.historyWindowDays,
         ),
