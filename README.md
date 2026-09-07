@@ -1,5 +1,11 @@
 # StayUp
 
+> **Vibe coded.** Large parts of this codebase were written with AI assistance. The security-relevant
+> code — authentication and session handling, the authorization boundary on every tRPC procedure,
+> input validation, the middleware redirects and custom-domain rewrite, secret handling and the
+> container/deployment setup — and the core of the product (the monitor-check loop, the incident
+> lifecycle and the notification/escalation path) were written and reviewed by hand.
+
 Self-hosted uptime monitoring, incident management and public status pages.
 
 StayUp checks your HTTP endpoints, TCP ports, hosts (ICMP) and DNS records on a schedule, opens and
