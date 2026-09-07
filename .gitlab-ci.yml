@@ -54,7 +54,13 @@ secret_detection:
   # reuse the final stage's layers, so every pipeline would redo `npm ci`,
   # `prisma generate` and `next build` from scratch.
   - apk add --no-cache docker-cli-buildx
-  - docker buildx create --use --name stayup --driver docker-container
+  # `docker buildx create` refuses to run when the daemon's TLS settings come
+  # from the environment (DOCKER_HOST + DOCKER_CERT_PATH, which is exactly how
+  # dind hands them over): "could not create a builder instance with TLS data
+  # loaded from environment". Materializing the same connection as a named
+  # context and pointing the builder at it is the supported way around that.
+  - docker context create dind --docker "host=$DOCKER_HOST,ca=$DOCKER_CERT_PATH/ca.pem,cert=$DOCKER_CERT_PATH/cert.pem,key=$DOCKER_CERT_PATH/key.pem"
+  - docker buildx create --use --name stayup --driver docker-container dind
   - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
   script:
   - |
