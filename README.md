@@ -22,7 +22,9 @@ no agent to install on the monitored machines — one `docker compose up` and yo
 
 | | |
 |---|---|
-| **Monitors** | HTTP(s), Ping (ICMP), Port (raw TCP) and DNS checks, at 15s/30s/60s/5m intervals. Per-monitor tags, uptime % over a rolling 30-day window, response-time history and a full ping log. |
+| **Monitors** | HTTP(s), Ping (ICMP), Port (raw TCP) and DNS checks, at 15s/30s/60s/5m intervals. Pause a monitor without losing its history, tag it, and see uptime % over a rolling 30-day window, response-time history and a full ping log. |
+| **HTTP checks** | Beyond "did it answer": request method, headers and body, redirect policy, which status codes count as up (`200,201`, `200-204,301`), and a keyword assertion on the response body (or its inverse). |
+| **TLS certificates** | Every HTTPS check records the certificate's expiry; a monitor goes Degraded — opening an incident and paging your integrations — once it's inside the warning window. Verification can be switched off per instance for self-signed and internal-CA hosts. |
 | **Incidents** | Opened automatically when a monitor goes Down/Degraded and moved to *Monitoring* on recovery, or created by hand. Impact levels, a status timeline (Investigating → Identified → Monitoring → Resolved), acknowledgement, and post-mortems that can be drafted privately and published later. |
 | **Status pages** | Multiple pages, each with its own slug, branding (logo, primary colour, theme), ordered monitor groups, history window (7/30/90 days) and incident feed. Optionally reachable on a custom domain, or locked to signed-in users only. |
 | **Maintenance windows** | Scheduled windows that suppress incident creation for the covered monitors while active, and show as "Scheduled maintenance" on the status page instead of an outage. |
@@ -30,6 +32,7 @@ no agent to install on the monitored machines — one `docker compose up` and yo
 | **Escalation policies** | Ordered paging chains ("page on-call, then the team channel after 10 minutes if nobody acknowledged") attachable per monitor. |
 | **Subscribers** | E-mail/Discord subscribers per status page, and e-mail subscribers per incident, notified on every incident update. |
 | **Logs & audit trail** | Every check, every notification delivery and every significant dashboard action, with actor and IP. |
+| **Retention** | Raw checks and finished notifications are pruned on a schedule you set, after each day is summarized into a rollup — so a 90-day status page keeps working on a 7-day raw retention. |
 | **Users** | Invite-only. The first account is created through `/register`; after that self-service sign-up is closed and further users are created from the dashboard. |
 
 ## Stack
@@ -120,6 +123,7 @@ go run ./cmd/port
 go run ./cmd/ping          # opens a raw ICMP socket — needs CAP_NET_RAW (sudo) outside Docker
 go run ./cmd/dns
 go run ./cmd/integrations
+go run ./cmd/janitor      # retention + daily rollups; one pass at startup, then once per UTC day
 ```
 
 Nothing in `worker/` hot-reloads: restart a worker after editing its code. `go build -o bin/<name>
@@ -127,7 +131,7 @@ Nothing in `worker/` hot-reloads: restart a worker after editing its code. `go b
 
 ### Docker (build from source)
 
-`docker-compose.yml` runs the whole stack: Postgres, Redis, the Next.js app and all five workers.
+`docker-compose.yml` runs the whole stack: Postgres, Redis, the Next.js app and all six workers.
 Use it when you're changing the code; to just *run* StayUp, use the pre-built images below instead.
 
 ```bash
@@ -143,7 +147,7 @@ A few things worth knowing:
 
 - **Postgres only.** Compose forces `DB_PROVIDER=postgresql` and points `DB_URL`/`REDIS_URL` at the
   in-network `postgres`/`redis` hostnames, regardless of what your `.env` says for local `npm run dev`
-  (which defaults to SQLite). Running five worker containers against one SQLite file is exactly the
+  (which defaults to SQLite). Running six worker containers against one SQLite file is exactly the
   concurrent-writer situation SQLite isn't built for.
 - **No dedicated `migrate` service.** Only `web` runs `prisma migrate deploy` (the Go workers carry
   neither Prisma nor Node); every `worker-*` service waits for `web` to become *healthy*, and that
@@ -162,7 +166,7 @@ Every push to `main` and every git tag publishes two images to the GitLab contai
 | Image | Contains |
 |---|---|
 | `registry.gitlab.com/heapreaper/stayup/web` | the Next.js app (dashboard, API, status pages) |
-| `registry.gitlab.com/heapreaper/stayup/worker` | all five Go binaries — the `command:` decides which one a container runs |
+| `registry.gitlab.com/heapreaper/stayup/worker` | all six Go binaries — the `command:` decides which one a container runs |
 
 Tags: `latest` (tip of `main`), the release tag on tagged builds, and the commit short SHA on every
 build. Pin `latest` for a rolling install, or a tag for a reproducible one.
@@ -201,7 +205,7 @@ docker compose -f docker-compose.prod.yml up -d
 `web` runs `prisma migrate deploy` on every start, so schema changes apply themselves, and the
 workers wait for it to report healthy before they touch the database.
 
-The published stack ships Postgres, the app and the five workers — no Redis, since nothing reads or
+The published stack ships Postgres, the app and the six workers — no Redis, since nothing reads or
 writes it yet. Images are `linux/amd64`; see the `PLATFORMS` variable in `.gitlab-ci.yml` for
 building `linux/arm64` as well.
 
@@ -230,7 +234,8 @@ live by the workers on every tick. Changing these takes effect on the *next chec
 
 - *General* — organisation name, timezone, support e-mail
 - *Monitoring defaults* — default interval, HTTP timeout, failed attempts before alerting, latency
-  threshold (above it a check reports **Degraded**), SSL/cert-expiry toggles
+  threshold (above it a check reports **Degraded**), TLS verification and the certificate-expiry
+  warning window, and how long raw checks and finished notifications are kept
 - *SMTP* — overrides the `.env` mail settings, with a "send test e-mail" button
 - *API* — API key and webhook signing secret (regeneratable), plus the auto-generated VAPID key pair
   used for Web Push
@@ -239,8 +244,8 @@ live by the workers on every tick. Changing these takes effect on the *next chec
 
 ## How the monitoring loop works
 
-1. Each check worker polls the DB every 5s for monitors of its type whose `interval` has elapsed
-   (`worker/internal/runner`), and checks all due ones concurrently.
+1. Each check worker polls the DB every 5s for monitors of its type whose `interval` has elapsed and
+   that aren't paused (`worker/internal/runner`), and checks all due ones concurrently.
 2. Every check writes a `MonitorCheck` row — the raw "ping" history, always recorded verbatim.
 3. The monitor's rolled-up `status`, `responseTime`, `lastCheckedAt` and 30-day `uptime` are
    recomputed from those rows.
@@ -248,13 +253,19 @@ live by the workers on every tick. Changing these takes effect on the *next chec
    have failed (default 1 = immediately). Below the threshold the monitor is held at **Up** — a single
    dropped packet or a 502 mid-deploy shouldn't page anyone. The ping history and uptime % still count
    every individual failure.
-5. A confirmed Down/Degraded opens an incident, unless the monitor is inside an active maintenance
+5. For HTTP monitors, "did it pass" means: the status code is accepted, the keyword assertion holds,
+   and — if it's HTTPS — the certificate isn't about to expire. The first two failing make it Down;
+   an expiring certificate or a slow response make it Degraded.
+6. A confirmed Down/Degraded opens an incident, unless the monitor is inside an active maintenance
    window. Recovery moves the open incident to *Monitoring* (a human still resolves it).
-6. Each incident event either broadcasts to every enabled integration, or — if the monitor has an
+7. Each incident event either broadcasts to every enabled integration, or — if the monitor has an
    escalation policy — pages that policy's steps one by one until someone acknowledges. Either way it
    becomes a `Pending` `IntegrationDelivery` row.
-7. `worker/cmd/integrations` polls that queue every 5s, delivers each row through its channel, and
+8. `worker/cmd/integrations` polls that queue every 5s, delivers each row through its channel, and
    retries up to 5 times before marking it `Failed`. Everything lands in **Dashboard → Logs**.
+9. Once a day `worker/cmd/janitor` summarizes each finished day into one `MonitorDailyStat` row per
+   monitor, then deletes raw checks and finished notifications past their retention. Status pages read
+   those summaries for past days, so history outlives the checks it was built from.
 
 | Worker | Monitor type | How it checks |
 |---|---|---|
@@ -263,6 +274,7 @@ live by the workers on every tick. Changing these takes effect on the *next chec
 | `worker/cmd/ping` | `Ping` | Burst of 3 native ICMP echoes; any reply = reachable |
 | `worker/cmd/dns` | `DNS` | Resolves the hostname's A record(s) |
 | `worker/cmd/integrations` | — | Delivers queued notifications and drives escalation |
+| `worker/cmd/janitor` | — | Rolls finished days up into daily summaries, then prunes past retention |
 
 ---
 
@@ -290,7 +302,7 @@ src/
   proxy.ts               auth redirects + custom-domain rewrite (Next middleware)
 
 worker/                  separate Go module
-  cmd/{https,port,ping,dns,integrations}/   one binary each
+  cmd/{https,port,ping,dns,integrations,janitor}/   one binary each
   internal/checkers/     "how do I check one monitor" per type
   internal/runner/       shared poll → check → persist → incident-sync loop
   internal/store/        hand-written SQL for both providers
@@ -378,8 +390,12 @@ via [ui.shadcn.com/create](https://ui.shadcn.com/create) → *Get code* → *Exi
 ```bash
 npm run lint      # biome check
 npm run format    # biome format --write
-cd worker && go vet ./... && gofmt -l .
+cd worker && go vet ./... && go test ./...
 ```
+
+The Go workers have unit tests for the HTTP checker's request options, status-code spec and
+certificate-expiry logic (`worker/internal/checkers/http_test.go`). There is no test suite on the
+TypeScript side.
 
 ---
 
@@ -394,8 +410,8 @@ cd worker && go vet ./... && gofmt -l .
   terminating TLS for it is the operator's job.
 - **Behind a reverse proxy.** Internal calls use `http://127.0.0.1:$PORT` on purpose: with TLS
   terminated at the edge, dialling the public origin would attempt TLS against a plaintext server.
-- **Web Push** needs a service worker at `public/sw.js`; the browser registers `/sw.js` from the
-  Integrations page. VAPID keys are generated automatically on first use.
+- **Web Push** is served by `public/sw.js`, which the Integrations page registers as `/sw.js`. VAPID
+  keys are generated automatically on first use. Browsers only allow it over HTTPS (or localhost).
 - **Incident links in worker-sent e-mails** currently hardcode `http://localhost:3000/dashboard/incidents`
   (`worker/internal/incidents`).
 

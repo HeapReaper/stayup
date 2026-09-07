@@ -6,15 +6,29 @@ import "time"
 // table (src/prisma/schemas/postgresql.prisma). Not every column — just what
 // checkers/runner/incidents need.
 type Monitor struct {
-	ID                 string
-	Name               string
-	URL                string
-	Type               string
-	Status             string
-	Interval           string
-	Port               *int
+	ID       string
+	Name     string
+	URL      string
+	Type     string
+	Status   string
+	Interval string
+	Port     *int
+	// Paused monitors are filtered out by ListByType — a worker never sees
+	// one, so nothing downstream has to check this.
+	Enabled            bool
 	LastCheckedAt      *time.Time
 	EscalationPolicyID *string
+
+	// HTTP-only request options; zero values for every other monitor type.
+	// See the `monitor` model in src/prisma/schemas/*.prisma for what each
+	// one means, and internal/checkers/http.go for how they're applied.
+	Method              string
+	RequestHeaders      *string // JSON object, validated on write by the monitor router
+	RequestBody         *string
+	FollowRedirects     bool
+	ExpectedStatusCodes *string // "200", "200,201", "200-204,301"; nil/empty = any 2xx
+	Keyword             *string
+	KeywordInverted     bool
 }
 
 // IsDue reports whether this monitor's check interval has elapsed since its
@@ -47,6 +61,13 @@ type CheckResult struct {
 	StatusCode   *int
 	ResponseTime int
 	Message      *string
+	// NotAfter of the TLS certificate this check saw, when it was an HTTPS
+	// check that got far enough to complete a handshake. Written straight
+	// through to monitor."certExpiresAt" — a check that didn't observe a
+	// certificate (plain HTTP, connection refused, non-HTTP monitor) leaves
+	// nil here and clears the column, so the value on a monitor always
+	// describes its most recent check rather than some older one.
+	CertExpiresAt *time.Time
 }
 
 // Incident mirrors the `incident` table columns the workers read/write, plus
@@ -111,11 +132,30 @@ type StatusPageSubscriber struct {
 // AppSettings mirrors the `app_settings` singleton row's columns the workers
 // read.
 type AppSettings struct {
-	ID                      string
-	SupportEmail            *string
-	HTTPTimeoutSecs         int
-	FailedAttemptsThreshold int
-	LatencyThreshold        int
-	VapidPublicKey          *string
-	VapidPrivateKey         *string
+	ID                       string
+	SupportEmail             *string
+	HTTPTimeoutSecs          int
+	FailedAttemptsThreshold  int
+	LatencyThreshold         int
+	SSLCheckEnabled          bool
+	CertExpiryWarningEnabled bool
+	CertExpiryWarningDays    int
+	CheckRetentionDays       int
+	DeliveryRetentionDays    int
+	VapidPublicKey           *string
+	VapidPrivateKey          *string
+}
+
+// DailyStat is one monitor's aggregate for one UTC day — a row of
+// `monitor_daily_stat`, produced by AggregateChecksByDay and written by
+// UpsertDailyStat (both used by cmd/janitor).
+type DailyStat struct {
+	MonitorID       string
+	Day             time.Time // UTC midnight
+	TotalChecks     int
+	UpChecks        int
+	DegradedChecks  int
+	DownChecks      int
+	AvgResponseTime *int
+	Uptime          float64
 }

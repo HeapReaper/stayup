@@ -17,6 +17,9 @@ export type AppSettingsView = {
   latencyThresholdMs: number;
   sslCheckEnabled: boolean;
   certExpiryWarningEnabled: boolean;
+  certExpiryWarningDays: number;
+  checkRetentionDays: number;
+  deliveryRetentionDays: number;
   smtpHost: string;
   smtpPort: number | null;
   smtpUser: string;
@@ -40,6 +43,9 @@ function serialize(settings: Awaited<ReturnType<typeof getSettings>>): AppSettin
     latencyThresholdMs: settings.latencyThresholdMs,
     sslCheckEnabled: settings.sslCheckEnabled,
     certExpiryWarningEnabled: settings.certExpiryWarningEnabled,
+    certExpiryWarningDays: settings.certExpiryWarningDays,
+    checkRetentionDays: settings.checkRetentionDays,
+    deliveryRetentionDays: settings.deliveryRetentionDays,
     smtpHost: settings.smtpHost ?? '',
     smtpPort: settings.smtpPort,
     smtpUser: settings.smtpUser ?? '',
@@ -95,6 +101,12 @@ export const settingsRouter = createTRPCRouter({
         latencyThresholdMs: z.number().int().min(50).max(60_000),
         sslCheckEnabled: z.boolean(),
         certExpiryWarningEnabled: z.boolean(),
+        certExpiryWarningDays: z.number().int().min(1).max(365),
+        // Retention, enforced by worker/cmd/janitor. The floor is 1 day
+        // rather than 0 because 0 would mean "delete everything, including
+        // the check that just ran".
+        checkRetentionDays: z.number().int().min(1).max(3650),
+        deliveryRetentionDays: z.number().int().min(1).max(3650),
       }),
     )
     .mutation(async ({ input, ctx }) => {

@@ -14,12 +14,17 @@ import (
 func (s *Store) GetSettings(ctx context.Context) (*AppSettings, error) {
 	var settings AppSettings
 	var supportEmail, vapidPub, vapidPriv sql.NullString
+	var sslCheckEnabled, certExpiryWarningEnabled db.Bool
 
 	err := s.queryRow(ctx, `
-		SELECT id, "supportEmail", "httpTimeoutSeconds", "failedAttemptsThreshold", "latencyThresholdMs", "vapidPublicKey", "vapidPrivateKey"
+		SELECT id, "supportEmail", "httpTimeoutSeconds", "failedAttemptsThreshold", "latencyThresholdMs",
+		       "sslCheckEnabled", "certExpiryWarningEnabled", "certExpiryWarningDays",
+		       "checkRetentionDays", "deliveryRetentionDays", "vapidPublicKey", "vapidPrivateKey"
 		FROM app_settings
 		WHERE id = 'singleton'
-	`).Scan(&settings.ID, &supportEmail, &settings.HTTPTimeoutSecs, &settings.FailedAttemptsThreshold, &settings.LatencyThreshold, &vapidPub, &vapidPriv)
+	`).Scan(&settings.ID, &supportEmail, &settings.HTTPTimeoutSecs, &settings.FailedAttemptsThreshold, &settings.LatencyThreshold,
+		&sslCheckEnabled, &certExpiryWarningEnabled, &settings.CertExpiryWarningDays,
+		&settings.CheckRetentionDays, &settings.DeliveryRetentionDays, &vapidPub, &vapidPriv)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -27,6 +32,9 @@ func (s *Store) GetSettings(ctx context.Context) (*AppSettings, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: get settings: %w", err)
 	}
+
+	settings.SSLCheckEnabled = bool(sslCheckEnabled)
+	settings.CertExpiryWarningEnabled = bool(certExpiryWarningEnabled)
 
 	if supportEmail.Valid {
 		settings.SupportEmail = &supportEmail.String

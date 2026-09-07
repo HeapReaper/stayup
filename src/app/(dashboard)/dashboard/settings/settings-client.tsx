@@ -111,6 +111,9 @@ export default function SettingsClientPage({ initialSettings }: SettingsClientPa
     latencyThresholdMs: initialSettings.latencyThresholdMs,
     sslCheckEnabled: initialSettings.sslCheckEnabled,
     certExpiryWarningEnabled: initialSettings.certExpiryWarningEnabled,
+    certExpiryWarningDays: initialSettings.certExpiryWarningDays,
+    checkRetentionDays: initialSettings.checkRetentionDays,
+    deliveryRetentionDays: initialSettings.deliveryRetentionDays,
   }));
   const monitoringSaved = useSavedFlash();
 
@@ -124,6 +127,9 @@ export default function SettingsClientPage({ initialSettings }: SettingsClientPa
           latencyThresholdMs: result.latencyThresholdMs,
           sslCheckEnabled: result.sslCheckEnabled,
           certExpiryWarningEnabled: result.certExpiryWarningEnabled,
+          certExpiryWarningDays: result.certExpiryWarningDays,
+          checkRetentionDays: result.checkRetentionDays,
+          deliveryRetentionDays: result.deliveryRetentionDays,
         });
         invalidate();
         monitoringSaved.flash();
@@ -382,8 +388,8 @@ export default function SettingsClientPage({ initialSettings }: SettingsClientPa
                     <div className="space-y-0.5">
                       <Label className="text-base">SSL/TLS Certificate Check</Label>
                       <p className="text-xs text-muted-foreground">
-                        Automatically check for expired SSL certificates. Stored here; no SSL-check worker
-                        exists yet, so this doesn't do anything downstream yet.
+                        Verify certificates on HTTPS monitors. Turn this off to monitor hosts with
+                        self-signed or internal-CA certificates, which would otherwise fail every check.
                       </p>
                     </div>
                     <Switch
@@ -392,19 +398,85 @@ export default function SettingsClientPage({ initialSettings }: SettingsClientPa
                     />
                   </div>
 
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-4">
                     <div className="space-y-0.5">
                       <Label className="text-base">Certificate Expiry Warning</Label>
                       <p className="text-xs text-muted-foreground">
-                        Send a notification when an SSL certificate expires within 14 days.
+                        Mark an HTTPS monitor 'Degraded' — which opens an incident and notifies your
+                        integrations — once its certificate is this close to expiring.
                       </p>
                     </div>
-                    <Switch
-                      checked={monitoring.certExpiryWarningEnabled}
-                      onCheckedChange={(checked) =>
-                        setMonitoring({ ...monitoring, certExpiryWarningEnabled: checked })
-                      }
-                    />
+                    <div className="flex items-center gap-2 shrink-0">
+                      <Input
+                        id="certExpiryWarningDays"
+                        type="number"
+                        min={1}
+                        max={365}
+                        className="w-20"
+                        aria-label="Days before expiry"
+                        disabled={!monitoring.certExpiryWarningEnabled}
+                        value={monitoring.certExpiryWarningDays}
+                        onChange={(e) =>
+                          setMonitoring({ ...monitoring, certExpiryWarningDays: Number(e.target.value) })
+                        }
+                      />
+                      <span className="text-xs text-muted-foreground">days</span>
+                      <Switch
+                        checked={monitoring.certExpiryWarningEnabled}
+                        onCheckedChange={(checked) =>
+                          setMonitoring({ ...monitoring, certExpiryWarningEnabled: checked })
+                        }
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <Separator />
+
+                <div className="space-y-4">
+                  <div className="space-y-0.5">
+                    <Label className="text-base">Data Retention</Label>
+                    <p className="text-xs text-muted-foreground">
+                      Enforced once a day by the janitor worker. Daily uptime summaries are kept forever,
+                      so status-page history survives long after the individual checks behind it are gone.
+                    </p>
+                  </div>
+
+                  <div className="grid sm:grid-cols-2 gap-4">
+                    <div className="grid gap-2">
+                      <Label htmlFor="checkRetentionDays">Keep Individual Checks (days)</Label>
+                      <Input
+                        id="checkRetentionDays"
+                        type="number"
+                        min={1}
+                        max={3650}
+                        value={monitoring.checkRetentionDays}
+                        onChange={(e) =>
+                          setMonitoring({ ...monitoring, checkRetentionDays: Number(e.target.value) })
+                        }
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        A monitor on a 15-second interval writes about 5,800 checks a day. Below 30
+                        days, a monitor's uptime percentage covers only the checks that are left.
+                      </p>
+                    </div>
+
+                    <div className="grid gap-2">
+                      <Label htmlFor="deliveryRetentionDays">Keep Notification Log (days)</Label>
+                      <Input
+                        id="deliveryRetentionDays"
+                        type="number"
+                        min={1}
+                        max={3650}
+                        value={monitoring.deliveryRetentionDays}
+                        onChange={(e) =>
+                          setMonitoring({ ...monitoring, deliveryRetentionDays: Number(e.target.value) })
+                        }
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Only delivered and failed notifications are removed; anything still pending is kept.
+                      </p>
+                    </div>
                   </div>
                 </div>
               </CardContent>

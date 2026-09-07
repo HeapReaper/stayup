@@ -24,8 +24,27 @@ type Settings struct {
 	// Always >= 1; 1 means "alert on the first failed check".
 	FailedAttemptsThreshold int
 	LatencyThreshold        int
-	VapidPublicKey          string
-	VapidPrivateKey         string
+	// SSLCheckEnabled off tells the HTTP checker to skip TLS verification
+	// entirely, so a self-signed or expired certificate no longer fails the
+	// check by itself (internal/checkers/http.go).
+	SSLCheckEnabled bool
+	// CertExpiryWarningEnabled on makes an HTTPS monitor report Degraded once
+	// its certificate is within CertExpiryWarningDays of expiring.
+	CertExpiryWarningEnabled bool
+	CertExpiryWarningDays    int
+	// Retention windows enforced by cmd/janitor, in days.
+	CheckRetentionDays    int
+	DeliveryRetentionDays int
+	VapidPublicKey        string
+	VapidPrivateKey       string
+}
+
+// atLeast returns value when it's >= min, and fallback otherwise.
+func atLeast(value, min, fallback int) int {
+	if value < min {
+		return fallback
+	}
+	return value
 }
 
 func generateAPIKey() (string, error) {
@@ -84,8 +103,16 @@ func Get(ctx context.Context, s *store.Store) (Settings, error) {
 		HTTPTimeoutSecs:         row.HTTPTimeoutSecs,
 		FailedAttemptsThreshold: threshold,
 		LatencyThreshold:        row.LatencyThreshold,
-		VapidPublicKey:          *row.VapidPublicKey,
-		VapidPrivateKey:         *row.VapidPrivateKey,
+		SSLCheckEnabled:         row.SSLCheckEnabled,
+		// Same floor-it reasoning as the threshold above: a 0 here would mean
+		// "warn about every certificate" / "delete everything", so fall back
+		// to the schema defaults rather than trusting a hand-edited row.
+		CertExpiryWarningEnabled: row.CertExpiryWarningEnabled,
+		CertExpiryWarningDays:    atLeast(row.CertExpiryWarningDays, 1, 14),
+		CheckRetentionDays:       atLeast(row.CheckRetentionDays, 1, 90),
+		DeliveryRetentionDays:    atLeast(row.DeliveryRetentionDays, 1, 30),
+		VapidPublicKey:           *row.VapidPublicKey,
+		VapidPrivateKey:          *row.VapidPrivateKey,
 	}, nil
 }
 

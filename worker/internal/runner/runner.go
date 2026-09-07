@@ -136,7 +136,7 @@ func checkOne(ctx context.Context, s *store.Store, opts Options, cfg settings.Se
 		return err
 	}
 
-	if err := s.UpdateCheckResult(ctx, monitor.ID, reported, result.ResponseTime, uptime, checkedAt); err != nil {
+	if err := s.UpdateCheckResult(ctx, monitor.ID, reported, result.ResponseTime, uptime, checkedAt, result.CertExpiresAt); err != nil {
 		return err
 	}
 
