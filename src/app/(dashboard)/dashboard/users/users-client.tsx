@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Search,
   MoreHorizontal,
+  Pencil,
   Trash2,
   UserPlus,
 } from 'lucide-react';
@@ -32,14 +33,13 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from '@/components/ui/dialog';
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet';
 import { Label } from '@/components/ui/label';
 import {
   Select,
@@ -53,14 +53,26 @@ interface UsersClientPageProps {
   initialUsers: User[];
 }
 
-type AddUserForm = {
+// One form for both halves of the sheet. `password` is a required temporary
+// password when inviting and an optional replacement when editing — the same
+// field, because to the person filling it in it's the same question.
+type UserForm = {
   name: string;
   email: string;
   password: string;
   role: UserRole;
 };
 
-const emptyForm: AddUserForm = { name: '', email: '', password: '', role: 'Member' };
+const emptyForm: UserForm = { name: '', email: '', password: '', role: 'Member' };
+
+function userToForm(user: User): UserForm {
+  return {
+    name: user.name,
+    email: user.email,
+    password: '',
+    role: (user.role as UserRole | null) ?? 'Member',
+  };
+}
 
 export default function UsersClientPage({ initialUsers }: UsersClientPageProps) {
   const trpc = useTRPC();
@@ -73,19 +85,41 @@ export default function UsersClientPage({ initialUsers }: UsersClientPageProps) 
   const users = usersQuery.data;
 
   const [searchQuery, setSearchQuery] = React.useState('');
-  const [isAddUserOpen, setIsAddUserOpen] = React.useState(false);
-  const [form, setForm] = React.useState<AddUserForm>(emptyForm);
+
+  // Same shape as every other dashboard page: one sheet, opened either empty
+  // (invite) or seeded from a row (edit), with editingId deciding which.
+  const [isFormOpen, setIsFormOpen] = React.useState(false);
+  const [editingId, setEditingId] = React.useState<string | null>(null);
+  const [form, setForm] = React.useState<UserForm>(emptyForm);
   const [formError, setFormError] = React.useState<string | null>(null);
 
   const invalidateAll = () => queryClient.invalidateQueries({ queryKey: trpc.user.getAll.queryKey() });
+
+  const closeForm = () => {
+    setIsFormOpen(false);
+    setEditingId(null);
+    setForm(emptyForm);
+    setFormError(null);
+  };
 
   const createUser = useMutation(
     trpc.user.create.mutationOptions({
       onSuccess: () => {
         invalidateAll();
-        setForm(emptyForm);
-        setFormError(null);
-        setIsAddUserOpen(false);
+        closeForm();
+      },
+      onError: (error) => setFormError(error.message),
+    }),
+  );
+
+  const updateUser = useMutation(
+    trpc.user.update.mutationOptions({
+      onSuccess: () => {
+        invalidateAll();
+        // The sidebar's account menu reads `me`; editing yourself from this
+        // page has to update it too.
+        queryClient.invalidateQueries({ queryKey: trpc.user.me.queryKey() });
+        closeForm();
       },
       onError: (error) => setFormError(error.message),
     }),
@@ -105,9 +139,39 @@ export default function UsersClientPage({ initialUsers }: UsersClientPageProps) 
       user.email.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  const handleAddUser = (e: React.FormEvent) => {
+  const openCreate = () => {
+    setEditingId(null);
+    setForm(emptyForm);
+    setFormError(null);
+    setIsFormOpen(true);
+  };
+
+  const openEdit = (user: User) => {
+    setEditingId(user.id);
+    setForm(userToForm(user));
+    setFormError(null);
+    setIsFormOpen(true);
+  };
+
+  const isSaving = createUser.isPending || updateUser.isPending;
+
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.name || !form.email || !form.password) return;
+    if (!form.name || !form.email) return;
+
+    if (editingId) {
+      updateUser.mutate({
+        id: editingId,
+        name: form.name,
+        email: form.email,
+        role: form.role,
+        // Empty means "keep the current password", not "clear it".
+        newPassword: form.password || undefined,
+      });
+      return;
+    }
+
+    if (!form.password) return;
     createUser.mutate(form);
   };
 
@@ -126,100 +190,114 @@ export default function UsersClientPage({ initialUsers }: UsersClientPageProps) 
           </p>
         </div>
 
-        <Dialog
-          open={isAddUserOpen}
-          onOpenChange={(open) => {
-            setIsAddUserOpen(open);
-            if (!open) {
-              setForm(emptyForm);
-              setFormError(null);
-            }
-          }}
-        >
-          <DialogTrigger
-            render={
-              <Button className="gap-2">
-                <UserPlus className="h-4 w-4" />
-                Invite User
-              </Button>
-            }
-          />
-          <DialogContent className="sm:max-w-[425px]">
-            <form onSubmit={handleAddUser}>
-              <DialogHeader>
-                <DialogTitle>Invite New User</DialogTitle>
-                <DialogDescription>
-                  Create an account for a new team member directly — self-service registration is closed
-                  once the first account exists.
-                </DialogDescription>
-              </DialogHeader>
-              <div className="grid gap-4 py-4">
-                <div className="grid gap-2">
-                  <Label htmlFor="name">Name</Label>
-                  <Input
-                    id="name"
-                    placeholder="e.g. John Doe"
-                    value={form.name}
-                    onChange={(e) => setForm({ ...form, name: e.target.value })}
-                    required
-                  />
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="email">Email Address</Label>
-                  <Input
-                    id="email"
-                    type="email"
-                    placeholder="john@company.com"
-                    value={form.email}
-                    onChange={(e) => setForm({ ...form, email: e.target.value })}
-                    required
-                  />
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="password">Temporary Password</Label>
-                  <Input
-                    id="password"
-                    type="password"
-                    placeholder="At least 8 characters"
-                    value={form.password}
-                    onChange={(e) => setForm({ ...form, password: e.target.value })}
-                    required
-                    minLength={8}
-                  />
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="role">Role</Label>
-                  <Select
-                    value={form.role}
-                    onValueChange={(value) => {
-                      if (value) setForm({ ...form, role: value as UserRole });
-                    }}
-                  >
-                    <SelectTrigger id="role">
-                      <SelectValue>{(val: UserRole) => val}</SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="Admin">Admin</SelectItem>
-                      <SelectItem value="Member">Member</SelectItem>
-                      <SelectItem value="Viewer">Viewer</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
+        <Button className="gap-2" onClick={openCreate}>
+          <UserPlus className="h-4 w-4" />
+          Invite User
+        </Button>
+      </div>
 
-                {formError && <p className="text-sm text-destructive">{formError}</p>}
+      {/* Invite/Edit Sheet */}
+      <Sheet
+        open={isFormOpen}
+        onOpenChange={(open) => {
+          if (!open) closeForm();
+        }}
+      >
+        <SheetContent side="right" className="sm:max-w-md w-full">
+          <SheetHeader>
+            <SheetTitle>{editingId ? 'Edit User' : 'Invite New User'}</SheetTitle>
+            <SheetDescription>
+              {editingId
+                ? "Change this user's name, sign-in address, role or password."
+                : 'Create an account for a new team member directly — self-service registration is closed once the first account exists.'}
+            </SheetDescription>
+          </SheetHeader>
+
+          <form onSubmit={handleSubmit} className="flex-1 flex flex-col min-h-0">
+            <div className="flex-1 overflow-y-auto px-4 space-y-4">
+              <div className="grid gap-2">
+                <Label htmlFor="user-name">Name</Label>
+                <Input
+                  id="user-name"
+                  placeholder="e.g. John Doe"
+                  value={form.name}
+                  onChange={(e) => setForm({ ...form, name: e.target.value })}
+                  required
+                  minLength={2}
+                />
               </div>
-              <DialogFooter>
-                <Button type="button" variant="outline" onClick={() => setIsAddUserOpen(false)}>
+
+              <div className="grid gap-2">
+                <Label htmlFor="user-email">Email Address</Label>
+                <Input
+                  id="user-email"
+                  type="email"
+                  placeholder="john@company.com"
+                  value={form.email}
+                  onChange={(e) => setForm({ ...form, email: e.target.value })}
+                  required
+                />
+              </div>
+
+              <div className="grid gap-2">
+                <Label htmlFor="user-password">
+                  {editingId ? 'New Password' : 'Temporary Password'}
+                </Label>
+                <Input
+                  id="user-password"
+                  type="password"
+                  placeholder={
+                    editingId ? 'Leave blank to keep the current one' : 'At least 8 characters'
+                  }
+                  value={form.password}
+                  onChange={(e) => setForm({ ...form, password: e.target.value })}
+                  required={!editingId}
+                  minLength={8}
+                  autoComplete="new-password"
+                />
+                {editingId && (
+                  <p className="text-xs text-muted-foreground">
+                    At least 8 characters. The user stays signed in on devices they are already
+                    signed in on.
+                  </p>
+                )}
+              </div>
+
+              <div className="grid gap-2">
+                <Label htmlFor="user-role">Role</Label>
+                <Select
+                  value={form.role}
+                  onValueChange={(value) => {
+                    if (value) setForm({ ...form, role: value as UserRole });
+                  }}
+                >
+                  <SelectTrigger id="user-role">
+                    <SelectValue>{(val: UserRole) => val}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="Admin">Admin</SelectItem>
+                    <SelectItem value="Member">Member</SelectItem>
+                    <SelectItem value="Viewer">Viewer</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {formError && <p className="text-sm text-destructive">{formError}</p>}
+            </div>
+
+            <SheetFooter>
+              <div className="flex gap-2 w-full">
+                <Button type="button" variant="outline" className="flex-1" onClick={closeForm}>
                   Cancel
                 </Button>
-                <Button type="submit" disabled={createUser.isPending}>
-                  {createUser.isPending ? 'Creating…' : 'Create User'}
+                <Button type="submit" className="flex-1" disabled={isSaving}>
+                  {isSaving ? 'Saving…' : editingId ? 'Save Changes' : 'Create User'}
                 </Button>
-              </DialogFooter>
-            </form>
-          </DialogContent>
-        </Dialog>
-      </div>
+              </div>
+            </SheetFooter>
+          </form>
+        </SheetContent>
+      </Sheet>
 
       {/* Search Bar */}
       <div className="flex items-center gap-2 max-w-sm">
@@ -292,6 +370,11 @@ export default function UsersClientPage({ initialUsers }: UsersClientPageProps) 
                       <DropdownMenuContent align="end">
                         <DropdownMenuGroup>
                           <DropdownMenuLabel>Actions</DropdownMenuLabel>
+                          <DropdownMenuItem onClick={() => openEdit(user)}>
+                            <Pencil className="mr-2 h-4 w-4" />
+                            Edit
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
                           <DropdownMenuItem
                             className="text-destructive focus:text-destructive"
                             onClick={() => handleDeleteUser(user.id)}

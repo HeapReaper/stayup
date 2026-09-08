@@ -3,7 +3,7 @@
 import * as React from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { useTheme } from 'next-themes';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -20,6 +20,8 @@ import {
   Wrench,
   ChevronsUp,
   CircleArrowUp,
+  UserCog,
+  LogOut,
 } from 'lucide-react';
 
 import {
@@ -39,11 +41,25 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Button } from '@/components/ui/button';
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+import ProfileSheet from '@/components/core/profile-sheet';
 import { useTRPC } from '@/trpc/client';
 import { cn } from '@/lib/utils';
+
+/** "Ada Lovelace" → "AL", for the account menu's avatar fallback. */
+function initialsOf(name: string): string {
+  return name
+    .split(' ')
+    .filter(Boolean)
+    .map((part) => part[0])
+    .slice(0, 2)
+    .join('')
+    .toUpperCase();
+}
 
 const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
@@ -60,6 +76,7 @@ const navigation = [
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const router = useRouter();
   const { setTheme } = useTheme();
   const { state } = useSidebar();
   const isCollapsed: boolean = state === 'collapsed';
@@ -74,6 +91,13 @@ export default function Sidebar() {
     staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
   });
+
+  // Read here rather than passed down from the layout: this is a client
+  // component inside a server layout, and the profile dialog below has to
+  // re-render with the new name the moment an edit succeeds — a prop from an
+  // RSC wouldn't change until the route is refreshed.
+  const me = useQuery({ ...trpc.user.me.queryOptions(), staleTime: 5 * 60 * 1000 });
+  const [isProfileOpen, setIsProfileOpen] = React.useState(false);
 
   return (
     <ShadcnSidebar collapsible="icon">
@@ -171,24 +195,68 @@ export default function Sidebar() {
           </Link>
         )}
 
-        {!isCollapsed && (
-          <div className="text-xs text-muted-foreground truncate">
-            Ingelogd als gebruiker
-          </div>
-        )}
+        {/* Account and theme share one row: the account button takes whatever
+            width is left and the theme toggle keeps its square. Collapsed
+            they stack instead — the icon rail is one button wide, so two
+            side by side would overflow it. */}
+        <div className={cn('flex items-center gap-2', isCollapsed && 'flex-col')}>
+          {me.data && (
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={
+                  <Button
+                    variant="ghost"
+                    className={cn(
+                      'h-auto min-w-0 flex-1 justify-start gap-2 px-2 py-1.5',
+                      isCollapsed && 'w-full flex-none justify-center px-0',
+                    )}
+                  >
+                    <Avatar className="size-7">
+                      <AvatarImage src={me.data.image ?? undefined} alt="" />
+                      <AvatarFallback className="text-[10px]">
+                        {initialsOf(me.data.name)}
+                      </AvatarFallback>
+                    </Avatar>
+                    {!isCollapsed && (
+                      <span className="flex min-w-0 flex-col items-start leading-tight">
+                        <span className="w-full truncate text-xs font-medium">{me.data.name}</span>
+                        <span className="w-full truncate text-[11px] font-normal text-muted-foreground">
+                          {me.data.email}
+                        </span>
+                      </span>
+                    )}
+                  </Button>
+                }
+              />
+              <DropdownMenuContent align="start" side="top" className="w-56">
+                <DropdownMenuItem onClick={() => setIsProfileOpen(true)}>
+                  <UserCog className="mr-2 h-4 w-4" />
+                  Edit profile
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => router.push('/dashboard/users')}>
+                  <Users className="mr-2 h-4 w-4" />
+                  Manage users
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={() => router.push('/logout')}>
+                  <LogOut className="mr-2 h-4 w-4" />
+                  Sign out
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
 
-        <div className={cn("flex", isCollapsed ? "justify-center" : "justify-end")}>
           <DropdownMenu>
             <DropdownMenuTrigger
               render={
-                <Button variant="outline" size="icon" className="size-9">
+                <Button variant="outline" size="icon" className="size-9 shrink-0">
                   <Sun className="h-[1.2rem] w-[1.2rem] rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
                   <Moon className="absolute h-[1.2rem] w-[1.2rem] rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
                   <span className="sr-only">Toggle theme</span>
                 </Button>
               }
             />
-            <DropdownMenuContent align={isCollapsed ? "center" : "end"}>
+            <DropdownMenuContent align={isCollapsed ? "center" : "end"} side="top">
               <DropdownMenuItem onClick={() => setTheme('light')}>
                 <Sun className="mr-2 h-4 w-4" />
                 Light
@@ -204,6 +272,10 @@ export default function Sidebar() {
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
+
+        {me.data && (
+          <ProfileSheet user={me.data} open={isProfileOpen} onOpenChange={setIsProfileOpen} />
+        )}
       </SidebarFooter>
     </ShadcnSidebar>
   );
