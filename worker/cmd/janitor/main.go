@@ -43,6 +43,11 @@ const (
 	tickInterval = 15 * time.Minute
 	// Rows per DELETE statement; see store.PruneChecksBefore.
 	pruneBatchSize = 5_000
+	// How long an upload nobody references is kept before it is swept
+	// (store.PruneOrphanFiles). Long enough that an edit form left open over
+	// lunch still saves the logo it uploaded, short enough that a mistyped
+	// upload doesn't sit in the database for a week.
+	orphanFileGrace = 24 * time.Hour
 )
 
 // truncateDay returns UTC midnight of t's day.
@@ -126,6 +131,18 @@ func prune(ctx context.Context, s *store.Store, cfg settings.Settings) error {
 	}
 	if deleted > 0 {
 		logging.Info(fmt.Sprintf("[janitor] Deleted %d finished notification(s) older than %d days", deleted, cfg.DeliveryRetentionDays))
+	}
+
+	// Uploads nothing references. Not on a configurable retention like the two
+	// above: an unreferenced upload is a leftover, not history, and the only
+	// reason to wait at all is the form that might still be open on it — hence
+	// a day, not the check-retention window.
+	deleted, err = s.PruneOrphanFiles(ctx, now.Add(-orphanFileGrace), pruneBatchSize)
+	if err != nil {
+		return err
+	}
+	if deleted > 0 {
+		logging.Info(fmt.Sprintf("[janitor] Deleted %d uploaded file(s) nothing points at", deleted))
 	}
 	return nil
 }

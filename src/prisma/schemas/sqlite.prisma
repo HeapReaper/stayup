@@ -37,6 +37,7 @@ model User {
   onCallSchedules    OnCallSchedule[]
   onCallShifts       OnCallParticipant[]
   notificationRules  NotificationRule[]
+  uploads            StoredFile[]
 
   @@unique([email])
   @@map("user")
@@ -798,6 +799,41 @@ model WorkerHeartbeat {
   memoryKb        Int?
 
   @@map("worker_heartbeat")
+}
+
+/// An uploaded file — a status page logo or a profile picture — bytes and all.
+///
+/// In the database rather than on a volume on purpose: the two deploy compose
+/// files are imported by URL and mount exactly one volume of their own
+/// (`logs`), and an upload that silently disappears on the next
+/// `docker compose up -d` (or on a Coolify redeploy that recreates the
+/// container) is worse than no upload feature. The database is already backed
+/// up, already shared by every `web` replica, and these files are icons: a
+/// couple of hundred KB each, capped at 2 MB by the upload route.
+///
+/// Rows are immutable — replacing a logo writes a new row and deletes the old
+/// one — which is what lets /api/files/[id] serve them with a one-year
+/// immutable cache. Uploads never attached to anything are swept by
+/// cmd/janitor (worker/internal/store/janitor.go's PruneOrphanFiles).
+model StoredFile {
+  id          String   @id @default(cuid())
+  /// As uploaded, for the Content-Disposition filename and the UI's label.
+  filename    String
+  /// Only ever one of the raster types the upload route allows; never SVG.
+  contentType String
+  /// Bytes, kept alongside `data` so a listing doesn't have to read the blob.
+  size        Int
+  data        Bytes
+  /// sha256 of `data`, served as the ETag so a revalidation costs no bytes.
+  checksum    String
+  /// Null once the uploader's account is deleted; the file itself survives,
+  /// because a status page logo doesn't belong to whoever happened to upload it.
+  uploadedById String?
+  uploadedBy   User?   @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
+  createdAt    DateTime @default(now())
+
+  @@index([uploadedById])
+  @@map("stored_file")
 }
 
 model AppSettings {

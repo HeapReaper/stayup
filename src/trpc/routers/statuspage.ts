@@ -3,6 +3,8 @@ import { TRPCError } from '@trpc/server';
 import { Prisma } from '@prisma/client';
 import { createTRPCRouter, protectedProcedure, baseProcedure, capabilityProcedure } from '../init';
 import { prisma } from '@/lib/prisma';
+import { storedFileIdFromUrl } from '@/lib/stored-files';
+import { forgetStoredFile } from '@/lib/stored-files-server';
 import { logAudit } from '@/lib/audit';
 import type { IncidentImpact, IncidentStatus } from '@/lib/incidents';
 import { getVisibleMaintenanceWindows } from '@/lib/maintenance';
@@ -367,7 +369,21 @@ const statusPageInput = z.object({
   slug: slugSchema,
   customDomain: z.union([customDomainSchema, z.literal('')]).optional(),
   description: z.string().trim().max(500).optional(),
-  logoUrl: z.union([z.string().trim().url().max(2000), z.literal('')]).optional(),
+  // Either an upload on this instance (`/api/files/<id>`, see
+  // src/lib/stored-files.ts) or any public image URL, which is all this field
+  // used to accept. z.string().url() rejects a path, hence the two shapes.
+  logoUrl: z
+    .union([
+      z
+        .string()
+        .trim()
+        .max(2000)
+        .refine((value) => storedFileIdFromUrl(value) !== null || z.string().url().safeParse(value).success, {
+          message: 'Upload an image or give a full https:// URL',
+        }),
+      z.literal(''),
+    ])
+    .optional(),
   theme: statusPageThemeEnum,
   primaryColor: z.string().trim().regex(/^#[0-9a-fA-F]{6}$/, 'Use a hex color like #7c3aed'),
   historyWindowDays: historyWindowDaysEnum,
@@ -547,6 +563,10 @@ export const statusPageRouter = createTRPCRouter({
         return updated;
       });
 
+      // After the save, not inside the transaction: losing the old logo
+      // matters far less than the edit itself going through.
+      await forgetStoredFile(existing.logoUrl, input.logoUrl || null);
+
       await logAudit({
         actorId: ctx.session.user.id,
         actorName: ctx.session.user.name,
@@ -579,6 +599,7 @@ export const statusPageRouter = createTRPCRouter({
     }
 
     await prisma.statusPage.delete({ where: { id: input.id } });
+    await forgetStoredFile(existing.logoUrl);
 
     await logAudit({
       actorId: ctx.session.user.id,

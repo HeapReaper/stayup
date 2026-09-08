@@ -4,6 +4,8 @@ import { APIError } from 'better-auth';
 import { Prisma, type User as PrismaUser } from '@prisma/client';
 import { createTRPCRouter, protectedProcedure, capabilityProcedure } from '../init';
 import { prisma } from '@/lib/prisma';
+import { storedFileIdFromUrl } from '@/lib/stored-files';
+import { forgetStoredFile } from '@/lib/stored-files-server';
 import { auth } from '@/lib/auth';
 import { logAudit } from '@/lib/audit';
 import { registerSchema } from '@/validations/auth';
@@ -26,6 +28,23 @@ const userEditSchema = z.object({
   name: registerSchema.shape.name,
   email: registerSchema.shape.email,
   newPassword: z.union([registerSchema.shape.password, z.literal('')]).optional(),
+  // Profile picture. Either an upload on this instance (`/api/files/<id>`, see
+  // src/lib/stored-files.ts) or any image URL — better-auth's `image` column
+  // has always been a URL, and an avatar hosted elsewhere is still valid.
+  // Absent means "leave it alone"; '' clears it, which is how the form says
+  // "remove my picture".
+  image: z
+    .union([
+      z
+        .string()
+        .trim()
+        .max(2000)
+        .refine((value) => storedFileIdFromUrl(value) !== null || z.string().url().safeParse(value).success, {
+          message: 'Use an uploaded image or a full https:// URL',
+        }),
+      z.literal(''),
+    ])
+    .optional(),
 });
 
 /**
@@ -63,19 +82,29 @@ async function setUserPassword(userId: string, newPassword: string) {
  */
 async function applyUserEdit(
   id: string,
-  input: { name: string; email: string; role?: UserRole; newPassword?: string },
+  input: { name: string; email: string; role?: UserRole; newPassword?: string; image?: string },
 ) {
   try {
+    // Read before the write, so a replaced upload can be deleted afterwards —
+    // only when the edit actually carries an image, since every other caller
+    // must leave the column alone.
+    const previous =
+      input.image === undefined
+        ? null
+        : (await prisma.user.findUnique({ where: { id }, select: { image: true } }))?.image ?? null;
+
     const user = await prisma.user.update({
       where: { id },
       data: {
         name: input.name,
         email: input.email,
         ...(input.role ? { role: input.role } : {}),
+        ...(input.image === undefined ? {} : { image: input.image || null }),
       },
     });
 
     if (input.newPassword) await setUserPassword(id, input.newPassword);
+    if (input.image !== undefined) await forgetStoredFile(previous, user.image);
 
     return user;
   } catch (error) {
@@ -259,6 +288,10 @@ export const userRouter = createTRPCRouter({
       }
 
       await prisma.user.delete({ where: { id: input.id } });
+      // Their profile picture goes with them: StoredFile.uploadedById is
+      // SET NULL (a status page logo must survive the person who uploaded it),
+      // so nothing else would drop an avatar the account had.
+      await forgetStoredFile(existing.image);
 
       await logAudit({
         actorId: ctx.session.user.id,

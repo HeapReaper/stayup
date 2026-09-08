@@ -20,9 +20,9 @@ configuration lives in the single-row `AppSettings` table, which the workers re-
 | `src/app/(dashboard)/dashboard/*` | Authenticated pages. Always a pair: `page.tsx` (server component, fetches via the tRPC `caller`) + `*-client.tsx` (`'use client'`, mutations/interactivity). |
 | `src/app/(status)/status/[slug]` | The public status page. |
 | `src/app/(public)`, `login/`, `register/`, `logout/` | Auth surfaces. `/` redirects to `/login`. |
-| `src/app/api/` | better-auth handler, tRPC handler, `reports/pdf` (server-rendered SLA report — a file response, which is why it isn't a tRPC procedure), and `public/status-domain` (custom-domain → slug lookup for the proxy). |
+| `src/app/api/` | better-auth handler, tRPC handler, `reports/pdf` (server-rendered SLA report) and `files` (upload + serve — both are file responses/bodies, which is why they aren't tRPC procedures), and `public/status-domain` (custom-domain → slug lookup for the proxy). |
 | `src/trpc/routers/` | The entire API. `init.ts` defines `baseProcedure` / `protectedProcedure`; `_app.ts` is the registry. |
-| `src/lib/` | Server-side domain logic and clients (prisma, auth, settings, incidents, integration-delivery, maintenance, email, discord, push, audit, logging, redis, updates, version, permissions, workers, sla-report, report-pdf). `report-range.ts` and `monitor-types.ts` are the Prisma-free half: client components import them, so they must stay free of server imports. |
+| `src/lib/` | Server-side domain logic and clients (prisma, auth, settings, incidents, integration-delivery, maintenance, email, discord, push, audit, logging, redis, updates, version, permissions, workers, sla-report, report-pdf, stored-files-server). `report-range.ts`, `monitor-types.ts` and `stored-files.ts` are the Prisma-free half: client components import them, so they must stay free of server imports — which is why the upload cleanup helper lives in `stored-files-server.ts` instead. |
 | `src/lib/permissions.ts` | The whole authorization model: roles → capabilities. Enforced only by `capabilityProcedure` in `src/trpc/init.ts`. |
 | `src/app/api/health/` | Unauthenticated container healthcheck. 200/503 on the *database*; worker liveness is reported but never fails it. |
 | `src/prisma/schemas/` | `sqlite.prisma` and `postgresql.prisma` **plus one migration folder each**. |
@@ -133,12 +133,22 @@ configuration lives in the single-row `AppSettings` table, which the workers re-
    `BETTER_AUTH_URL` that doesn't match the browser's origin exactly turns every sign-in into
    `Invalid origin`.
 
-10. **Never prune before rolling up.** `cmd/janitor` summarizes each finished day into
+10. **Uploaded files live in the database, not on a volume.** `stored_file` holds the bytes for status
+    page logos and profile pictures. That is deliberate: the two deploy compose files are imported by URL
+    and mount only their own `logs` volume, so a container filesystem would lose every upload on the next
+    redeploy — and a second `web` replica would never see the first one's files. Rows are immutable
+    (replacing an image writes a new row and deletes the old one), which is what lets `/api/files/[id]`
+    serve them `immutable` for a year. Two cleanup paths, both needed: `forgetStoredFile`
+    (`src/lib/stored-files-server.ts`) when a `logoUrl`/`image` stops pointing at one, and
+    `store.PruneOrphanFiles` in `cmd/janitor` for uploads that were never attached at all — the upload has
+    to exist before the form is saved, since a status page being created has no id yet.
+
+11. **Never prune before rolling up.** `cmd/janitor` summarizes each finished day into
     `MonitorDailyStat` *and then* deletes raw checks past their retention, in that order, because the
     rollup is the only thing that survives the delete — the public status page reads rollups for past
     days and raw checks only for today. Reordering those two steps silently erases history.
 
-11. **`src/proxy.ts` must not import Prisma.** It runs in the middleware runtime; it reaches data over
+12. **`src/proxy.ts` must not import Prisma.** It runs in the middleware runtime; it reaches data over
    loopback HTTP (`http://127.0.0.1:$PORT`, never `request.nextUrl.origin` — behind a TLS-terminating
    proxy that origin is `https://` while the process only speaks plain HTTP).
 

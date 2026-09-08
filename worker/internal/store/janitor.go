@@ -305,6 +305,37 @@ func (s *Store) PruneDeliveriesBefore(ctx context.Context, cutoff time.Time, bat
 	`, cutoff, batchSize, "prune deliveries")
 }
 
+// PruneOrphanFiles deletes uploaded files (stored_file — status page logos and
+// profile pictures, see src/lib/stored-files.ts) that nothing points at any
+// more and that are older than cutoff.
+//
+// Why this exists: the upload endpoint has to store the bytes *before* the form
+// they belong to is submitted — a status page being created has no id yet — so
+// abandoning that form leaves a row nobody references. Replacing or deleting an
+// owner is handled on the TypeScript side (forgetStoredFile), which leaves
+// exactly this case: uploaded, never attached.
+//
+// The reference test is a URL suffix rather than a foreign key because both
+// columns hold a URL: User.image is better-auth's own column, and
+// StatusPage.logoUrl has always accepted any public address. LIKE '%<prefix>'
+// || id matches both the relative form the app writes and an absolute one
+// somebody pasted back, and a cuid contains no LIKE wildcards to escape.
+//
+// The cutoff is what makes it safe: a file uploaded seconds ago, while its form
+// is still open, is far younger than any window cmd/janitor passes in.
+func (s *Store) PruneOrphanFiles(ctx context.Context, cutoff time.Time, batchSize int) (int64, error) {
+	return s.pruneInBatches(ctx, `
+		DELETE FROM stored_file
+		WHERE id IN (
+			SELECT f.id FROM stored_file f
+			WHERE f."createdAt" < ?
+			  AND NOT EXISTS (SELECT 1 FROM "user" u WHERE u.image LIKE '%/api/files/' || f.id)
+			  AND NOT EXISTS (SELECT 1 FROM status_page p WHERE p."logoUrl" LIKE '%/api/files/' || f.id)
+			LIMIT ?
+		)
+	`, cutoff, batchSize, "prune orphan files")
+}
+
 func (s *Store) pruneInBatches(ctx context.Context, query string, cutoff time.Time, batchSize int, label string) (int64, error) {
 	var total int64
 	for {

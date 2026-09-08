@@ -23,6 +23,8 @@ import {
 } from 'lucide-react';
 
 import { useTRPC } from '@/trpc/client';
+import ImageUpload from '@/components/core/image-upload';
+import { humanBytes, MAX_UPLOAD_BYTES } from '@/lib/stored-files';
 import type {
   StatusPageSummary,
   StatusPageDetail,
@@ -630,13 +632,23 @@ export default function StatusPagesClientPage({ initialStatusPages, monitors }: 
               <div className="space-y-4">
                 <h3 className="text-sm font-semibold">Style</h3>
                 <div className="grid gap-2">
-                  <Label htmlFor="sp-logo">Logo URL (optional)</Label>
+                  <Label htmlFor="sp-logo">Logo (optional)</Label>
+                  <ImageUpload
+                    value={form.logoUrl}
+                    onChange={(url) => setForm((prev) => ({ ...prev, logoUrl: url }))}
+                    alt="Status page logo"
+                  />
                   <Input
                     id="sp-logo"
-                    placeholder="https://example.com/logo.png"
+                    placeholder="...or paste a URL: https://example.com/logo.png"
                     value={form.logoUrl}
                     onChange={(e) => setForm((prev) => ({ ...prev, logoUrl: e.target.value }))}
                   />
+                  <p className="text-xs text-muted-foreground">
+                    Uploaded images are stored on this instance and served from it, so the page keeps
+                    working when whatever hosted the old URL doesn't. PNG, JPEG, WebP or GIF, up to{' '}
+                    {humanBytes(MAX_UPLOAD_BYTES)}.
+                  </p>
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div className="grid gap-2">

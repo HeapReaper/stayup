@@ -8,6 +8,8 @@ import type { User } from '@/trpc/routers/user';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import ImageUpload from '@/components/core/image-upload';
+import { humanBytes, MAX_UPLOAD_BYTES } from '@/lib/stored-files';
 import {
   Sheet,
   SheetContent,
@@ -34,17 +36,22 @@ export default function ProfileSheet({ user, open, onOpenChange }: ProfileSheetP
   const trpc = useTRPC();
   const queryClient = useQueryClient();
 
-  const [form, setForm] = React.useState({ name: user.name, email: user.email, newPassword: '' });
+  const [form, setForm] = React.useState({
+    name: user.name,
+    email: user.email,
+    newPassword: '',
+    image: user.image ?? '',
+  });
   const [formError, setFormError] = React.useState<string | null>(null);
 
   // Re-seed from the current user every time it opens, so a cancelled edit
   // doesn't linger in the fields and a change made elsewhere shows up.
   React.useEffect(() => {
     if (open) {
-      setForm({ name: user.name, email: user.email, newPassword: '' });
+      setForm({ name: user.name, email: user.email, newPassword: '', image: user.image ?? '' });
       setFormError(null);
     }
-  }, [open, user.name, user.email]);
+  }, [open, user.name, user.email, user.image]);
 
   const updateProfile = useMutation(
     trpc.user.updateProfile.mutationOptions({
@@ -66,6 +73,10 @@ export default function ProfileSheet({ user, open, onOpenChange }: ProfileSheetP
       email: form.email,
       // Empty means "keep the current password" — the router treats it that way.
       newPassword: form.newPassword || undefined,
+      // Always sent, unlike the password: '' is how this form removes a
+      // picture, and the router only leaves the column alone when the field is
+      // absent entirely.
+      image: form.image,
     });
   };
 
@@ -86,6 +97,20 @@ export default function ProfileSheet({ user, open, onOpenChange }: ProfileSheetP
 
         <form onSubmit={handleSubmit} className="flex-1 flex flex-col min-h-0">
           <div className="flex-1 overflow-y-auto px-4 space-y-4">
+            <div className="grid gap-2">
+              <Label>Profile picture</Label>
+              <ImageUpload
+                value={form.image}
+                onChange={(url) => setForm((prev) => ({ ...prev, image: url }))}
+                shape="round"
+                alt="Your profile picture"
+              />
+              <p className="text-xs text-muted-foreground">
+                Shown in the account menu and on the Users page. PNG, JPEG, WebP or GIF, up to{' '}
+                {humanBytes(MAX_UPLOAD_BYTES)}.
+              </p>
+            </div>
+
             <div className="grid gap-2">
               <Label htmlFor="profile-name">Name</Label>
               <Input
