@@ -144,6 +144,10 @@ func tick(ctx context.Context, s *store.Store, opts Options, startedAt time.Time
 }
 
 func checkOne(ctx context.Context, s *store.Store, opts Options, cfg settings.Settings, monitor store.Monitor) error {
+	// Per-monitor overrides land here, once, so every checker and every
+	// threshold below reads one already-resolved Settings value.
+	cfg = settings.ForMonitor(cfg, monitor)
+
 	result := opts.PerformCheck(ctx, cfg, monitor)
 	checkedAt := time.Now()
 

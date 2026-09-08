@@ -41,6 +41,14 @@ type Monitor struct {
 	// FlappingSince is non-nil while this monitor is in a flapping state, and
 	// is what suppresses its incident churn (internal/flapping).
 	FlappingSince *time.Time
+
+	// Per-monitor overrides of the instance-wide monitoring defaults. Nil
+	// means "use the AppSettings value" — resolved once per check by
+	// settings.ForMonitor(), so nothing downstream has to know an override
+	// exists.
+	HTTPTimeoutSeconds      *int
+	FailedAttemptsThreshold *int
+	LatencyThresholdMs      *int
 }
 
 // IsDue reports whether this monitor's check interval has elapsed since its

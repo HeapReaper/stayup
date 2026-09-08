@@ -28,6 +28,9 @@ import type {
   StatusPageDetail,
   StatusPageTheme,
   HistoryWindowDays,
+  StatusPageGroupInput,
+  StatusPageComponentInput,
+  ComponentStatus,
 } from '@/trpc/routers/statuspage';
 import type { Monitor } from '@/trpc/routers/monitor';
 import { Button } from '@/components/ui/button';
@@ -95,7 +98,30 @@ type FormState = {
   groupNames: string[];
   assignment: Record<string, number>; // monitorId -> group index, or UNGROUPED. Absent = not on the page.
   order: string[]; // monitorIds in display order; relative order within a group is what's saved
+  // Components with no monitor behind them — "Payments: degraded" set by
+  // hand. Kept separate from `assignment` because they have no monitorId to
+  // key on and carry their own name, blurb and state.
+  manualComponents: ManualComponentFormState[];
 };
+
+type ManualComponentFormState = {
+  key: string;
+  name: string;
+  description: string;
+  status: ComponentStatus;
+  group: number; // group index, or UNGROUPED
+};
+
+const COMPONENT_STATUS_LABELS: Record<ComponentStatus, string> = {
+  Operational: 'Operational',
+  Degraded: 'Degraded',
+  Outage: 'Outage',
+  Maintenance: 'Under maintenance',
+};
+
+function newManualComponent(): ManualComponentFormState {
+  return { key: crypto.randomUUID(), name: '', description: '', status: 'Operational', group: UNGROUPED };
+}
 
 function emptyForm(): FormState {
   return {
@@ -114,6 +140,7 @@ function emptyForm(): FormState {
     groupNames: [],
     assignment: {},
     order: [],
+    manualComponents: [],
   };
 }
 
@@ -130,11 +157,23 @@ function detailToForm(detail: StatusPageDetail): FormState {
   const assignment: Record<string, number> = {};
   const order: string[] = [];
 
+  const manualComponents: ManualComponentFormState[] = [];
+
   detail.groups.forEach((group) => {
     const index = group.name === null ? UNGROUPED : groupNames.indexOf(group.name);
-    for (const monitorId of group.monitorIds) {
-      assignment[monitorId] = index;
-      order.push(monitorId);
+    for (const component of group.components) {
+      if (component.monitorId) {
+        assignment[component.monitorId] = index;
+        order.push(component.monitorId);
+        continue;
+      }
+      manualComponents.push({
+        key: crypto.randomUUID(),
+        name: component.name ?? '',
+        description: component.description ?? '',
+        status: component.manualStatus ?? 'Operational',
+        group: index,
+      });
     }
   });
 
@@ -154,16 +193,19 @@ function detailToForm(detail: StatusPageDetail): FormState {
     groupNames,
     assignment,
     order,
+    manualComponents,
   };
 }
 
-function formToGroups(form: FormState) {
-  const groups: { name: string | null; monitorIds: string[] }[] = [
-    { name: null, monitorIds: [] },
-    ...form.groupNames.map((name) => ({ name, monitorIds: [] as string[] })),
+function formToGroups(form: FormState): StatusPageGroupInput[] {
+  const groups: StatusPageGroupInput[] = [
+    { name: null, components: [] },
+    ...form.groupNames.map((name) => ({ name, components: [] as StatusPageComponentInput[] })),
   ];
 
-  // Walk monitors in display order so each group's saved monitorIds keep the
+  const bucketFor = (index: number) => (index === UNGROUPED ? groups[0] : groups[index + 1]);
+
+  // Walk monitors in display order so each group's saved components keep the
   // order the user arranged them in; any assigned monitor missing from
   // `order` (shouldn't normally happen) is appended at the end.
   const orderedIds = [
@@ -172,9 +214,26 @@ function formToGroups(form: FormState) {
   ];
 
   for (const monitorId of orderedIds) {
-    const index = form.assignment[monitorId];
-    const bucket = index === UNGROUPED ? groups[0] : groups[index + 1];
-    if (bucket) bucket.monitorIds.push(monitorId);
+    const bucket = bucketFor(form.assignment[monitorId]);
+    // name/manualStatus stay null: a monitor-backed component shows the
+    // monitor's own name and whatever its checks say.
+    if (bucket) {
+      bucket.components.push({ monitorId, name: null, description: null, manualStatus: null });
+    }
+  }
+
+  // Manual components go after the monitors of their group.
+  for (const component of form.manualComponents) {
+    if (!component.name.trim()) continue;
+    const bucket = bucketFor(component.group);
+    if (bucket) {
+      bucket.components.push({
+        monitorId: null,
+        name: component.name.trim(),
+        description: component.description.trim() || null,
+        manualStatus: component.status,
+      });
+    }
   }
 
   return groups;
@@ -325,6 +384,15 @@ export default function StatusPagesClientPage({ initialStatusPages, monitors }: 
     } else {
       createPage.mutate(payload);
     }
+  };
+
+  const updateManualComponent = (index: number, patch: Partial<ManualComponentFormState>) => {
+    setForm((prev) => ({
+      ...prev,
+      manualComponents: prev.manualComponents.map((component, i) =>
+        i === index ? { ...component, ...patch } : component,
+      ),
+    }));
   };
 
   const addGroup = () => setForm((prev) => ({ ...prev, groupNames: [...prev.groupNames, ''] }));
@@ -665,6 +733,113 @@ export default function StatusPagesClientPage({ initialStatusPages, monitors }: 
                         >
                           <X className="h-4 w-4" />
                         </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Manual components */}
+              <div className="space-y-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <h3 className="text-sm font-semibold">Manual components</h3>
+                    <p className="text-xs text-muted-foreground">
+                      Lines on the page that no check drives — a payment provider, a shipping partner,
+                      a feature behind a flag. You set the state yourself, and it stays until you
+                      change it.
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="gap-1.5 shrink-0"
+                    onClick={() =>
+                      setForm((prev) => ({ ...prev, manualComponents: [...prev.manualComponents, newManualComponent()] }))
+                    }
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    Add
+                  </Button>
+                </div>
+
+                {form.manualComponents.length > 0 && (
+                  <div className="space-y-2">
+                    {form.manualComponents.map((component, index) => (
+                      <div key={component.key} className="rounded-lg border p-2.5 space-y-2">
+                        <div className="flex items-center gap-2">
+                          <Input
+                            placeholder="Name, e.g. Payments"
+                            value={component.name}
+                            onChange={(e) => updateManualComponent(index, { name: e.target.value })}
+                          />
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="h-9 w-9 shrink-0"
+                            onClick={() =>
+                              setForm((prev) => ({
+                                ...prev,
+                                manualComponents: prev.manualComponents.filter((_, i) => i !== index),
+                              }))
+                            }
+                          >
+                            <X className="h-4 w-4" />
+                          </Button>
+                        </div>
+
+                        <Input
+                          placeholder="Description (optional)"
+                          value={component.description}
+                          onChange={(e) => updateManualComponent(index, { description: e.target.value })}
+                        />
+
+                        <div className="grid grid-cols-2 gap-2">
+                          <Select
+                            value={component.status}
+                            onValueChange={(val) => {
+                              if (val) updateManualComponent(index, { status: val as ComponentStatus });
+                            }}
+                          >
+                            <SelectTrigger>
+                              <SelectValue>
+                                {(val: ComponentStatus) => COMPONENT_STATUS_LABELS[val] ?? val}
+                              </SelectValue>
+                            </SelectTrigger>
+                            <SelectContent>
+                              {(Object.keys(COMPONENT_STATUS_LABELS) as ComponentStatus[]).map((status) => (
+                                <SelectItem key={status} value={status}>
+                                  {COMPONENT_STATUS_LABELS[status]}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+
+                          <Select
+                            value={String(component.group)}
+                            onValueChange={(val) => {
+                              if (val) updateManualComponent(index, { group: Number(val) });
+                            }}
+                          >
+                            <SelectTrigger>
+                              <SelectValue>
+                                {(val: string) =>
+                                  Number(val) === UNGROUPED ? 'No group' : (form.groupNames[Number(val)] || 'Group')
+                                }
+                              </SelectValue>
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value={String(UNGROUPED)}>No group</SelectItem>
+                              {form.groupNames.map((name, groupIndex) => (
+                                <SelectItem key={groupIndex} value={String(groupIndex)}>
+                                  {name || `Group ${groupIndex + 1}`}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
                       </div>
                     ))}
                   </div>

@@ -22,13 +22,15 @@ no agent to install on the monitored machines — one `docker compose up` and yo
 
 | | |
 |---|---|
-| **Monitors** | HTTP(s), Ping (ICMP), Port (raw TCP), DNS, PostgreSQL, MySQL, Redis, SMTP, IMAP, gRPC, WebSocket and Domain-expiry checks, at 15s/30s/60s/5m/1h/12h/24h intervals. Pause a monitor without losing its history, tag it, and see uptime % over a rolling 30-day window, response-time history and a full ping log. |
+| **Monitors** | HTTP(s), Ping (ICMP), Port (raw TCP), DNS, PostgreSQL, MySQL, Redis, SMTP, IMAP, gRPC, WebSocket and Domain-expiry checks, at 15s/30s/60s/5m/1h/12h/24h intervals. Pause a monitor without losing its history, tag it, and see uptime % over a rolling 30-day window, response-time history and a full ping log. Timeout, latency threshold and failures-before-alerting are per-monitor overrides of the instance defaults — a nightly batch API and a health endpoint are never usefully held to the same numbers. |
 | **HTTP checks** | Beyond "did it answer": request method, headers and body, redirect policy, which status codes count as up (`200,201`, `200-204,301`), and a content assertion on the response body — a substring, an RE2 regex, or a JSON path (`$.db.connected` equals `true`). Any of the three can be inverted. |
 | **Connection checks** | Each speaks just enough of its protocol to prove the service is really answering, not merely listening: PostgreSQL runs `SELECT 1`, MySQL reads the server handshake, Redis sends `PING`, SMTP does greeting/EHLO/NOOP/QUIT, IMAP reads the `* OK` greeting, gRPC calls `grpc.health.v1.Health/Check` (h2c or TLS), and WebSocket completes the RFC 6455 upgrade — the proxy that answers HTTP but never upgrades fails here and passes every other check. |
 | **Domain expiry** | A Domain monitor looks the registration up over RDAP and goes Degraded inside the warning window, Down once the date has passed. A forgotten renewal takes the site, the mail and the certificate with it, and nothing renews it automatically. |
 | **TLS certificates** | Every HTTPS check records the certificate's expiry; a monitor goes Degraded — opening an incident and paging your integrations — once it's inside the warning window. Verification can be switched off per instance for self-signed and internal-CA hosts. |
 | **Incidents** | Opened automatically when a monitor goes Down/Degraded and moved to *Monitoring* on recovery, or created by hand. Impact levels, a status timeline (Investigating → Identified → Monitoring → Resolved), acknowledgement, and post-mortems that can be drafted privately and published later. |
-| **Status pages** | Multiple pages, each with its own slug, branding (logo, primary colour, theme), ordered monitor groups, history window (7/30/90 days) and incident feed. Optionally reachable on a custom domain, or locked to signed-in users only. |
+| **Status pages** | Multiple pages, each with its own slug, branding (logo, primary colour, theme), ordered component groups, history window (7/30/90 days) and incident feed. Optionally reachable on a custom domain, or locked to signed-in users only. |
+| **Components** | A line on a status page is usually a monitor, but does not have to be. A component with no monitor behind it — a payment provider, a shipping partner, a feature behind a flag — carries its own name, blurb and a state you set by hand, so "Payments: degraded" needs no endpoint to poll. |
+| **Badges & feeds** | `/status/<slug>/badge/<id>.svg` renders an embeddable shields-style badge for any component — `?metric=uptime` for the percentage, `overall` for the whole page, `?label=` to retitle it. `/status/<slug>/feed.xml` and `/atom.xml` publish the incident history as RSS 2.0 and Atom 1.0: no account, no confirmation, no unsubscribe. All of them work on a custom domain too. |
 | **Maintenance windows** | Scheduled windows that suppress incident creation for the covered monitors while active, and show as "Scheduled maintenance" on the status page instead of an outage. |
 | **Integrations** | Discord, Slack, generic Webhook, Telegram, E-mail, PagerDuty (Events API v2) and browser Web Push. Queued, retried up to 5×, with a delivery log. Discord alerts arrive as embeds — monitor, incident status, impact, endpoint, response time, 30-day uptime and a relative "last check", colour-coded by severity. |
 | **Escalation policies** | Ordered paging chains ("page on-call, then the team channel after 10 minutes if nobody acknowledged") attachable per monitor. Each rung targets either a fixed integration or an on-call schedule. |
@@ -94,6 +96,7 @@ Two code paths deliberately mirror each other, and must stay behaviourally ident
 | `src/lib/notification-rules.ts` | `worker/internal/routing` |
 | `src/lib/assertions.ts` (validation) | `worker/internal/checkers/assert.go` (evaluation) |
 | `src/lib/email.ts` | `worker/internal/notify/email.go` |
+| monitor overrides (`monitor.ts` router) | `worker/internal/settings`'s `ForMonitor` |
 | `src/lib/settings.ts` | `worker/internal/settings` |
 | `src/lib/prisma.ts` | `worker/internal/db` |
 | `src/lib/updates.ts` | `worker/internal/updates` |
@@ -315,7 +318,8 @@ live by the workers on every tick. Changing these takes effect on the *next chec
 - *Monitoring defaults* — default interval, HTTP timeout, failed attempts before alerting, latency
   threshold (above it a check reports **Degraded**), TLS verification, the certificate- and
   domain-expiry warning windows, flapping detection (transitions and window), and how long raw
-  checks and finished notifications are kept
+  checks and finished notifications are kept. The timeout, latency threshold and failure count are
+  each overridable per monitor, on the monitor's own form; blank there means "use these
 - *SMTP* — overrides the `.env` mail settings **per field** (blank falls back to `SMTP_*`), applied to
   the very next send by both the app and the workers, with a "send test e-mail" button that reports
   the mail server's own error
@@ -328,7 +332,9 @@ live by the workers on every tick. Changing these takes effect on the *next chec
 ## How the monitoring loop works
 
 1. Each check worker polls the DB every 5s for monitors of its type whose `interval` has elapsed and
-   that aren't paused (`worker/internal/runner`), and checks all due ones concurrently.
+   that aren't paused (`worker/internal/runner`), and checks all due ones concurrently. Each check
+   resolves the monitor's own timeout/latency/failure-count overrides over the instance defaults
+   first (`settings.ForMonitor`), so everything downstream reads one already-resolved value.
 2. Every check writes a `MonitorCheck` row — the raw "ping" history, always recorded verbatim.
 3. The monitor's rolled-up `status`, `responseTime`, `lastCheckedAt` and 30-day `uptime` are
    recomputed from those rows.
@@ -381,6 +387,8 @@ src/
                                         integrations, escalations, on-call, routing, reports,
                                         users, logs, settings
     (status)/            /status/[slug] → the public status page
+                         /status/[slug]/badge/[component] → embeddable SVG badge
+                         /status/[slug]/{feed,atom}.xml   → incident feeds
     login/ register/ logout/
     api/auth/[...all]/   better-auth handler
     api/trpc/[trpc]/     tRPC handler
@@ -389,7 +397,8 @@ src/
   components/ui/         shadcn/ui primitives
   emails/                React Email templates
   lib/                   prisma, auth, settings, incidents, integration-delivery, maintenance,
-                         email, discord, push, audit, logging, redis
+                         email, discord, push, audit, logging, redis,
+                         oncall, notification-rules, assertions, badge, status-feed
   prisma/schemas/        sqlite.prisma + postgresql.prisma, each with its own migrations/ folder
   trpc/                  init.ts (context + procedures), client/server helpers, routers/
   validations/           Zod schemas

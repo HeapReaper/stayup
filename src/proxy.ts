@@ -55,7 +55,12 @@ export async function proxy(request: NextRequest) {
   ) {
     const slug = await resolveStatusPageSlug(hostname);
     if (slug) {
-      return NextResponse.rewrite(new URL(`/status/${slug}`, request.url));
+      // The rest of the path is carried across, so the page's sub-routes —
+      // /badge/<id>.svg, /feed.xml, /atom.xml — work on the custom domain too.
+      // Without this every path on that hostname would collapse onto the page
+      // itself, and a badge embedded from status.acme.com would render HTML.
+      const suffix = pathname === "/" ? "" : pathname;
+      return NextResponse.rewrite(new URL(`/status/${slug}${suffix}`, request.url));
     }
   }
 

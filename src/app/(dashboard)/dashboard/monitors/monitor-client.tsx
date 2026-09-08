@@ -101,6 +101,10 @@ type MonitorFormState = {
   // Write-only: never sent back down, blank means "keep the stored secret".
   credential: string;
   sloTarget: string;
+  // Per-monitor overrides. Blank = "use the instance default from Settings".
+  httpTimeoutSeconds: string;
+  failedAttemptsThreshold: string;
+  latencyThresholdMs: string;
 };
 
 // Base UI's <SelectValue> only resolves a label once its item list has
@@ -185,6 +189,9 @@ function emptyForm(): MonitorFormState {
     jsonPath: '',
     credential: '',
     sloTarget: '',
+    httpTimeoutSeconds: '',
+    failedAttemptsThreshold: '',
+    latencyThresholdMs: '',
   };
 }
 
@@ -208,6 +215,10 @@ function monitorToForm(monitor: Monitor): MonitorFormState {
     jsonPath: monitor.jsonPath ?? '',
     credential: '',
     sloTarget: monitor.sloTarget === null ? '' : String(monitor.sloTarget),
+    httpTimeoutSeconds: monitor.httpTimeoutSeconds === null ? '' : String(monitor.httpTimeoutSeconds),
+    failedAttemptsThreshold:
+      monitor.failedAttemptsThreshold === null ? '' : String(monitor.failedAttemptsThreshold),
+    latencyThresholdMs: monitor.latencyThresholdMs === null ? '' : String(monitor.latencyThresholdMs),
   };
 }
 
@@ -387,6 +398,9 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
       jsonPath: form.jsonPath,
       credential: form.credential,
       sloTarget: form.sloTarget ? Number(form.sloTarget) : null,
+      httpTimeoutSeconds: form.httpTimeoutSeconds ? Number(form.httpTimeoutSeconds) : null,
+      failedAttemptsThreshold: form.failedAttemptsThreshold ? Number(form.failedAttemptsThreshold) : null,
+      latencyThresholdMs: form.latencyThresholdMs ? Number(form.latencyThresholdMs) : null,
     };
 
     if (editingId) {
@@ -746,6 +760,61 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                   </div>
                 </div>
               )}
+
+              <div className="space-y-3 rounded-lg border p-3">
+                <div>
+                  <Label className="text-sm">Overrides</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Leave blank to use the instance defaults from Settings → Monitoring. A slow
+                    nightly batch API and a health endpoint are never usefully held to the same
+                    latency threshold.
+                  </p>
+                </div>
+                <div className="grid sm:grid-cols-3 gap-3">
+                  <div className="grid gap-2">
+                    <Label htmlFor="httpTimeoutSeconds" className="text-xs font-normal">
+                      Timeout (s)
+                    </Label>
+                    <Input
+                      id="httpTimeoutSeconds"
+                      type="number"
+                      min={1}
+                      max={300}
+                      placeholder="Default"
+                      value={form.httpTimeoutSeconds}
+                      onChange={(e) => setForm({ ...form, httpTimeoutSeconds: e.target.value })}
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="latencyThresholdMs" className="text-xs font-normal">
+                      Degraded above (ms)
+                    </Label>
+                    <Input
+                      id="latencyThresholdMs"
+                      type="number"
+                      min={50}
+                      max={60000}
+                      placeholder="Default"
+                      value={form.latencyThresholdMs}
+                      onChange={(e) => setForm({ ...form, latencyThresholdMs: e.target.value })}
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="failedAttemptsThreshold" className="text-xs font-normal">
+                      Failures before alert
+                    </Label>
+                    <Input
+                      id="failedAttemptsThreshold"
+                      type="number"
+                      min={1}
+                      max={20}
+                      placeholder="Default"
+                      value={form.failedAttemptsThreshold}
+                      onChange={(e) => setForm({ ...form, failedAttemptsThreshold: e.target.value })}
+                    />
+                  </div>
+                </div>
+              </div>
 
               <div className="grid gap-2">
                 <Label htmlFor="sloTarget">Availability target (SLO)</Label>

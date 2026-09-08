@@ -41,7 +41,8 @@ func (s *Store) listMonitors(ctx context.Context, where string, args ...any) ([]
 	rows, err := s.db.QueryContext(ctx, s.q(`
 		SELECT id, name, url, type, status, interval, port, enabled, "lastCheckedAt", "escalationPolicyId",
 		       method, "requestHeaders", "requestBody", "followRedirects", "expectedStatusCodes", keyword, "keywordInverted",
-		       "assertionType", "jsonPath", credential, "flappingSince"
+		       "assertionType", "jsonPath", credential, "flappingSince",
+		       "httpTimeoutSeconds", "failedAttemptsThreshold", "latencyThresholdMs"
 		FROM monitor
 		`+where), args...)
 	if err != nil {
@@ -57,11 +58,13 @@ func (s *Store) listMonitors(ctx context.Context, where string, args ...any) ([]
 		var lastCheckedAt, flappingSince sql.NullTime
 		var escalationPolicyID, requestHeaders, requestBody, expectedStatusCodes, keyword sql.NullString
 		var jsonPath, credential sql.NullString
+		var httpTimeout, failedAttempts, latencyThreshold sql.NullInt64
 
 		if err := rows.Scan(
 			&m.ID, &m.Name, &m.URL, &m.Type, &m.Status, &m.Interval, &port, &enabled, &lastCheckedAt, &escalationPolicyID,
 			&m.Method, &requestHeaders, &requestBody, &followRedirects, &expectedStatusCodes, &keyword, &keywordInverted,
 			&m.AssertionType, &jsonPath, &credential, &flappingSince,
+			&httpTimeout, &failedAttempts, &latencyThreshold,
 		); err != nil {
 			return nil, fmt.Errorf("store: scan monitor: %w", err)
 		}
@@ -90,9 +93,20 @@ func (s *Store) listMonitors(ctx context.Context, where string, args ...any) ([]
 		m.Keyword = nullString(keyword)
 		m.JSONPath = nullString(jsonPath)
 		m.Credential = nullString(credential)
+		m.HTTPTimeoutSeconds = nullInt(httpTimeout)
+		m.FailedAttemptsThreshold = nullInt(failedAttempts)
+		m.LatencyThresholdMs = nullInt(latencyThreshold)
 		monitors = append(monitors, m)
 	}
 	return monitors, rows.Err()
+}
+
+func nullInt(v sql.NullInt64) *int {
+	if !v.Valid {
+		return nil
+	}
+	i := int(v.Int64)
+	return &i
 }
 
 func nullString(v sql.NullString) *string {

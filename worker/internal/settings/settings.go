@@ -229,3 +229,32 @@ func create(ctx context.Context, s *store.Store) (*store.AppSettings, error) {
 	}
 	return row, nil
 }
+
+// ForMonitor applies a monitor's per-monitor overrides on top of the
+// instance-wide settings, returning the values this one check should use.
+//
+// Resolved here, once per check, rather than at each use site: the checkers
+// and the runner all read cfg.HTTPTimeoutSecs / cfg.LatencyThreshold /
+// cfg.FailedAttemptsThreshold, and every one of them would otherwise have to
+// remember that an override might exist. A nil override means "use the
+// instance value", which is what every monitor carries until someone sets one.
+func ForMonitor(cfg Settings, monitor store.Monitor) Settings {
+	// A copy: cfg is read once per tick and shared across every monitor
+	// checked concurrently in that tick, so mutating it would leak one
+	// monitor's overrides onto its neighbours.
+	resolved := cfg
+
+	if monitor.HTTPTimeoutSeconds != nil && *monitor.HTTPTimeoutSeconds > 0 {
+		resolved.HTTPTimeoutSecs = *monitor.HTTPTimeoutSeconds
+	}
+	if monitor.LatencyThresholdMs != nil && *monitor.LatencyThresholdMs > 0 {
+		resolved.LatencyThreshold = *monitor.LatencyThresholdMs
+	}
+	// Same floor as the instance-wide value: a 0 would disable alerting
+	// entirely rather than alerting immediately.
+	if monitor.FailedAttemptsThreshold != nil && *monitor.FailedAttemptsThreshold >= 1 {
+		resolved.FailedAttemptsThreshold = *monitor.FailedAttemptsThreshold
+	}
+
+	return resolved
+}

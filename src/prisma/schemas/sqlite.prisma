@@ -150,6 +150,16 @@ model Monitor {
   // Availability target this monitor is measured against on the Reports page,
   // as a percentage (99.9). Null means it isn't held to one.
   sloTarget       Float?
+  // Per-monitor overrides of the instance-wide monitoring defaults in
+  // AppSettings. Null means "use the instance value", which is what every
+  // existing monitor keeps. A slow nightly batch API and a health endpoint
+  // are never usefully held to the same latency threshold, and a flaky
+  // third-party dependency needs a different confirmation count from a
+  // service you own — so these three are the ones worth overriding.
+  // Resolved in worker/internal/settings's ForMonitor().
+  httpTimeoutSeconds      Int?
+  failedAttemptsThreshold Int?
+  latencyThresholdMs      Int?
   // NotAfter of the TLS certificate seen on the most recent check, or null if
   // that check wasn't HTTPS. Written by the https worker; read by the
   // "Certificate Expiry Warning" logic and shown in the monitors list.
@@ -167,7 +177,7 @@ model Monitor {
   checks              MonitorCheck[]
   dailyStats          MonitorDailyStat[]
   incidents           Incident[]
-  statusPages         StatusPageMonitor[]
+  statusPages         StatusPageComponent[]
   maintenanceWindows  MaintenanceWindowMonitor[]
   tags                MonitorTag[]
   notificationRules   NotificationRule[]
@@ -329,7 +339,7 @@ model StatusPage {
   updatedAt         DateTime @updatedAt
 
   groups      StatusPageGroup[]
-  monitors    StatusPageMonitor[]
+  components  StatusPageComponent[]
   subscribers StatusPageSubscriber[]
 
   @@index([createdById])
@@ -346,28 +356,50 @@ model StatusPageGroup {
   name         String
   order        Int        @default(0)
 
-  monitors StatusPageMonitor[]
+  components StatusPageComponent[]
 
   @@index([statusPageId])
   @@map("status_page_group")
 }
 
-// Join row: which monitors appear on a status page, in which group (if any),
-// and in what order.
-model StatusPageMonitor {
+// One line on a status page, in a group (if any) and in an order.
+//
+// A component is usually backed by a Monitor, and then it reports whatever
+// that monitor's checks say. It does not have to be: `monitorId` is nullable,
+// so "Payments" can be a component whose state a human sets by hand — plenty
+// of things worth telling customers about (a payment provider, a shipping
+// partner, a partial feature degradation) have no endpoint this app could
+// usefully poll.
+//
+// `manualStatus` wins whenever it is set, monitor-backed or not, which also
+// makes it the override for "the checks say green but we know it isn't".
+model StatusPageComponent {
   id           String           @id @default(cuid())
   statusPageId String
   statusPage   StatusPage       @relation(fields: [statusPageId], references: [id], onDelete: Cascade)
-  monitorId    String
-  monitor      Monitor          @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  // Null for a manual component. The unique constraint below still prevents
+  // the same monitor appearing twice on one page — NULLs don't collide in a
+  // unique index on either provider, so any number of manual components is
+  // fine.
+  monitorId    String?
+  monitor      Monitor?         @relation(fields: [monitorId], references: [id], onDelete: Cascade)
   groupId      String?
   group        StatusPageGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
   order        Int              @default(0)
+  // Label. Required in practice for a manual component; for a monitor-backed
+  // one, null means "show the monitor's own name", so renaming the monitor
+  // keeps the page in step.
+  name         String?
+  description  String?
+  // Operational | Degraded | Outage | Maintenance. Null = derive it from the
+  // monitor (and impossible to leave null on a manual component, which the
+  // statusPage router enforces).
+  manualStatus String?
 
   @@unique([statusPageId, monitorId])
   @@index([statusPageId])
   @@index([groupId])
-  @@map("status_page_monitor")
+  @@map("status_page_component")
 }
 
 // Someone subscribed to updates for an entire status page (as opposed to

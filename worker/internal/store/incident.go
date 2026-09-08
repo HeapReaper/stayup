@@ -185,10 +185,10 @@ func (s *Store) IncidentSubscriberEmails(ctx context.Context, incidentID string)
 func (s *Store) StatusPageSubscribersForMonitor(ctx context.Context, monitorID string) ([]StatusPageSubscriber, error) {
 	rows, err := s.db.QueryContext(ctx, s.q(`
 		SELECT DISTINCT sub.channel, sub.target
-		FROM status_page_monitor spm
-		JOIN status_page sp ON sp.id = spm."statusPageId"
+		FROM status_page_component spc
+		JOIN status_page sp ON sp.id = spc."statusPageId"
 		JOIN status_page_subscriber sub ON sub."statusPageId" = sp.id
-		WHERE spm."monitorId" = ? AND sp."isPublished" = ?
+		WHERE spc."monitorId" = ? AND sp."isPublished" = ?
 	`), monitorID, s.db.BoolArg(true))
 	if err != nil {
 		return nil, fmt.Errorf("store: status page subscribers for monitor: %w", err)

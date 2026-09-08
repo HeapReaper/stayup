@@ -206,6 +206,14 @@ const monitorBaseInput = z.object({
   credential: z.string().max(500).optional(),
   // Availability target in percent (99.9). Null clears it.
   sloTarget: z.number().min(0).max(100).nullable().optional(),
+
+  // Per-monitor overrides of the instance-wide monitoring defaults. Null (the
+  // form's blank) means "use the instance value". Bounds match the Settings
+  // page's, so an override can't be set to something the instance-wide field
+  // would have rejected — see worker/internal/settings's ForMonitor().
+  httpTimeoutSeconds: z.number().int().min(1).max(300).nullable().optional(),
+  failedAttemptsThreshold: z.number().int().min(1).max(20).nullable().optional(),
+  latencyThresholdMs: z.number().int().min(50).max(60_000).nullable().optional(),
 });
 
 /** True when this monitor actually asserts something about the response body. */
@@ -305,6 +313,20 @@ function portFor(input: z.infer<typeof monitorBaseInput>): number | null {
 }
 
 /**
+ * The three per-monitor override columns. Only HTTP monitors have a request
+ * timeout worth overriding separately... they don't, actually: every checker
+ * reads the same three values (see settings.ForMonitor), so these apply to
+ * every monitor type.
+ */
+function overridesFor(input: z.infer<typeof monitorBaseInput>) {
+  return {
+    httpTimeoutSeconds: input.httpTimeoutSeconds ?? null,
+    failedAttemptsThreshold: input.failedAttemptsThreshold ?? null,
+    latencyThresholdMs: input.latencyThresholdMs ?? null,
+  };
+}
+
+/**
  * The credential column, resolved against what's already stored: a blank
  * field means "keep the existing secret" (so the form never has to receive
  * it), and a monitor type that has no credentials clears it outright.
@@ -356,6 +378,7 @@ export const monitorRouter = createTRPCRouter({
             createdById: ctx.session.user.id,
             credential: credentialFor(input, null),
             sloTarget: input.sloTarget ?? null,
+            ...overridesFor(input),
             ...httpOptionsFor(input),
           },
         });
@@ -398,6 +421,7 @@ export const monitorRouter = createTRPCRouter({
             escalationPolicyId: input.escalationPolicyId || null,
             credential: credentialFor(input, existing.credential),
             sloTarget: input.sloTarget ?? null,
+            ...overridesFor(input),
             ...httpOptionsFor(input),
             // A monitor that stops being HTTP can't have a meaningful
             // certificate expiry any more, and one that stops being a Domain

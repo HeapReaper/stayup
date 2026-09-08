@@ -223,7 +223,7 @@ async function notifyStatusPageSubscribers(
 ) {
   if (!monitorId) return;
 
-  const links = await prisma.statusPageMonitor.findMany({
+  const links = await prisma.statusPageComponent.findMany({
     where: { monitorId, statusPage: { isPublished: true } },
     include: { statusPage: { include: { subscribers: true } } },
   });

@@ -13,12 +13,14 @@ import {
   Send,
   Wrench,
   FileText,
+  Rss,
 } from 'lucide-react';
 
 import { useTRPC } from '@/trpc/client';
 import type {
   PublicStatusPage,
-  PublicMonitorView,
+  PublicComponentView,
+  ComponentStatus,
   DayBucket,
   SubscriberChannel,
   PublicMaintenanceWindow,
@@ -44,11 +46,19 @@ interface StatusPageClientProps {
 
 const REFRESH_INTERVAL_MS = 60_000;
 
-function statusDotClass(status: string) {
-  if (status === 'Down') return 'bg-rose-500';
+function statusDotClass(status: ComponentStatus) {
+  if (status === 'Outage') return 'bg-rose-500';
   if (status === 'Degraded') return 'bg-amber-500';
+  if (status === 'Maintenance') return 'bg-blue-500';
   return 'bg-emerald-500';
 }
+
+const COMPONENT_STATUS_LABELS: Record<ComponentStatus, string> = {
+  Operational: 'Operational',
+  Degraded: 'Degraded performance',
+  Outage: 'Outage',
+  Maintenance: 'Under maintenance',
+};
 
 function dayBucketClass(status: DayBucket['status']) {
   if (status === 'Down') return 'bg-rose-500 hover:bg-rose-600';
@@ -138,7 +148,7 @@ function MaintenanceBanner({ windows }: { windows: PublicMaintenanceWindow[] }) 
   );
 }
 
-function UptimeHeatmap({ monitor }: { monitor: PublicMonitorView }) {
+function UptimeHeatmap({ component }: { component: PublicComponentView }) {
   const scrollRef = React.useRef<HTMLDivElement>(null);
 
   // Days run oldest -> newest, so "today" is the rightmost box. Start
@@ -146,13 +156,13 @@ function UptimeHeatmap({ monitor }: { monitor: PublicMonitorView }) {
   React.useLayoutEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollLeft = el.scrollWidth;
-  }, [monitor.days.length]);
+  }, [component.days.length]);
 
   return (
     <div ref={scrollRef} className="overflow-x-auto pb-1">
       <AutoRefresh />
       <div className="flex gap-[3px] w-max">
-        {monitor.days.map((day) => (
+        {component.days.map((day) => (
           <Tooltip key={day.date}>
             <TooltipTrigger
               render={
@@ -181,17 +191,15 @@ function UptimeHeatmap({ monitor }: { monitor: PublicMonitorView }) {
   );
 }
 
-function MonitorRow({ monitor, showTags }: { monitor: PublicMonitorView; showTags: boolean }) {
+function ComponentRow({ component, showTags }: { component: PublicComponentView; showTags: boolean }) {
   return (
     <div className="py-4 space-y-2">
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-2 min-w-0 flex-wrap">
-          <span
-            className={`h-2 w-2 rounded-full shrink-0 ${monitor.underMaintenance ? 'bg-blue-500' : statusDotClass(monitor.status)}`}
-          />
-          <span className="font-medium text-sm truncate">{monitor.name}</span>
+          <span className={`h-2 w-2 rounded-full shrink-0 ${statusDotClass(component.status)}`} />
+          <span className="font-medium text-sm truncate">{component.name}</span>
           {showTags &&
-            monitor.tags.map((tag) => (
+            component.tags.map((tag) => (
               <Badge
                 key={tag.id}
                 variant="outline"
@@ -200,7 +208,7 @@ function MonitorRow({ monitor, showTags }: { monitor: PublicMonitorView; showTag
                 {tag.name}
               </Badge>
             ))}
-          {monitor.underMaintenance && (
+          {component.status === 'Maintenance' && (
             <Badge
               variant="secondary"
               className="bg-blue-500/15 text-blue-600 dark:text-blue-400 border-blue-500/20 gap-1 text-[10px] px-1.5 py-0 h-4 shrink-0"
@@ -210,9 +218,18 @@ function MonitorRow({ monitor, showTags }: { monitor: PublicMonitorView; showTag
             </Badge>
           )}
         </div>
-        <span className="text-xs text-muted-foreground shrink-0">{monitor.uptime.toFixed(2)}% uptime</span>
+        {/* A manual component has no checks, so no uptime figure to quote —
+            it says what it is instead. */}
+        <span className="text-xs text-muted-foreground shrink-0">
+          {component.uptime !== null
+            ? `${component.uptime.toFixed(2)}% uptime`
+            : COMPONENT_STATUS_LABELS[component.status]}
+        </span>
       </div>
-      <UptimeHeatmap monitor={monitor} />
+      {component.description && (
+        <p className="text-xs text-muted-foreground">{component.description}</p>
+      )}
+      {component.days.length > 0 && <UptimeHeatmap component={component} />}
     </div>
   );
 }
@@ -460,8 +477,8 @@ function StatusPageBody({ slug, initialData }: StatusPageClientProps) {
                       <h2 className="text-sm font-semibold text-muted-foreground mb-1">{group.name}</h2>
                     )}
                     <div className="divide-y rounded-lg border px-4">
-                      {group.monitors.map((monitor) => (
-                        <MonitorRow key={monitor.id} monitor={monitor} showTags={page.showTags} />
+                      {group.components.map((component) => (
+                        <ComponentRow key={component.id} component={component} showTags={page.showTags} />
                       ))}
                     </div>
                   </div>
@@ -471,6 +488,23 @@ function StatusPageBody({ slug, initialData }: StatusPageClientProps) {
           </TabsContent>
 
           <TabsContent value="incidents" className="mt-6">
+            <div className="mb-4 flex items-center justify-end gap-3 text-xs text-muted-foreground">
+              <span>Follow along without an account:</span>
+              <a
+                href={`/status/${slug}/feed.xml`}
+                className="inline-flex items-center gap-1 hover:underline"
+                title="Incident feed (RSS 2.0)"
+              >
+                <Rss className="h-3 w-3" /> RSS
+              </a>
+              <a
+                href={`/status/${slug}/atom.xml`}
+                className="inline-flex items-center gap-1 hover:underline"
+                title="Incident feed (Atom 1.0)"
+              >
+                <Rss className="h-3 w-3" /> Atom
+              </a>
+            </div>
             {page.incidents.length === 0 ? (
               <p className="text-sm text-muted-foreground">
                 No incidents reported in the last {page.historyWindowDays} days.

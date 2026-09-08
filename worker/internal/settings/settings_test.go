@@ -106,3 +106,68 @@ func TestResolveSMTPPortDefault(t *testing.T) {
 		t.Errorf("Port = %d, want the %d default for a zero column", got, defaultSMTPPort)
 	}
 }
+
+func ptr[T any](v T) *T { return &v }
+
+// The point of per-monitor overrides: a slow nightly batch API and a health
+// endpoint are never usefully held to the same thresholds.
+func TestForMonitorAppliesOverrides(t *testing.T) {
+	instance := Settings{HTTPTimeoutSecs: 30, LatencyThreshold: 2000, FailedAttemptsThreshold: 1}
+
+	resolved := ForMonitor(instance, store.Monitor{
+		HTTPTimeoutSeconds:      ptr(120),
+		LatencyThresholdMs:      ptr(15000),
+		FailedAttemptsThreshold: ptr(3),
+	})
+
+	if resolved.HTTPTimeoutSecs != 120 {
+		t.Errorf("HTTPTimeoutSecs = %d, want the monitor's 120", resolved.HTTPTimeoutSecs)
+	}
+	if resolved.LatencyThreshold != 15000 {
+		t.Errorf("LatencyThreshold = %d, want the monitor's 15000", resolved.LatencyThreshold)
+	}
+	if resolved.FailedAttemptsThreshold != 3 {
+		t.Errorf("FailedAttemptsThreshold = %d, want the monitor's 3", resolved.FailedAttemptsThreshold)
+	}
+}
+
+// A monitor with no overrides — every monitor, until someone sets one — must
+// behave exactly as it did before the columns existed.
+func TestForMonitorWithoutOverridesKeepsInstanceValues(t *testing.T) {
+	instance := Settings{HTTPTimeoutSecs: 30, LatencyThreshold: 2000, FailedAttemptsThreshold: 2}
+
+	resolved := ForMonitor(instance, store.Monitor{})
+
+	if resolved != instance {
+		t.Errorf("ForMonitor() = %+v, want the instance settings unchanged", resolved)
+	}
+}
+
+// Values that would disable a check rather than tune it are ignored, on the
+// same reasoning as the instance-wide floors in Get().
+func TestForMonitorIgnoresNonsensicalOverrides(t *testing.T) {
+	instance := Settings{HTTPTimeoutSecs: 30, LatencyThreshold: 2000, FailedAttemptsThreshold: 2}
+
+	resolved := ForMonitor(instance, store.Monitor{
+		HTTPTimeoutSeconds:      ptr(0),
+		LatencyThresholdMs:      ptr(0),
+		FailedAttemptsThreshold: ptr(0),
+	})
+
+	if resolved != instance {
+		t.Errorf("ForMonitor() = %+v, want zero overrides to be ignored", resolved)
+	}
+}
+
+// cfg is read once per tick and shared across every monitor checked
+// concurrently in it, so resolving one monitor's overrides must not touch it.
+func TestForMonitorDoesNotMutateTheInstanceSettings(t *testing.T) {
+	instance := Settings{HTTPTimeoutSecs: 30, LatencyThreshold: 2000, FailedAttemptsThreshold: 1}
+	before := instance
+
+	_ = ForMonitor(instance, store.Monitor{HTTPTimeoutSeconds: ptr(120), LatencyThresholdMs: ptr(9000)})
+
+	if instance != before {
+		t.Errorf("instance settings were mutated: %+v, want %+v", instance, before)
+	}
+}

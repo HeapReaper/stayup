@@ -24,6 +24,21 @@ export type SubscriberChannel = z.infer<typeof subscriberChannelEnum>;
 
 export type OverallStatus = 'Operational' | 'Degraded' | 'Outage';
 
+/**
+ * What one component reports. A superset of the monitor statuses, because a
+ * component can also be under maintenance, and because "Outage" reads better
+ * than "Down" to the customer looking at the page.
+ */
+export const componentStatusEnum = z.enum(['Operational', 'Degraded', 'Outage', 'Maintenance']);
+export type ComponentStatus = z.infer<typeof componentStatusEnum>;
+
+/** Monitor status -> component status. */
+const MONITOR_STATUS_TO_COMPONENT: Record<string, ComponentStatus> = {
+  Up: 'Operational',
+  Degraded: 'Degraded',
+  Down: 'Outage',
+};
+
 export type StatusPageSummary = {
   id: string;
   name: string;
@@ -39,9 +54,25 @@ export type StatusPageSummary = {
   createdAt: string;
 };
 
+/**
+ * One line on a status page, as the editor sends it.
+ *
+ * `monitorId` null makes it a manual component — something worth telling
+ * customers about that this app has no way to poll (a payment provider, a
+ * shipping partner, a feature behind a flag). Those carry their own name and
+ * a `manualStatus` a human sets; monitor-backed ones fall back to the
+ * monitor's name and its checks.
+ */
+export type StatusPageComponentInput = {
+  monitorId: string | null;
+  name: string | null;
+  description: string | null;
+  manualStatus: ComponentStatus | null;
+};
+
 export type StatusPageGroupInput = {
   name: string | null; // null = ungrouped bucket
-  monitorIds: string[];
+  components: StatusPageComponentInput[];
 };
 
 export type StatusPageDetail = {
@@ -68,21 +99,28 @@ export type DayBucket = {
   incidentTitles: string[];
 };
 
-export type PublicMonitorView = {
+export type PublicComponentView = {
+  /** The component row's id — a manual component has no monitor to identify it by. */
   id: string;
+  monitorId: string | null;
   name: string;
-  type: string;
-  status: string;
-  uptime: number;
-  underMaintenance: boolean;
+  description: string | null;
+  /** The monitor's type, or null for a manual component. */
+  type: string | null;
+  status: ComponentStatus;
+  /** Null for a manual component: nothing measured it. */
+  uptime: number | null;
+  /** True when a human set this status rather than a check producing it. */
+  manual: boolean;
   tags: { id: string; name: string; color: string }[];
+  /** Empty for a manual component — there is no check history to draw. */
   days: DayBucket[];
 };
 
-export type PublicMonitorGroup = {
+export type PublicComponentGroup = {
   id: string | null;
   name: string | null;
-  monitors: PublicMonitorView[];
+  components: PublicComponentView[];
 };
 
 export type PublicIncidentUpdate = {
@@ -125,7 +163,7 @@ export type PublicStatusPage = {
   historyWindowDays: HistoryWindowDays;
   overallStatus: OverallStatus;
   showTags: boolean;
-  groups: PublicMonitorGroup[];
+  groups: PublicComponentGroup[];
   incidents: PublicIncident[];
   maintenanceWindows: PublicMaintenanceWindow[];
 };
@@ -134,9 +172,30 @@ export type PublicStatusPage = {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function computeOverallStatus(monitorStatuses: string[]): OverallStatus {
-  if (monitorStatuses.some((s) => s === 'Down')) return 'Outage';
-  if (monitorStatuses.some((s) => s === 'Degraded')) return 'Degraded';
+/**
+ * What a component reports right now.
+ *
+ * `manualStatus` wins whenever it is set — that is what makes it usable both
+ * as the whole state of a manual component and as an override on a
+ * monitor-backed one ("the checks are green but we know payments are slow").
+ * Otherwise an active maintenance window wins over the monitor's own status,
+ * and finally the monitor's status maps across.
+ */
+function resolveComponentStatus(
+  component: { manualStatus: string | null; monitor: { status: string } | null },
+  underMaintenance = false,
+): ComponentStatus {
+  if (component.manualStatus) return component.manualStatus as ComponentStatus;
+  if (underMaintenance) return 'Maintenance';
+  if (!component.monitor) return 'Operational';
+  return MONITOR_STATUS_TO_COMPONENT[component.monitor.status] ?? 'Operational';
+}
+
+function computeOverallStatus(componentStatuses: ComponentStatus[]): OverallStatus {
+  if (componentStatuses.some((s) => s === 'Outage')) return 'Outage';
+  // Maintenance is deliberately not an outage at the page level — it's
+  // planned, and the maintenance notice above already says so.
+  if (componentStatuses.some((s) => s === 'Degraded')) return 'Degraded';
   return 'Operational';
 }
 
@@ -172,12 +231,20 @@ async function applyGroups(
       groupOrder += 1;
     }
 
-    let monitorOrder = 0;
-    for (const monitorId of group.monitorIds) {
-      await tx.statusPageMonitor.create({
-        data: { statusPageId, monitorId, groupId, order: monitorOrder },
+    let componentOrder = 0;
+    for (const component of group.components) {
+      await tx.statusPageComponent.create({
+        data: {
+          statusPageId,
+          groupId,
+          order: componentOrder,
+          monitorId: component.monitorId,
+          name: component.name,
+          description: component.description,
+          manualStatus: component.manualStatus,
+        },
       });
-      monitorOrder += 1;
+      componentOrder += 1;
     }
   }
 }
@@ -258,9 +325,27 @@ const slugSchema = z
   .max(80)
   .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, 'Use lowercase letters, numbers, and hyphens only');
 
+const statusPageComponentInput = z
+  .object({
+    monitorId: z.string().nullable(),
+    name: z.string().trim().max(120).nullable(),
+    description: z.string().trim().max(300).nullable(),
+    manualStatus: componentStatusEnum.nullable(),
+  })
+  // A manual component has nothing else to take a label or a state from, so
+  // both are required exactly when there is no monitor behind it.
+  .refine((component) => component.monitorId !== null || !!component.name, {
+    message: 'A component without a monitor needs a name',
+    path: ['name'],
+  })
+  .refine((component) => component.monitorId !== null || component.manualStatus !== null, {
+    message: 'A component without a monitor needs a status you set yourself',
+    path: ['manualStatus'],
+  });
+
 const statusPageGroupInput = z.object({
   name: z.string().trim().min(1).max(80).nullable(),
-  monitorIds: z.array(z.string()),
+  components: z.array(statusPageComponentInput),
 });
 
 // Bare hostname only — no protocol, no port, no path. Lowercased and
@@ -310,7 +395,7 @@ export const statusPageRouter = createTRPCRouter({
     const pages = await prisma.statusPage.findMany({
       orderBy: { createdAt: 'desc' },
       include: {
-        monitors: { include: { monitor: { select: { status: true } } } },
+        components: { include: { monitor: { select: { status: true } } } },
         _count: { select: { subscribers: true } },
       },
     });
@@ -324,9 +409,9 @@ export const statusPageRouter = createTRPCRouter({
       historyWindowDays: page.historyWindowDays as HistoryWindowDays,
       isPublished: page.isPublished,
       requireLogin: page.requireLogin,
-      monitorCount: page.monitors.length,
+      monitorCount: page.components.length,
       subscriberCount: page._count.subscribers,
-      overallStatus: computeOverallStatus(page.monitors.map((m) => m.monitor.status)),
+      overallStatus: computeOverallStatus(page.components.map((component) => resolveComponentStatus(component))),
       createdAt: page.createdAt.toISOString(),
     }));
   }),
@@ -338,7 +423,7 @@ export const statusPageRouter = createTRPCRouter({
         where: { id: input.id },
         include: {
           groups: { orderBy: { order: 'asc' } },
-          monitors: { orderBy: { order: 'asc' } },
+          components: { orderBy: { order: 'asc' } },
         },
       });
 
@@ -346,13 +431,20 @@ export const statusPageRouter = createTRPCRouter({
         throw new TRPCError({ code: 'NOT_FOUND', message: 'Status page not found' });
       }
 
+      const toInput = (component: (typeof page.components)[number]): StatusPageComponentInput => ({
+        monitorId: component.monitorId,
+        name: component.name,
+        description: component.description,
+        manualStatus: (component.manualStatus as ComponentStatus | null) ?? null,
+      });
+
       const groups: StatusPageGroupInput[] = [
-        { name: null, monitorIds: page.monitors.filter((m) => !m.groupId).map((m) => m.monitorId) },
+        { name: null, components: page.components.filter((c) => !c.groupId).map(toInput) },
         ...page.groups.map((group) => ({
           name: group.name,
-          monitorIds: page.monitors.filter((m) => m.groupId === group.id).map((m) => m.monitorId),
+          components: page.components.filter((c) => c.groupId === group.id).map(toInput),
         })),
-      ].filter((group) => group.name !== null || group.monitorIds.length > 0);
+      ].filter((group) => group.name !== null || group.components.length > 0);
 
       return {
         id: page.id,
@@ -448,7 +540,7 @@ export const statusPageRouter = createTRPCRouter({
 
         // Full replace — simplest correct way to sync a nested groups/monitors
         // editor without diffing group-by-group.
-        await tx.statusPageMonitor.deleteMany({ where: { statusPageId: input.id } });
+        await tx.statusPageComponent.deleteMany({ where: { statusPageId: input.id } });
         await tx.statusPageGroup.deleteMany({ where: { statusPageId: input.id } });
         await applyGroups(tx, input.id, input.groups);
 
@@ -519,7 +611,7 @@ export const statusPageRouter = createTRPCRouter({
         where: { slug: input.slug },
         include: {
           groups: { orderBy: { order: 'asc' } },
-          monitors: {
+          components: {
             orderBy: { order: 'asc' },
             include: { monitor: { include: { tags: { include: { tag: true } } } } },
           },
@@ -537,7 +629,11 @@ export const statusPageRouter = createTRPCRouter({
         throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Sign in to view this status page' });
       }
 
-      const monitorIds = page.monitors.map((m) => m.monitorId);
+      // Manual components have no monitor, so every history/incident query
+      // below is scoped to the ones that do.
+      const monitorIds = page.components
+        .map((component) => component.monitorId)
+        .filter((id): id is string => id !== null);
 
       const windowStart = new Date();
       windowStart.setUTCDate(windowStart.getUTCDate() - (page.historyWindowDays - 1));
@@ -580,7 +676,11 @@ export const statusPageRouter = createTRPCRouter({
           .flatMap((w) => w.monitorIds),
       );
 
-      const monitorNameById = new Map(page.monitors.map((m) => [m.monitorId, m.monitor.name] as const));
+      const monitorNameById = new Map(
+        page.components
+          .filter((component) => component.monitor !== null)
+          .map((component) => [component.monitorId as string, component.monitor!.name] as const),
+      );
 
       const checksByMonitor = new Map<string, typeof checks>();
       for (const check of checks) {
@@ -604,30 +704,41 @@ export const statusPageRouter = createTRPCRouter({
         incidentsByMonitor.set(incident.monitorId, list);
       }
 
-      const buildMonitorView = (link: (typeof page.monitors)[number]): PublicMonitorView => ({
-        id: link.monitor.id,
-        name: link.monitor.name,
-        type: link.monitor.type,
-        status: link.monitor.status,
-        uptime: link.monitor.uptime,
-        underMaintenance: monitorIdsUnderMaintenanceNow.has(link.monitor.id),
-        tags: link.monitor.tags.map(({ tag }) => tag),
-        days: bucketByDay(
-          checksByMonitor.get(link.monitorId) ?? [],
-          dailyStatsByMonitor.get(link.monitorId) ?? [],
-          incidentsByMonitor.get(link.monitorId) ?? [],
-          page.historyWindowDays,
-        ),
-      });
+      const buildComponentView = (component: (typeof page.components)[number]): PublicComponentView => {
+        const monitor = component.monitor;
+        const underMaintenance = monitor ? monitorIdsUnderMaintenanceNow.has(monitor.id) : false;
 
-      const groupBuckets: PublicMonitorGroup[] = [];
+        return {
+          id: component.id,
+          monitorId: component.monitorId,
+          // A monitor-backed component with no label of its own follows the
+          // monitor's name, so renaming the monitor keeps the page in step.
+          name: component.name ?? monitor?.name ?? 'Component',
+          description: component.description,
+          type: monitor?.type ?? null,
+          status: resolveComponentStatus(component, underMaintenance),
+          uptime: monitor?.uptime ?? null,
+          manual: !!component.manualStatus,
+          tags: monitor?.tags.map(({ tag }) => tag) ?? [],
+          days: monitor
+            ? bucketByDay(
+                checksByMonitor.get(monitor.id) ?? [],
+                dailyStatsByMonitor.get(monitor.id) ?? [],
+                incidentsByMonitor.get(monitor.id) ?? [],
+                page.historyWindowDays,
+              )
+            : [],
+        };
+      };
 
-      const ungrouped = page.monitors.filter((m) => !m.groupId).map(buildMonitorView);
-      if (ungrouped.length > 0) groupBuckets.push({ id: null, name: null, monitors: ungrouped });
+      const groupBuckets: PublicComponentGroup[] = [];
+
+      const ungrouped = page.components.filter((c) => !c.groupId).map(buildComponentView);
+      if (ungrouped.length > 0) groupBuckets.push({ id: null, name: null, components: ungrouped });
 
       for (const group of page.groups) {
-        const monitors = page.monitors.filter((m) => m.groupId === group.id).map(buildMonitorView);
-        if (monitors.length > 0) groupBuckets.push({ id: group.id, name: group.name, monitors });
+        const components = page.components.filter((c) => c.groupId === group.id).map(buildComponentView);
+        if (components.length > 0) groupBuckets.push({ id: group.id, name: group.name, components });
       }
 
       return {
@@ -639,7 +750,7 @@ export const statusPageRouter = createTRPCRouter({
         theme: page.theme as StatusPageTheme,
         primaryColor: page.primaryColor,
         historyWindowDays: page.historyWindowDays as HistoryWindowDays,
-        overallStatus: computeOverallStatus(page.monitors.map((m) => m.monitor.status)),
+        overallStatus: computeOverallStatus(groupBuckets.flatMap((group) => group.components.map((c) => c.status))),
         showTags: page.showTags,
         groups: groupBuckets,
         incidents: incidents.map((incident) => ({
