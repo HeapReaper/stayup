@@ -22,17 +22,23 @@ no agent to install on the monitored machines — one `docker compose up` and yo
 
 | | |
 |---|---|
-| **Monitors** | HTTP(s), Ping (ICMP), Port (raw TCP) and DNS checks, at 15s/30s/60s/5m intervals. Pause a monitor without losing its history, tag it, and see uptime % over a rolling 30-day window, response-time history and a full ping log. |
-| **HTTP checks** | Beyond "did it answer": request method, headers and body, redirect policy, which status codes count as up (`200,201`, `200-204,301`), and a keyword assertion on the response body (or its inverse). |
+| **Monitors** | HTTP(s), Ping (ICMP), Port (raw TCP), DNS, PostgreSQL, MySQL, Redis, SMTP, IMAP, gRPC, WebSocket and Domain-expiry checks, at 15s/30s/60s/5m/1h/12h/24h intervals. Pause a monitor without losing its history, tag it, and see uptime % over a rolling 30-day window, response-time history and a full ping log. |
+| **HTTP checks** | Beyond "did it answer": request method, headers and body, redirect policy, which status codes count as up (`200,201`, `200-204,301`), and a content assertion on the response body — a substring, an RE2 regex, or a JSON path (`$.db.connected` equals `true`). Any of the three can be inverted. |
+| **Connection checks** | Each speaks just enough of its protocol to prove the service is really answering, not merely listening: PostgreSQL runs `SELECT 1`, MySQL reads the server handshake, Redis sends `PING`, SMTP does greeting/EHLO/NOOP/QUIT, IMAP reads the `* OK` greeting, gRPC calls `grpc.health.v1.Health/Check` (h2c or TLS), and WebSocket completes the RFC 6455 upgrade — the proxy that answers HTTP but never upgrades fails here and passes every other check. |
+| **Domain expiry** | A Domain monitor looks the registration up over RDAP and goes Degraded inside the warning window, Down once the date has passed. A forgotten renewal takes the site, the mail and the certificate with it, and nothing renews it automatically. |
 | **TLS certificates** | Every HTTPS check records the certificate's expiry; a monitor goes Degraded — opening an incident and paging your integrations — once it's inside the warning window. Verification can be switched off per instance for self-signed and internal-CA hosts. |
 | **Incidents** | Opened automatically when a monitor goes Down/Degraded and moved to *Monitoring* on recovery, or created by hand. Impact levels, a status timeline (Investigating → Identified → Monitoring → Resolved), acknowledgement, and post-mortems that can be drafted privately and published later. |
 | **Status pages** | Multiple pages, each with its own slug, branding (logo, primary colour, theme), ordered monitor groups, history window (7/30/90 days) and incident feed. Optionally reachable on a custom domain, or locked to signed-in users only. |
 | **Maintenance windows** | Scheduled windows that suppress incident creation for the covered monitors while active, and show as "Scheduled maintenance" on the status page instead of an outage. |
 | **Integrations** | Discord, Slack, generic Webhook, Telegram, E-mail, PagerDuty (Events API v2) and browser Web Push. Queued, retried up to 5×, with a delivery log. Discord alerts arrive as embeds — monitor, incident status, impact, endpoint, response time, 30-day uptime and a relative "last check", colour-coded by severity. |
-| **Escalation policies** | Ordered paging chains ("page on-call, then the team channel after 10 minutes if nobody acknowledged") attachable per monitor. |
+| **Escalation policies** | Ordered paging chains ("page on-call, then the team channel after 10 minutes if nobody acknowledged") attachable per monitor. Each rung targets either a fixed integration or an on-call schedule. |
+| **On-call schedules** | Daily or weekly rotations with a handoff hour in the team's own timezone, and overrides for "I'm ill this week" — including an override that covers a window with *nobody*, so paging falls through to the next step instead of waking someone who is away. A rotation step resolves at the moment it fires, not when the incident opened. |
+| **Notification routing** | Ordered rules deciding where an alert goes when its monitor has no escalation policy: match on tag, monitor or impact, restrict to a weekday/time window in the instance timezone, and either route to specific integrations or suppress entirely. "Staging alerts only during office hours, and only to #dev" is one row. With no rules, the original broadcast-to-everything behaviour is unchanged. |
+| **Flapping detection** | "Failed attempts before alerting" debounces one dip; this catches the opposite — a monitor that alternates up and down all afternoon. Past N transitions in a rolling window it is marked flapping, and one standing incident replaces the storm until it settles. |
+| **SLA reports** | Per-monitor uptime, p50/p95/p99 and max response time per calendar month, against an optional per-monitor SLO target with the error budget it spent. CSV export and a print-to-PDF layout. Read from the daily rollups, so a month older than your raw-check retention still reports. |
 | **Subscribers** | E-mail/Discord subscribers per status page, and e-mail subscribers per incident, notified on every incident update. |
 | **Logs & audit trail** | Every check, every notification delivery and every significant dashboard action, with actor and IP. |
-| **Retention** | Raw checks and finished notifications are pruned on a schedule you set, after each day is summarized into a rollup — so a 90-day status page keeps working on a 7-day raw retention. |
+| **Retention** | Raw checks and finished notifications are pruned on a schedule you set, after each day is summarized into a rollup (counts, average *and* the response-time percentiles) — so a 90-day status page and a year-old SLA report keep working on a 7-day raw retention. |
 | **Users & roles** | Invite-only. The first account is created through `/register` (and is an Admin); after that self-service sign-up is closed and further users are invited from the dashboard. **Admin** runs the instance (accounts, settings), **Member** runs the monitoring, **Viewer** reads. Everyone can edit their own profile. |
 | **Worker health** | Every worker writes a heartbeat each tick, so the dashboard names the worker that stopped instead of leaving you to infer it from monitors that went quiet. `/api/health` reports the same thing, and is what the containers' healthcheck uses. |
 | **Update checks** | Knows which build it is running and, once a day, whether a newer one has been published — shown on Settings → Updates and as a badge in the sidebar. Switchable off; nothing is ever installed automatically. |
@@ -65,6 +71,7 @@ no agent to install on the monitored machines — one `docker compose up` and yo
    ┌───────────────────────────────────┴────────────────────────────────────┐
    │  Go workers (worker/) — one process each, no Node runtime              │
    │  https · port · ping · dns   →  check monitors, write pings/incidents  │
+   │  probes                      →  database/mail/gRPC/WebSocket/domain    │
    │  integrations                →  deliver queued notifications, escalate │
    └───────────────────────────────────┬────────────────────────────────────┘
                                        ▼
@@ -83,6 +90,10 @@ Two code paths deliberately mirror each other, and must stay behaviourally ident
 | `src/lib/incidents.ts` | `worker/internal/incidents` |
 | `src/lib/integration-delivery.ts` | `worker/internal/delivery` + `worker/internal/notify` |
 | `src/lib/maintenance.ts` | `worker/internal/maintenance` |
+| `src/lib/oncall.ts` | `worker/internal/oncall` |
+| `src/lib/notification-rules.ts` | `worker/internal/routing` |
+| `src/lib/assertions.ts` (validation) | `worker/internal/checkers/assert.go` (evaluation) |
+| `src/lib/email.ts` | `worker/internal/notify/email.go` |
 | `src/lib/settings.ts` | `worker/internal/settings` |
 | `src/lib/prisma.ts` | `worker/internal/db` |
 | `src/lib/updates.ts` | `worker/internal/updates` |
@@ -125,6 +136,7 @@ go run ./cmd/https
 go run ./cmd/port
 go run ./cmd/ping          # opens a raw ICMP socket — needs CAP_NET_RAW (sudo) outside Docker
 go run ./cmd/dns
+go run ./cmd/probes       # Postgres, MySQL, Redis, SMTP, IMAP, gRPC, WebSocket, Domain
 go run ./cmd/integrations
 go run ./cmd/janitor      # retention + daily rollups; one pass at startup, then once per UTC day
 ```
@@ -134,7 +146,7 @@ Nothing in `worker/` hot-reloads: restart a worker after editing its code. `go b
 
 ### Docker (build from source)
 
-`docker-compose.build.yml` runs the whole stack — Postgres, Redis, the Next.js app and all six
+`docker-compose.build.yml` runs the whole stack — Postgres, Redis, the Next.js app and all seven
 workers — built from your checkout. Use it when you're changing the code; to just *run* StayUp, use
 the pre-built images below instead (that's what the default `docker-compose.yaml` does).
 
@@ -170,7 +182,7 @@ Every push to `main` and every git tag publishes two images to the GitLab contai
 | Image | Contains |
 |---|---|
 | `registry.gitlab.com/heapreaper/stayup/web` | the Next.js app (dashboard, API, status pages) |
-| `registry.gitlab.com/heapreaper/stayup/worker` | all six Go binaries — the `command:` decides which one a container runs |
+| `registry.gitlab.com/heapreaper/stayup/worker` | all seven Go binaries — the `command:` decides which one a container runs |
 
 Tags: `latest` (tip of `main`), the release tag on tagged builds, and the commit short SHA on every
 build. Pin `latest` for a rolling install, or a tag for a reproducible one.
@@ -216,7 +228,7 @@ docker compose up -d
 `web` runs `prisma migrate deploy` on every start, so schema changes apply themselves, and the
 workers wait for it to report healthy before they touch the database.
 
-The published stack ships Postgres, the app and the six workers — no Redis, since nothing reads or
+The published stack ships Postgres, the app and the seven workers — no Redis, since nothing reads or
 writes it yet. Images are `linux/amd64`; see the `PLATFORMS` variable in `.gitlab-ci.yml` for
 building `linux/arm64` as well.
 
@@ -301,9 +313,12 @@ live by the workers on every tick. Changing these takes effect on the *next chec
 
 - *General* — organisation name, timezone, support e-mail
 - *Monitoring defaults* — default interval, HTTP timeout, failed attempts before alerting, latency
-  threshold (above it a check reports **Degraded**), TLS verification and the certificate-expiry
-  warning window, and how long raw checks and finished notifications are kept
-- *SMTP* — overrides the `.env` mail settings, with a "send test e-mail" button
+  threshold (above it a check reports **Degraded**), TLS verification, the certificate- and
+  domain-expiry warning windows, flapping detection (transitions and window), and how long raw
+  checks and finished notifications are kept
+- *SMTP* — overrides the `.env` mail settings **per field** (blank falls back to `SMTP_*`), applied to
+  the very next send by both the app and the workers, with a "send test e-mail" button that reports
+  the mail server's own error
 - *API* — API key and webhook signing secret (regeneratable), plus the auto-generated VAPID key pair
   used for Web Push
 - *Updates* — which build is running, whether a newer one exists, and whether to look once a day
@@ -324,15 +339,20 @@ live by the workers on every tick. Changing these takes effect on the *next chec
 5. For HTTP monitors, "did it pass" means: the status code is accepted, the keyword assertion holds,
    and — if it's HTTPS — the certificate isn't about to expire. The first two failing make it Down;
    an expiring certificate or a slow response make it Degraded.
-6. A confirmed Down/Degraded opens an incident, unless the monitor is inside an active maintenance
-   window. Recovery moves the open incident to *Monitoring* (a human still resolves it).
-7. Each incident event either broadcasts to every enabled integration, or — if the monitor has an
-   escalation policy — pages that policy's steps one by one until someone acknowledges. Either way it
-   becomes a `Pending` `IntegrationDelivery` row.
-8. `worker/cmd/integrations` polls that queue every 5s, delivers each row through its channel, and
+6. Status transitions over a rolling window are counted; past the flapping threshold the monitor is
+   marked flapping and steps 6–7 are suppressed until it settles, with one standing "is flapping"
+   incident in place of the churn.
+7. A confirmed Down/Degraded opens an incident, unless the monitor is inside an active maintenance
+   window or is flapping. Recovery moves the open incident to *Monitoring* (a human still resolves it).
+8. Each incident event either follows the notification rules (route to specific integrations, or
+   suppress during quiet hours), broadcasts to every enabled integration when no rule applies, or —
+   if the monitor has an escalation policy — pages that policy's steps one by one until someone
+   acknowledges. A step targeting an on-call schedule resolves the rotation at the moment it fires.
+   Either way it becomes a `Pending` `IntegrationDelivery` row.
+9. `worker/cmd/integrations` polls that queue every 5s, delivers each row through its channel, and
    retries up to 5 times before marking it `Failed`. Everything lands in **Dashboard → Logs**.
-9. Once a day `worker/cmd/janitor` summarizes each finished day into one `MonitorDailyStat` row per
-   monitor, then deletes raw checks and finished notifications past their retention. Status pages read
+10. Once a day `worker/cmd/janitor` summarizes each finished day into one `MonitorDailyStat` row per
+   monitor — counts, average and nearest-rank p50/p95/p99 — then deletes raw checks and finished notifications past their retention. Status pages read
    those summaries for past days, so history outlives the checks it was built from.
 
 | Worker | Monitor type | How it checks |
@@ -341,6 +361,7 @@ live by the workers on every tick. Changing these takes effect on the *next chec
 | `worker/cmd/port` | `Port` | Raw TCP connect to `host:port` |
 | `worker/cmd/ping` | `Ping` | Burst of 3 native ICMP echoes; any reply = reachable |
 | `worker/cmd/dns` | `DNS` | Resolves the hostname's A record(s) |
+| `worker/cmd/probes` | `Postgres`, `MySQL`, `Redis`, `SMTP`, `IMAP`, `gRPC`, `WebSocket`, `Domain` | Opens a connection and speaks the minimum that proves the service answers |
 | `worker/cmd/integrations` | — | Delivers queued notifications and drives escalation |
 | `worker/cmd/janitor` | — | Rolls finished days up into daily summaries, prunes past retention, and runs the daily update check |
 
@@ -357,7 +378,8 @@ src/
   app/
     (public)/            /            → redirects to /login
     (dashboard)/         /dashboard/* → monitors, incidents, maintenance, status pages,
-                                        integrations, escalations, users, logs, settings
+                                        integrations, escalations, on-call, routing, reports,
+                                        users, logs, settings
     (status)/            /status/[slug] → the public status page
     login/ register/ logout/
     api/auth/[...all]/   better-auth handler
@@ -374,11 +396,14 @@ src/
   proxy.ts               auth redirects + custom-domain rewrite (Next middleware)
 
 worker/                  separate Go module
-  cmd/{https,port,ping,dns,integrations,janitor}/   one binary each
+  cmd/{https,port,ping,dns,probes,integrations,janitor}/   one binary each
   internal/checkers/     "how do I check one monitor" per type
   internal/runner/       shared poll → check → persist → incident-sync loop
   internal/store/        hand-written SQL for both providers
   internal/{db,settings,incidents,maintenance,delivery,notify,logging,ids}/
+  internal/oncall/       who holds the pager at a given instant
+  internal/routing/      which integrations an alert goes to, and when
+  internal/flapping/     transition counting and flapping state
 ```
 
 Every dashboard page is split into a server component (`page.tsx`, fetches via the direct tRPC

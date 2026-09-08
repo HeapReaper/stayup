@@ -17,20 +17,25 @@ func (s *Store) GetSettings(ctx context.Context) (*AppSettings, error) {
 	var smtpHost, smtpUser, smtpPass, smtpFromEmail, smtpFromName sql.NullString
 	var smtpPort sql.NullInt64
 	var sslCheckEnabled, certExpiryWarningEnabled, updateCheckEnabled, smtpUseTLS db.Bool
+	var domainExpiryWarningEnabled, flappingEnabled db.Bool
 
 	err := s.queryRow(ctx, `
-		SELECT id, "supportEmail", "httpTimeoutSeconds", "failedAttemptsThreshold", "latencyThresholdMs",
+		SELECT id, timezone, "supportEmail", "httpTimeoutSeconds", "failedAttemptsThreshold", "latencyThresholdMs",
 		       "sslCheckEnabled", "certExpiryWarningEnabled", "certExpiryWarningDays",
 		       "checkRetentionDays", "deliveryRetentionDays", "vapidPublicKey", "vapidPrivateKey",
 		       "updateCheckEnabled",
-		       "smtpHost", "smtpPort", "smtpUser", "smtpPass", "smtpFromEmail", "smtpFromName", "smtpUseTls"
+		       "smtpHost", "smtpPort", "smtpUser", "smtpPass", "smtpFromEmail", "smtpFromName", "smtpUseTls",
+		       "domainExpiryWarningEnabled", "domainExpiryWarningDays",
+		       "flappingEnabled", "flappingWindowMinutes", "flappingThreshold"
 		FROM app_settings
 		WHERE id = 'singleton'
-	`).Scan(&settings.ID, &supportEmail, &settings.HTTPTimeoutSecs, &settings.FailedAttemptsThreshold, &settings.LatencyThreshold,
+	`).Scan(&settings.ID, &settings.Timezone, &supportEmail, &settings.HTTPTimeoutSecs, &settings.FailedAttemptsThreshold, &settings.LatencyThreshold,
 		&sslCheckEnabled, &certExpiryWarningEnabled, &settings.CertExpiryWarningDays,
 		&settings.CheckRetentionDays, &settings.DeliveryRetentionDays, &vapidPub, &vapidPriv,
 		&updateCheckEnabled,
-		&smtpHost, &smtpPort, &smtpUser, &smtpPass, &smtpFromEmail, &smtpFromName, &smtpUseTLS)
+		&smtpHost, &smtpPort, &smtpUser, &smtpPass, &smtpFromEmail, &smtpFromName, &smtpUseTLS,
+		&domainExpiryWarningEnabled, &settings.DomainExpiryWarningDays,
+		&flappingEnabled, &settings.FlappingWindowMinutes, &settings.FlappingThreshold)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -43,6 +48,8 @@ func (s *Store) GetSettings(ctx context.Context) (*AppSettings, error) {
 	settings.CertExpiryWarningEnabled = bool(certExpiryWarningEnabled)
 	settings.UpdateCheckEnabled = bool(updateCheckEnabled)
 	settings.SMTPUseTLS = bool(smtpUseTLS)
+	settings.DomainExpiryWarningEnabled = bool(domainExpiryWarningEnabled)
+	settings.FlappingEnabled = bool(flappingEnabled)
 
 	if supportEmail.Valid {
 		settings.SupportEmail = &supportEmail.String

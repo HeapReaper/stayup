@@ -248,14 +248,15 @@ func (s *Store) OverdueEscalationCandidates(ctx context.Context) ([]Incident, er
 	return incidents, rows.Err()
 }
 
-// EscalationSteps mirrors the ordered `escalation_step` (joined with
-// `integration`) include in escalateOverdueIncidents().
+// EscalationSteps returns a policy's rungs in order. The integration join is
+// a LEFT JOIN because a step can instead target an OnCallSchedule, whose
+// roster is resolved separately at paging time (internal/oncall).
 func (s *Store) EscalationSteps(ctx context.Context, policyID string) ([]EscalationStep, error) {
 	rows, err := s.db.QueryContext(ctx, s.q(`
-		SELECT es."order", es."delayMinutes", es."integrationId",
+		SELECT es."order", es."delayMinutes", es."integrationId", es."onCallScheduleId",
 		       integ.name, integ.type, integ.target, integ.secret, integ.enabled
 		FROM escalation_step es
-		JOIN integration integ ON integ.id = es."integrationId"
+		LEFT JOIN integration integ ON integ.id = es."integrationId"
 		WHERE es."escalationPolicyId" = ?
 		ORDER BY es."order" ASC
 	`), policyID)
@@ -267,20 +268,129 @@ func (s *Store) EscalationSteps(ctx context.Context, policyID string) ([]Escalat
 	var steps []EscalationStep
 	for rows.Next() {
 		var step EscalationStep
-		var secret sql.NullString
-		var enabled db.Bool
-		if err := rows.Scan(&step.Order, &step.DelayMinutes, &step.IntegrationID,
-			&step.Integration.Name, &step.Integration.Type, &step.Integration.Target, &secret, &enabled); err != nil {
+		var integrationID, onCallScheduleID sql.NullString
+		var name, integType, target, secret sql.NullString
+		var enabled sql.NullBool
+
+		if err := rows.Scan(&step.Order, &step.DelayMinutes, &integrationID, &onCallScheduleID,
+			&name, &integType, &target, &secret, &enabled); err != nil {
 			return nil, fmt.Errorf("store: scan escalation step: %w", err)
 		}
-		step.Integration.ID = step.IntegrationID
-		if secret.Valid {
-			step.Integration.Secret = &secret.String
+
+		step.OnCallScheduleID = nullString(onCallScheduleID)
+		if integrationID.Valid {
+			id := integrationID.String
+			step.IntegrationID = &id
+			step.Integration = &Integration{
+				ID:      id,
+				Name:    name.String,
+				Type:    integType.String,
+				Target:  target.String,
+				Secret:  nullString(secret),
+				Enabled: enabled.Valid && enabled.Bool,
+			}
 		}
-		step.Integration.Enabled = bool(enabled)
 		steps = append(steps, step)
 	}
 	return steps, rows.Err()
+}
+
+// OnCallScheduleByID loads a rotation with its roster and every override that
+// has not ended yet — everything internal/oncall needs to answer "who holds
+// the pager right now". Read fresh on each escalation rather than cached, so
+// a just-added override takes effect on the next tick.
+func (s *Store) OnCallScheduleByID(ctx context.Context, scheduleID string) (*OnCallSchedule, error) {
+	var schedule OnCallSchedule
+	var startsAt sql.NullTime
+
+	err := s.queryRow(ctx, `
+		SELECT id, name, timezone, "rotationType", "handoffHour", "handoffDay", "startsAt"
+		FROM on_call_schedule WHERE id = ?
+	`, scheduleID).Scan(&schedule.ID, &schedule.Name, &schedule.Timezone, &schedule.RotationType,
+		&schedule.HandoffHour, &schedule.HandoffDay, &startsAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: on-call schedule: %w", err)
+	}
+	if startsAt.Valid {
+		schedule.StartsAt = startsAt.Time
+	}
+
+	if schedule.Participants, err = s.onCallParticipants(ctx, scheduleID); err != nil {
+		return nil, err
+	}
+	if schedule.Overrides, err = s.onCallOverrides(ctx, scheduleID); err != nil {
+		return nil, err
+	}
+	return &schedule, nil
+}
+
+func (s *Store) onCallParticipants(ctx context.Context, scheduleID string) ([]OnCallParticipant, error) {
+	rows, err := s.db.QueryContext(ctx, s.q(`
+		SELECT p.id, p."order", p.name, p."integrationId",
+		       integ.name, integ.type, integ.target, integ.secret, integ.enabled
+		FROM on_call_participant p
+		JOIN integration integ ON integ.id = p."integrationId"
+		WHERE p."scheduleId" = ?
+		ORDER BY p."order" ASC
+	`), scheduleID)
+	if err != nil {
+		return nil, fmt.Errorf("store: on-call participants: %w", err)
+	}
+	defer rows.Close()
+
+	var participants []OnCallParticipant
+	for rows.Next() {
+		var p OnCallParticipant
+		var secret sql.NullString
+		var enabled db.Bool
+
+		if err := rows.Scan(&p.ID, &p.Order, &p.Name, &p.IntegrationID,
+			&p.Integration.Name, &p.Integration.Type, &p.Integration.Target, &secret, &enabled); err != nil {
+			return nil, fmt.Errorf("store: scan on-call participant: %w", err)
+		}
+		p.Integration.ID = p.IntegrationID
+		p.Integration.Secret = nullString(secret)
+		p.Integration.Enabled = bool(enabled)
+		participants = append(participants, p)
+	}
+	return participants, rows.Err()
+}
+
+func (s *Store) onCallOverrides(ctx context.Context, scheduleID string) ([]OnCallOverride, error) {
+	rows, err := s.db.QueryContext(ctx, s.q(`
+		SELECT "startsAt", "endsAt", "participantId", reason
+		FROM on_call_override
+		WHERE "scheduleId" = ?
+		ORDER BY "startsAt" ASC
+	`), scheduleID)
+	if err != nil {
+		return nil, fmt.Errorf("store: on-call overrides: %w", err)
+	}
+	defer rows.Close()
+
+	var overrides []OnCallOverride
+	for rows.Next() {
+		var o OnCallOverride
+		var startsAt, endsAt sql.NullTime
+		var participantID, reason sql.NullString
+
+		if err := rows.Scan(&startsAt, &endsAt, &participantID, &reason); err != nil {
+			return nil, fmt.Errorf("store: scan on-call override: %w", err)
+		}
+		if startsAt.Valid {
+			o.StartsAt = startsAt.Time
+		}
+		if endsAt.Valid {
+			o.EndsAt = endsAt.Time
+		}
+		o.ParticipantID = nullString(participantID)
+		o.Reason = nullString(reason)
+		overrides = append(overrides, o)
+	}
+	return overrides, rows.Err()
 }
 
 // RecordEscalation mirrors the `prisma.incident.update({ data: {
@@ -345,4 +455,117 @@ func (s *Store) AlertForIncident(ctx context.Context, incidentID string) (*Incid
 		alert.LastCheckedAt = &t
 	}
 	return &alert, nil
+}
+
+// ListNotificationRules returns the enabled routing rules in evaluation
+// order, each with the integrations it routes to. Read on every notification
+// rather than cached: a rule edited in the dashboard has to take effect on
+// the next incident, not the next worker restart.
+func (s *Store) ListNotificationRules(ctx context.Context) ([]NotificationRule, error) {
+	rows, err := s.db.QueryContext(ctx, s.q(`
+		SELECT id, name, "order", action, "matchTagId", "matchMonitorId", "matchImpact",
+		       "activeDays", "activeFromMinute", "activeUntilMinute"
+		FROM notification_rule
+		WHERE enabled = ?
+		ORDER BY "order" ASC
+	`), s.db.BoolArg(true))
+	if err != nil {
+		return nil, fmt.Errorf("store: list notification rules: %w", err)
+	}
+	defer rows.Close()
+
+	var rules []NotificationRule
+	byID := map[string]int{}
+
+	for rows.Next() {
+		var rule NotificationRule
+		var matchTagID, matchMonitorID, matchImpact, activeDays sql.NullString
+		var activeFrom, activeUntil sql.NullInt64
+
+		if err := rows.Scan(&rule.ID, &rule.Name, &rule.Order, &rule.Action,
+			&matchTagID, &matchMonitorID, &matchImpact, &activeDays, &activeFrom, &activeUntil); err != nil {
+			return nil, fmt.Errorf("store: scan notification rule: %w", err)
+		}
+
+		rule.Enabled = true
+		rule.MatchTagID = nullString(matchTagID)
+		rule.MatchMonitorID = nullString(matchMonitorID)
+		rule.MatchImpact = nullString(matchImpact)
+		rule.ActiveDays = nullString(activeDays)
+		if activeFrom.Valid {
+			minute := int(activeFrom.Int64)
+			rule.ActiveFromMinute = &minute
+		}
+		if activeUntil.Valid {
+			minute := int(activeUntil.Int64)
+			rule.ActiveUntilMinute = &minute
+		}
+
+		byID[rule.ID] = len(rules)
+		rules = append(rules, rule)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(rules) == 0 {
+		return nil, nil
+	}
+
+	// Second pass for the join rows: only enabled integrations, since a
+	// disabled one would otherwise make a Route rule look like it delivered.
+	linkRows, err := s.db.QueryContext(ctx, s.q(`
+		SELECT nri."ruleId", nri."integrationId"
+		FROM notification_rule_integration nri
+		JOIN integration integ ON integ.id = nri."integrationId"
+		WHERE integ.enabled = ?
+	`), s.db.BoolArg(true))
+	if err != nil {
+		return nil, fmt.Errorf("store: list notification rule integrations: %w", err)
+	}
+	defer linkRows.Close()
+
+	for linkRows.Next() {
+		var ruleID, integrationID string
+		if err := linkRows.Scan(&ruleID, &integrationID); err != nil {
+			return nil, fmt.Errorf("store: scan notification rule integration: %w", err)
+		}
+		if index, ok := byID[ruleID]; ok {
+			rules[index].IntegrationIDs = append(rules[index].IntegrationIDs, integrationID)
+		}
+	}
+	return rules, linkRows.Err()
+}
+
+// MonitorTagIDs returns the tag ids on a monitor — the only monitor detail
+// notification-rule matching needs beyond the monitor's own id.
+func (s *Store) MonitorTagIDs(ctx context.Context, monitorID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT "tagId" FROM monitor_tag WHERE "monitorId" = ?`), monitorID)
+	if err != nil {
+		return nil, fmt.Errorf("store: monitor tag ids: %w", err)
+	}
+	defer rows.Close()
+
+	var tagIDs []string
+	for rows.Next() {
+		var tagID string
+		if err := rows.Scan(&tagID); err != nil {
+			return nil, fmt.Errorf("store: scan monitor tag id: %w", err)
+		}
+		tagIDs = append(tagIDs, tagID)
+	}
+	return tagIDs, rows.Err()
+}
+
+// IncidentImpact reads one incident's impact, which notification-rule
+// matching can filter on.
+func (s *Store) IncidentImpact(ctx context.Context, incidentID string) (string, error) {
+	var impact string
+	err := s.queryRow(ctx, `SELECT impact FROM incident WHERE id = ?`, incidentID).Scan(&impact)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: incident impact: %w", err)
+	}
+	return impact, nil
 }

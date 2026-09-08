@@ -4,19 +4,37 @@ import type { Monitor as PrismaMonitor, Prisma } from '@prisma/client';
 import { createTRPCRouter, protectedProcedure, capabilityProcedure } from '../init';
 import { prisma } from '@/lib/prisma';
 import { logAudit } from '@/lib/audit';
+import { ASSERTION_TYPES, type AssertionType, validateJsonPath, validateRegex } from '@/lib/assertions';
+// Re-exported below so existing importers of this router keep working; the
+// definitions live in a Prisma-free module because client components import
+// them as values (see src/lib/monitor-types.ts).
+import {
+  DEFAULT_PORTS,
+  PROBE_TYPES,
+  monitorIntervalEnum,
+  monitorMethodEnum,
+  monitorStatusEnum,
+  monitorTypeEnum,
+  type MonitorInterval,
+  type MonitorMethod,
+  type MonitorStatus,
+  type MonitorType,
+} from '@/lib/monitor-types';
+
+export {
+  DEFAULT_PORTS,
+  PROBE_TYPES,
+  monitorIntervalEnum,
+  monitorMethodEnum,
+  monitorStatusEnum,
+  monitorTypeEnum,
+};
+export type { MonitorInterval, MonitorMethod, MonitorStatus, MonitorType };
 
 /** Monitor changes: Admin and Member (see src/lib/permissions.ts). */
 const writeMonitors = capabilityProcedure('monitors:write');
 
-export const monitorTypeEnum = z.enum(['HTTP', 'Ping', 'Port', 'DNS']);
-export const monitorStatusEnum = z.enum(['Up', 'Down', 'Degraded']);
-export const monitorIntervalEnum = z.enum(['15s', '30s', '60s', '5m']);
-export const monitorMethodEnum = z.enum(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE']);
-
-export type MonitorType = z.infer<typeof monitorTypeEnum>;
-export type MonitorStatus = z.infer<typeof monitorStatusEnum>;
-export type MonitorInterval = z.infer<typeof monitorIntervalEnum>;
-export type MonitorMethod = z.infer<typeof monitorMethodEnum>;
+export const assertionTypeEnum = z.enum(ASSERTION_TYPES);
 
 const withRelations = {
   tags: { include: { tag: true } },
@@ -33,43 +51,71 @@ type RawMonitor = Prisma.MonitorGetPayload<{ include: typeof withRelations }>;
 // (no superjson transformer is configured, so Dates go over the wire as strings).
 export type Monitor = Omit<
   PrismaMonitor,
-  'type' | 'status' | 'interval' | 'method' | 'createdAt' | 'updatedAt' | 'lastCheckedAt' | 'certExpiresAt'
+  | 'type'
+  | 'status'
+  | 'interval'
+  | 'method'
+  | 'assertionType'
+  | 'createdAt'
+  | 'updatedAt'
+  | 'lastCheckedAt'
+  | 'certExpiresAt'
+  | 'domainExpiresAt'
+  | 'flappingSince'
+  // Never leaves the server: it's the password half of a database/Redis/mail
+  // monitor's connection details, and the dashboard only ever needs to know
+  // *whether* one is set (credentialSet below).
+  | 'credential'
 > & {
   type: MonitorType;
   status: MonitorStatus;
   interval: MonitorInterval;
   method: MonitorMethod;
+  assertionType: AssertionType;
   createdAt: string;
   updatedAt: string;
   lastCheckedAt: string | null;
   certExpiresAt: string | null;
+  domainExpiresAt: string | null;
+  flappingSince: string | null;
+  credentialSet: boolean;
   tags: { id: string; name: string; color: string }[];
   escalationPolicyName: string | null;
 };
 
 function serializeMonitor(monitor: RawMonitor): Monitor {
+  const { credential, ...rest } = monitor;
+
   return {
-    ...monitor,
+    ...rest,
     type: monitor.type as MonitorType,
     status: monitor.status as MonitorStatus,
     interval: monitor.interval as MonitorInterval,
     method: monitor.method as MonitorMethod,
+    assertionType: monitor.assertionType as AssertionType,
     createdAt: monitor.createdAt.toISOString(),
     updatedAt: monitor.updatedAt.toISOString(),
     lastCheckedAt: monitor.lastCheckedAt ? monitor.lastCheckedAt.toISOString() : null,
     certExpiresAt: monitor.certExpiresAt ? monitor.certExpiresAt.toISOString() : null,
+    domainExpiresAt: monitor.domainExpiresAt ? monitor.domainExpiresAt.toISOString() : null,
+    flappingSince: monitor.flappingSince ? monitor.flappingSince.toISOString() : null,
+    credentialSet: !!credential,
     tags: monitor.tags.map(({ tag }) => tag),
     escalationPolicyName: monitor.escalationPolicy?.name ?? null,
   };
 }
 
 // Normalizes the URL/host field based on monitor type: HTTP monitors get a
-// protocol prefixed if the user left it off, other monitor types (Ping/Port/DNS)
-// take a bare host or IP as-is.
+// protocol prefixed if the user left it off, WebSocket monitors likewise get
+// wss://, and every other type (Ping/Port/DNS and the probe family) takes a
+// bare host, DSN or domain name as-is.
 function normalizeUrl(type: MonitorType, url: string) {
   const trimmed = url.trim();
   if (type === 'HTTP' && !/^https?:\/\//i.test(trimmed)) {
     return `https://${trimmed}`;
+  }
+  if (type === 'WebSocket' && !/^wss?:\/\//i.test(trimmed)) {
+    return `wss://${trimmed}`;
   }
   return trimmed;
 }
@@ -148,9 +194,25 @@ const monitorBaseInput = z.object({
   expectedStatusCodes: optionalText(200).refine((value) => value === null || STATUS_CODE_SPEC.test(value), {
     message: 'Use status codes or ranges, e.g. "200", "200,201" or "200-204,301"',
   }),
-  keyword: optionalText(200),
+  keyword: optionalText(1000),
   keywordInverted: z.boolean().optional().default(false),
+  assertionType: assertionTypeEnum.optional().default('Contains'),
+  jsonPath: optionalText(200),
+
+  // Probe-family options. Like the HTTP block above they're accepted for
+  // every type and blanked out server-side for the types that ignore them.
+  // Blank means "keep the stored one" on update, so the form never has to
+  // round-trip the secret.
+  credential: z.string().max(500).optional(),
+  // Availability target in percent (99.9). Null clears it.
+  sloTarget: z.number().min(0).max(100).nullable().optional(),
 });
+
+/** True when this monitor actually asserts something about the response body. */
+function hasBodyAssertion(data: z.infer<typeof monitorBaseInput>): boolean {
+  if (data.type !== 'HTTP') return false;
+  return data.assertionType === 'JsonPath' ? !!data.jsonPath : !!data.keyword;
+}
 
 const withPortRequiredForPortType = <T extends typeof monitorBaseInput>(schema: T) =>
   schema
@@ -158,11 +220,36 @@ const withPortRequiredForPortType = <T extends typeof monitorBaseInput>(schema: 
       message: 'Port is required for Port monitors',
       path: ['port'],
     })
-    // A HEAD response has no body, so a keyword assertion on one could only
+    // A HEAD response has no body, so a content assertion on one could only
     // ever fail — catch that here rather than letting it look like an outage.
-    .refine((data) => !data.keyword || data.method !== 'HEAD', {
-      message: 'A HEAD request has no response body to search for a keyword',
+    .refine((data) => !hasBodyAssertion(data) || data.method !== 'HEAD', {
+      message: 'A HEAD request has no response body to assert on',
       path: ['keyword'],
+    })
+    // Validated against the same subset worker/internal/checkers/assert.go
+    // evaluates, so nothing that passes the form can fail at check time.
+    .refine((data) => data.assertionType !== 'Regex' || !data.keyword || validateRegex(data.keyword) === null, {
+      message: 'Invalid regular expression',
+      path: ['keyword'],
+    })
+    .refine((data) => data.type !== 'HTTP' || data.assertionType !== 'JsonPath' || !!data.jsonPath, {
+      message: 'A JSON path is required for a JSON path assertion',
+      path: ['jsonPath'],
+    })
+    .refine((data) => data.assertionType !== 'JsonPath' || !data.jsonPath || validateJsonPath(data.jsonPath) === null, {
+      message: 'Use a path like $.status, $.db.connected or $.nodes[0].name',
+      path: ['jsonPath'],
+    })
+    // A Postgres monitor connects with the whole DSN, so a bare hostname
+    // would fail every check with an unhelpful driver error.
+    .refine((data) => data.type !== 'Postgres' || /^postgres(ql)?:\/\//i.test(data.url.trim()), {
+      message: 'Give a full connection string, e.g. postgresql://user:pass@host:5432/dbname',
+      path: ['url'],
+    })
+    // RDAP is looked up per registrable domain, not per URL or host.
+    .refine((data) => data.type !== 'Domain' || /^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(data.url.trim()), {
+      message: 'Give a bare domain name, e.g. example.com',
+      path: ['url'],
     });
 
 const monitorCreateInput = withPortRequiredForPortType(monitorBaseInput);
@@ -186,6 +273,8 @@ function httpOptionsFor(input: z.infer<typeof monitorBaseInput>) {
       expectedStatusCodes: null,
       keyword: null,
       keywordInverted: false,
+      assertionType: 'Contains',
+      jsonPath: null,
     };
   }
 
@@ -197,7 +286,34 @@ function httpOptionsFor(input: z.infer<typeof monitorBaseInput>) {
     expectedStatusCodes: input.expectedStatusCodes,
     keyword: input.keyword,
     keywordInverted: input.keywordInverted,
+    assertionType: input.assertionType,
+    // Only meaningful for the JsonPath mode; keeping it otherwise would leave
+    // a stale path behind that silently reactivates on a mode switch.
+    jsonPath: input.assertionType === 'JsonPath' ? input.jsonPath : null,
   };
+}
+
+/**
+ * The port column: required for Port monitors, optional (with a per-type
+ * default the workers apply) for the probe family, and meaningless for
+ * everything else.
+ */
+function portFor(input: z.infer<typeof monitorBaseInput>): number | null {
+  if (input.type === 'Port') return input.port ?? null;
+  if (!PROBE_TYPES.includes(input.type)) return null;
+  return input.port ?? DEFAULT_PORTS[input.type] ?? null;
+}
+
+/**
+ * The credential column, resolved against what's already stored: a blank
+ * field means "keep the existing secret" (so the form never has to receive
+ * it), and a monitor type that has no credentials clears it outright.
+ */
+function credentialFor(input: z.infer<typeof monitorBaseInput>, existing: string | null): string | null {
+  if (!PROBE_TYPES.includes(input.type)) return null;
+  const typed = input.credential?.trim();
+  if (typed) return typed;
+  return existing;
 }
 
 export const monitorRouter = createTRPCRouter({
@@ -235,9 +351,11 @@ export const monitorRouter = createTRPCRouter({
             url: normalizeUrl(input.type, input.url),
             type: input.type,
             interval: input.interval,
-            port: input.type === 'Port' ? input.port : null,
+            port: portFor(input),
             escalationPolicyId: input.escalationPolicyId || null,
             createdById: ctx.session.user.id,
+            credential: credentialFor(input, null),
+            sloTarget: input.sloTarget ?? null,
             ...httpOptionsFor(input),
           },
         });
@@ -276,12 +394,16 @@ export const monitorRouter = createTRPCRouter({
             url: normalizeUrl(input.type, input.url),
             type: input.type,
             interval: input.interval,
-            port: input.type === 'Port' ? input.port : null,
+            port: portFor(input),
             escalationPolicyId: input.escalationPolicyId || null,
+            credential: credentialFor(input, existing.credential),
+            sloTarget: input.sloTarget ?? null,
             ...httpOptionsFor(input),
             // A monitor that stops being HTTP can't have a meaningful
-            // certificate expiry any more.
+            // certificate expiry any more, and one that stops being a Domain
+            // monitor can't have a meaningful registry expiry.
             ...(input.type === 'HTTP' ? {} : { certExpiresAt: null }),
+            ...(input.type === 'Domain' ? {} : { domainExpiresAt: null }),
           },
         });
 

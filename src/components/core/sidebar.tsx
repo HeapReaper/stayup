@@ -22,6 +22,9 @@ import {
   CircleArrowUp,
   UserCog,
   LogOut,
+  CalendarClock,
+  Route,
+  TrendingUp,
 } from 'lucide-react';
 
 import {
@@ -69,6 +72,9 @@ const navigation = [
   { name: 'Status pages', href: '/dashboard/statuspages', icon: StickyNoteCheck },
   { name: 'Integrations', href: '/dashboard/integrations', icon: Webhook },
   { name: 'Escalations', href: '/dashboard/escalations', icon: ChevronsUp },
+  { name: 'On-call', href: '/dashboard/oncall', icon: CalendarClock },
+  { name: 'Routing', href: '/dashboard/routing', icon: Route },
+  { name: 'Reports', href: '/dashboard/reports', icon: TrendingUp },
   { name: 'Users', href: '/dashboard/users', icon: Users },
   { name: 'Logs', href: '/dashboard/logs', icon: FileText },
   { name: 'Settings', href: '/dashboard/settings', icon: Settings },

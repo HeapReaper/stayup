@@ -7,6 +7,7 @@ import { Plus, Search, MoreHorizontal, Pencil, Trash2, ChevronsUp, X } from 'luc
 import { useTRPC } from '@/trpc/client';
 import type { EscalationPolicySummary } from '@/trpc/routers/escalationPolicy';
 import type { IntegrationSummary } from '@/trpc/routers/integration';
+import type { OnCallScheduleSummary } from '@/trpc/routers/oncall';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -47,23 +48,68 @@ import {
 interface EscalationsClientPageProps {
   initialPolicies: EscalationPolicySummary[];
   initialIntegrations: IntegrationSummary[];
+  initialSchedules: OnCallScheduleSummary[];
 }
 
 // `key` is a client-only id (not sent to the server) so React has something
 // stable to key each step row on — the array index would shift every add/
 // remove, breaking focus/input state.
-type StepFormState = { key: string; delayMinutes: string; integrationId: string };
+// A step targets an integration or an on-call schedule. The form keeps that
+// as one prefixed string ("integration:abc" / "oncall:abc") so it can be a
+// single <Select>, and splits it again on submit — picking a target is one
+// decision, not two.
+type StepFormState = { key: string; delayMinutes: string; target: string };
+
+const INTEGRATION_PREFIX = 'integration:';
+const ONCALL_PREFIX = 'oncall:';
+
+function targetValue(integrationId: string | null, onCallScheduleId: string | null): string {
+  if (onCallScheduleId) return ONCALL_PREFIX + onCallScheduleId;
+  if (integrationId) return INTEGRATION_PREFIX + integrationId;
+  return '';
+}
+
+function splitTarget(target: string): { integrationId: string | null; onCallScheduleId: string | null } {
+  if (target.startsWith(ONCALL_PREFIX)) {
+    return { integrationId: null, onCallScheduleId: target.slice(ONCALL_PREFIX.length) };
+  }
+  if (target.startsWith(INTEGRATION_PREFIX)) {
+    return { integrationId: target.slice(INTEGRATION_PREFIX.length), onCallScheduleId: null };
+  }
+  return { integrationId: null, onCallScheduleId: null };
+}
 type FormState = { name: string; steps: StepFormState[] };
 
+/** What the collapsed <Select> shows for a step's chosen target. */
+function targetLabel(
+  target: string,
+  integrations: IntegrationSummary[],
+  schedules: OnCallScheduleSummary[],
+): string {
+  const { integrationId, onCallScheduleId } = splitTarget(target);
+  if (onCallScheduleId) {
+    const schedule = schedules.find((s) => s.id === onCallScheduleId);
+    return schedule ? `On call: ${schedule.name}` : 'On call (deleted schedule)';
+  }
+  if (integrationId) {
+    return integrations.find((i) => i.id === integrationId)?.name ?? 'Deleted integration';
+  }
+  return 'Pick who this step pages';
+}
+
 function newStep(delayMinutes: string): StepFormState {
-  return { key: crypto.randomUUID(), delayMinutes, integrationId: '' };
+  return { key: crypto.randomUUID(), delayMinutes, target: '' };
 }
 
 function emptyForm(): FormState {
   return { name: '', steps: [newStep('0')] };
 }
 
-export default function EscalationsClientPage({ initialPolicies, initialIntegrations }: EscalationsClientPageProps) {
+export default function EscalationsClientPage({
+  initialPolicies,
+  initialIntegrations,
+  initialSchedules,
+}: EscalationsClientPageProps) {
   const trpc = useTRPC();
   const queryClient = useQueryClient();
 
@@ -78,6 +124,12 @@ export default function EscalationsClientPage({ initialPolicies, initialIntegrat
     initialData: initialIntegrations,
   });
   const integrations = integrationsQuery.data;
+
+  const schedulesQuery = useQuery({
+    ...trpc.onCall.getAll.queryOptions(),
+    initialData: initialSchedules,
+  });
+  const schedules = schedulesQuery.data;
 
   const [searchQuery, setSearchQuery] = React.useState('');
   const [isFormOpen, setIsFormOpen] = React.useState(false);
@@ -139,7 +191,7 @@ export default function EscalationsClientPage({ initialPolicies, initialIntegrat
           ? detail.steps.map((step) => ({
               key: crypto.randomUUID(),
               delayMinutes: String(step.delayMinutes),
-              integrationId: step.integrationId,
+              target: targetValue(step.integrationId, step.onCallScheduleId),
             }))
           : [newStep('0')],
       });
@@ -168,7 +220,7 @@ export default function EscalationsClientPage({ initialPolicies, initialIntegrat
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.name.trim()) return;
-    if (form.steps.some((step) => !step.integrationId)) {
+    if (form.steps.some((step) => !step.target)) {
       setFormError('Every step needs an integration selected.');
       return;
     }
@@ -177,7 +229,7 @@ export default function EscalationsClientPage({ initialPolicies, initialIntegrat
       name: form.name,
       steps: form.steps.map((step) => ({
         delayMinutes: Number(step.delayMinutes) || 0,
-        integrationId: step.integrationId,
+        ...splitTarget(step.target),
       })),
     };
 
@@ -250,19 +302,23 @@ export default function EscalationsClientPage({ initialPolicies, initialIntegrat
                       </div>
                       <div className="flex-1 grid gap-2">
                         <Select
-                          value={step.integrationId}
+                          value={step.target}
                           onValueChange={(val) => {
-                            if (val) updateStep(index, { integrationId: val });
+                            if (val) updateStep(index, { target: val });
                           }}
                         >
                           <SelectTrigger>
-                            <SelectValue>
-                              {() => integrations.find((i) => i.id === step.integrationId)?.name ?? 'Pick an integration'}
-                            </SelectValue>
+                            <SelectValue>{() => targetLabel(step.target, integrations, schedules)}</SelectValue>
                           </SelectTrigger>
                           <SelectContent>
+                            {schedules.map((schedule) => (
+                              <SelectItem key={schedule.id} value={ONCALL_PREFIX + schedule.id}>
+                                On call: {schedule.name}
+                                {schedule.currentName ? ` (now ${schedule.currentName})` : ''}
+                              </SelectItem>
+                            ))}
                             {integrations.map((integration) => (
-                              <SelectItem key={integration.id} value={integration.id}>
+                              <SelectItem key={integration.id} value={INTEGRATION_PREFIX + integration.id}>
                                 {integration.name} ({integration.type})
                               </SelectItem>
                             ))}

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"stayup/worker/internal/flapping"
 	"stayup/worker/internal/incidents"
 	"stayup/worker/internal/logging"
 	"stayup/worker/internal/maintenance"
@@ -36,8 +37,11 @@ type PerformCheck func(ctx context.Context, cfg settings.Settings, monitor store
 type Options struct {
 	// Log line prefix, e.g. "https-worker" or "port-worker".
 	WorkerLabel string
-	// Which Monitor.Type this worker is responsible for.
+	// Which Monitor.Type this worker is responsible for. Exactly one of
+	// MonitorType and MonitorTypes is set — the single-type workers name one,
+	// cmd/probes names the whole connection-level family.
 	MonitorType  string
+	MonitorTypes []string
 	PerformCheck PerformCheck
 	// How often to poll for due monitors. Defaults to 5s.
 	TickInterval time.Duration
@@ -76,6 +80,15 @@ func Run(ctx context.Context, s *store.Store, opts Options) {
 	}
 }
 
+// listMonitors reads this worker's due-monitor candidates, for whichever of
+// the two type shapes it was configured with.
+func (o Options) listMonitors(ctx context.Context, s *store.Store) ([]store.Monitor, error) {
+	if len(o.MonitorTypes) > 0 {
+		return s.ListByTypes(ctx, o.MonitorTypes)
+	}
+	return s.ListByType(ctx, o.MonitorType)
+}
+
 func tick(ctx context.Context, s *store.Store, opts Options, startedAt time.Time, interval time.Duration) {
 	// First thing in the tick, before any work that can fail: this answers
 	// "is this process still ticking", which is a different question from
@@ -92,7 +105,7 @@ func tick(ctx context.Context, s *store.Store, opts Options, startedAt time.Time
 		logging.Error(fmt.Sprintf("[%s] Failed to record heartbeat", opts.WorkerLabel), err)
 	}
 
-	monitors, err := s.ListByType(ctx, opts.MonitorType)
+	monitors, err := opts.listMonitors(ctx, s)
 	if err != nil {
 		logging.Error(fmt.Sprintf("[%s] Tick failed", opts.WorkerLabel), err)
 		return
@@ -158,7 +171,7 @@ func checkOne(ctx context.Context, s *store.Store, opts Options, cfg settings.Se
 		return err
 	}
 
-	if err := s.UpdateCheckResult(ctx, monitor.ID, reported, result.ResponseTime, uptime, checkedAt, result.CertExpiresAt); err != nil {
+	if err := s.UpdateCheckResult(ctx, monitor.ID, reported, result.ResponseTime, uptime, checkedAt, result.CertExpiresAt, result.DomainExpiresAt); err != nil {
 		return err
 	}
 
@@ -168,8 +181,56 @@ func checkOne(ctx context.Context, s *store.Store, opts Options, cfg settings.Se
 			opts.WorkerLabel, monitor.Name, strings.ToLower(result.Status), cfg.FailedAttemptsThreshold, reported))
 		return nil
 	}
+
+	// The threshold above debounces one dip; this catches the opposite
+	// failure, a monitor that keeps changing its mind. While it's flapping,
+	// its incidents are suppressed exactly the way a maintenance window
+	// suppresses them — one standing incident instead of a storm.
+	flap, err := flapping.Sync(ctx, s, cfg, monitor, checkedAt)
+	if err != nil {
+		return err
+	}
+	if flap.Started {
+		noteFlappingStarted(ctx, s, opts.WorkerLabel, monitor, cfg, flap)
+	}
+	if flap.Stopped {
+		logging.Info(fmt.Sprintf("[%s] %s has settled (%d transitions in the last %d minutes) — resuming normal incident handling",
+			opts.WorkerLabel, monitor.Name, flap.Transitions, cfg.FlappingWindowMinutes))
+	}
+	if flap.Flapping {
+		logging.Info(fmt.Sprintf("[%s] %s is flapping (%d transitions in the last %d minutes) — skipping incident sync",
+			opts.WorkerLabel, monitor.Name, flap.Transitions, cfg.FlappingWindowMinutes))
+		return nil
+	}
+
 	syncIncidentForResult(ctx, s, opts.WorkerLabel, monitor, reported, result.Message)
 	return nil
+}
+
+// noteFlappingStarted opens the one standing incident that stands in for the
+// storm — it goes through the same EnsureIncidentForMonitor path as any other
+// automatic incident, so it pages, appears on status pages and escalates
+// exactly like the incidents it replaces.
+func noteFlappingStarted(ctx context.Context, s *store.Store, workerLabel string, monitor store.Monitor, cfg settings.Settings, flap flapping.State) {
+	logging.Warn(fmt.Sprintf("[%s] %s is flapping: %d transitions in the last %d minutes",
+		workerLabel, monitor.Name, flap.Transitions, cfg.FlappingWindowMinutes))
+
+	underMaintenance, err := maintenance.IsMonitorUnderMaintenance(ctx, s, monitor.ID)
+	if err != nil {
+		logging.Error(fmt.Sprintf("[%s] Failed to open flapping incident for %q", workerLabel, monitor.Name), err)
+		return
+	}
+	if underMaintenance {
+		return
+	}
+
+	message := fmt.Sprintf(
+		"Automatically detected: %s is flapping — it changed between up and down %d times in the last %d minutes. Further incidents for this monitor are suppressed until it settles.",
+		monitor.Name, flap.Transitions, cfg.FlappingWindowMinutes)
+
+	if _, err := incidents.EnsureIncidentForMonitor(ctx, s, incidents.MonitorRef{ID: monitor.ID, Name: monitor.Name}, "Degraded", message); err != nil {
+		logging.Error(fmt.Sprintf("[%s] Failed to open flapping incident for %q", workerLabel, monitor.Name), err)
+	}
 }
 
 // confirmedStatus applies the instance-wide "Failed Attempts Before Alert"

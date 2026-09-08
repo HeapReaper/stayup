@@ -101,7 +101,7 @@ func HTTP(ctx context.Context, cfg settings.Settings, monitor store.Monitor) sto
 		return down(unexpectedStatusMessage(monitor.ExpectedStatusCodes, resp.StatusCode))
 	}
 
-	if failure := keywordFailure(monitor, body); failure != "" {
+	if failure := assertionFailure(monitor.AssertionType, deref(monitor.Keyword), deref(monitor.JSONPath), monitor.KeywordInverted, body); failure != "" {
 		return down(failure)
 	}
 
@@ -153,11 +153,28 @@ func buildRequest(ctx context.Context, monitor store.Monitor) (*http.Request, er
 	return req, nil
 }
 
-// readBodyFor reads what the keyword assertion needs and discards the rest.
-// With no keyword configured it drains the body without buffering it, so the
-// connection can go back to the pool.
+func deref(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+// bodyIsAsserted reports whether this monitor has a content assertion at all.
+// A JsonPath assertion is driven by the path, not the keyword — asserting
+// only that a path resolves is a valid check with a blank keyword.
+func bodyIsAsserted(monitor store.Monitor) bool {
+	if monitor.AssertionType == AssertJSONPath {
+		return deref(monitor.JSONPath) != ""
+	}
+	return deref(monitor.Keyword) != ""
+}
+
+// readBodyFor reads what the content assertion needs and discards the rest.
+// With no assertion configured it drains the body without buffering it, so
+// the connection can go back to the pool.
 func readBodyFor(monitor store.Monitor, resp *http.Response) (string, error) {
-	if monitor.Keyword == nil || *monitor.Keyword == "" {
+	if !bodyIsAsserted(monitor) {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return "", nil
 	}
@@ -168,26 +185,6 @@ func readBodyFor(monitor store.Monitor, resp *http.Response) (string, error) {
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return string(body), nil
-}
-
-// keywordFailure returns the failure message for a monitor's content
-// assertion, or "" when it passes (or there's nothing to assert).
-func keywordFailure(monitor store.Monitor, body string) string {
-	if monitor.Keyword == nil || *monitor.Keyword == "" {
-		return ""
-	}
-
-	found := strings.Contains(body, *monitor.Keyword)
-	if monitor.KeywordInverted {
-		if found {
-			return fmt.Sprintf("Response body contains %q", *monitor.Keyword)
-		}
-		return ""
-	}
-	if !found {
-		return fmt.Sprintf("Response body does not contain %q", *monitor.Keyword)
-	}
-	return ""
 }
 
 // peerCertExpiry returns the NotAfter of the certificate the server presented,

@@ -28,8 +28,11 @@ export type EscalationPolicySummary = {
 export type EscalationStepItem = {
   id: string;
   delayMinutes: number;
-  integrationId: string;
-  integrationName: string;
+  /** Exactly one of these two is set — see EscalationStep in the Prisma schema. */
+  integrationId: string | null;
+  onCallScheduleId: string | null;
+  /** Name of whichever target the step points at, for the editor's summary line. */
+  targetName: string;
 };
 
 export type EscalationPolicyDetail = {
@@ -38,10 +41,19 @@ export type EscalationPolicyDetail = {
   steps: EscalationStepItem[];
 };
 
-const stepInput = z.object({
-  delayMinutes: z.coerce.number().int().min(0, 'Delay cannot be negative').max(1440, 'Max 24 hours'),
-  integrationId: z.string().min(1, 'Pick an integration'),
-});
+// A step pages either a fixed Integration or whoever an OnCallSchedule says
+// is up at the moment it fires. The schema can't express that XOR on either
+// provider, so it's enforced here — the one place every write goes through.
+const stepInput = z
+  .object({
+    delayMinutes: z.coerce.number().int().min(0, 'Delay cannot be negative').max(1440, 'Max 24 hours'),
+    integrationId: z.string().nullable().optional(),
+    onCallScheduleId: z.string().nullable().optional(),
+  })
+  .refine((step) => !!step.integrationId !== !!step.onCallScheduleId, {
+    message: 'Pick either an integration or an on-call schedule for this step',
+    path: ['integrationId'],
+  });
 
 const escalationPolicyInput = z.object({
   name: z.string().trim().min(1, 'Name is required').max(120),
@@ -77,7 +89,8 @@ async function applySteps(
       escalationPolicyId,
       order: index,
       delayMinutes: step.delayMinutes,
-      integrationId: step.integrationId,
+      integrationId: step.integrationId || null,
+      onCallScheduleId: step.onCallScheduleId || null,
     })),
   });
 }
@@ -98,7 +111,13 @@ export const escalationPolicyRouter = createTRPCRouter({
       const policy = await prisma.escalationPolicy.findUnique({
         where: { id: input.id },
         include: {
-          steps: { orderBy: { order: 'asc' }, include: { integration: { select: { name: true } } } },
+          steps: {
+            orderBy: { order: 'asc' },
+            include: {
+              integration: { select: { name: true } },
+              onCallSchedule: { select: { name: true } },
+            },
+          },
         },
       });
 
@@ -113,7 +132,10 @@ export const escalationPolicyRouter = createTRPCRouter({
           id: step.id,
           delayMinutes: step.delayMinutes,
           integrationId: step.integrationId,
-          integrationName: step.integration.name,
+          onCallScheduleId: step.onCallScheduleId,
+          targetName:
+            step.integration?.name ??
+            (step.onCallSchedule ? `On call: ${step.onCallSchedule.name}` : 'Unknown target'),
         })),
       };
     }),

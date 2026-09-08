@@ -2,10 +2,17 @@ import EscalationsClientPage from '@/app/(dashboard)/dashboard/escalations/escal
 import { caller } from '@/trpc/server';
 
 export default async function EscalationsPage() {
-  const [policies, integrations] = await Promise.all([
+  const [policies, integrations, schedules] = await Promise.all([
     caller.escalationPolicy.getAll(),
     caller.integration.getAll(),
+    caller.onCall.getAll(),
   ]);
 
-  return <EscalationsClientPage initialPolicies={policies} initialIntegrations={integrations} />;
+  return (
+    <EscalationsClientPage
+      initialPolicies={policies}
+      initialIntegrations={integrations}
+      initialSchedules={schedules}
+    />
+  );
 }

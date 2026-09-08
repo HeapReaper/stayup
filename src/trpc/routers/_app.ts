@@ -9,6 +9,9 @@ import { logsRouter } from './logs';
 import { settingsRouter } from './settings';
 import { maintenanceRouter } from './maintenance';
 import { escalationPolicyRouter } from './escalationPolicy';
+import { onCallRouter } from './oncall';
+import { notificationRuleRouter } from './notificationRule';
+import { reportRouter } from './report';
 import { tagRouter } from './tag';
 import { updateRouter } from './update';
 import { workerRouter } from './worker';
@@ -25,6 +28,9 @@ export const appRouter = createTRPCRouter({
   settings: settingsRouter,
   maintenance: maintenanceRouter,
   escalationPolicy: escalationPolicyRouter,
+  onCall: onCallRouter,
+  notificationRule: notificationRuleRouter,
+  report: reportRouter,
   tag: tagRouter,
   update: updateRouter,
   worker: workerRouter,

@@ -29,6 +29,18 @@ type Monitor struct {
 	ExpectedStatusCodes *string // "200", "200,201", "200-204,301"; nil/empty = any 2xx
 	Keyword             *string
 	KeywordInverted     bool
+	// How Keyword is applied: Contains | Regex | JsonPath. See
+	// internal/checkers/assert.go; anything else falls back to Contains.
+	AssertionType string
+	JSONPath      *string
+
+	// Secret half of a non-HTTP check's credentials (Redis/database/mail
+	// password). Never logged — logResult only ever prints URL and port.
+	Credential *string
+
+	// FlappingSince is non-nil while this monitor is in a flapping state, and
+	// is what suppresses its incident churn (internal/flapping).
+	FlappingSince *time.Time
 }
 
 // IsDue reports whether this monitor's check interval has elapsed since its
@@ -40,11 +52,17 @@ func (m Monitor) IsDue(now time.Time) bool {
 	return now.Sub(*m.LastCheckedAt) >= intervalDuration(m.Interval)
 }
 
+// Must stay in step with monitorIntervalEnum in src/trpc/routers/monitor.ts —
+// an interval this map doesn't know silently becomes 60s, which for a Domain
+// monitor would mean hammering RDAP once a minute.
 var intervals = map[string]time.Duration{
 	"15s": 15 * time.Second,
 	"30s": 30 * time.Second,
 	"60s": 60 * time.Second,
 	"5m":  5 * time.Minute,
+	"1h":  time.Hour,
+	"12h": 12 * time.Hour,
+	"24h": 24 * time.Hour,
 }
 
 func intervalDuration(interval string) time.Duration {
@@ -68,6 +86,10 @@ type CheckResult struct {
 	// nil here and clears the column, so the value on a monitor always
 	// describes its most recent check rather than some older one.
 	CertExpiresAt *time.Time
+	// The registry expiry a Domain check's RDAP lookup reported, and the same
+	// contract as CertExpiresAt: written straight through to
+	// monitor."domainExpiresAt", nil for every other monitor type.
+	DomainExpiresAt *time.Time
 }
 
 // Incident mirrors the `incident` table columns the workers read/write, plus
@@ -92,14 +114,53 @@ type IncidentMonitorRef struct {
 	EscalationPolicyID *string
 }
 
-// EscalationStep mirrors one row of `escalation_step` joined with its
-// `integration`, ordered by Order — exactly what escalateOverdueIncidents
-// needs per policy.
+// EscalationStep mirrors one row of `escalation_step`, ordered by Order —
+// exactly what EscalateOverdueIncidents needs per policy. A step points at
+// exactly one target: a fixed Integration, or an OnCallSchedule whose
+// rotation is resolved at the moment the step fires (internal/oncall).
 type EscalationStep struct {
+	Order        int
+	DelayMinutes int
+	// Set (with Integration filled in) for a fixed-channel step.
+	IntegrationID *string
+	Integration   *Integration
+	// Set for a rotation step; the schedule is loaded separately, by ID, so
+	// its participants and overrides are always read fresh at paging time.
+	OnCallScheduleID *string
+}
+
+// OnCallSchedule is one rotation with everything needed to resolve it: the
+// roster in `order`, and every override that could still cover a lookup.
+type OnCallSchedule struct {
+	ID           string
+	Name         string
+	Timezone     string
+	RotationType string // Daily | Weekly
+	HandoffHour  int
+	HandoffDay   int // ISO 1-7, Weekly only
+	StartsAt     time.Time
+	Participants []OnCallParticipant
+	Overrides    []OnCallOverride
+}
+
+// OnCallParticipant is one person in a rotation, and the Integration that
+// actually reaches them.
+type OnCallParticipant struct {
+	ID            string
 	Order         int
-	DelayMinutes  int
+	Name          string
 	IntegrationID string
 	Integration   Integration
+}
+
+// OnCallOverride replaces the rotation's answer for a fixed window. A nil
+// ParticipantID means nobody covers it — deliberately, so paging falls
+// through to the next escalation step instead of waking someone who is away.
+type OnCallOverride struct {
+	StartsAt      time.Time
+	EndsAt        time.Time
+	ParticipantID *string
+	Reason        *string
 }
 
 // Integration mirrors the `integration` table.
@@ -151,19 +212,47 @@ type StatusPageSubscriber struct {
 	Target  string
 }
 
+// NotificationRule mirrors a `notification_rule` row plus the integration ids
+// it routes to — the routing layer for monitors without an escalation policy
+// (internal/routing).
+type NotificationRule struct {
+	ID      string
+	Name    string
+	Order   int
+	Action  string // Route | Suppress
+	Enabled bool
+
+	MatchTagID     *string
+	MatchMonitorID *string
+	MatchImpact    *string
+
+	ActiveDays        *string // comma-separated ISO weekdays, "1,2,3,4,5"
+	ActiveFromMinute  *int    // minutes since local midnight
+	ActiveUntilMinute *int
+
+	IntegrationIDs []string
+}
+
 // AppSettings mirrors the `app_settings` singleton row's columns the workers
 // read.
 type AppSettings struct {
-	ID                       string
-	SupportEmail             *string
-	HTTPTimeoutSecs          int
-	FailedAttemptsThreshold  int
-	LatencyThreshold         int
-	SSLCheckEnabled          bool
-	CertExpiryWarningEnabled bool
-	CertExpiryWarningDays    int
-	CheckRetentionDays       int
-	DeliveryRetentionDays    int
+	ID           string
+	SupportEmail *string
+	// Timezone the notification rules' active windows are evaluated in.
+	Timezone                   string
+	HTTPTimeoutSecs            int
+	FailedAttemptsThreshold    int
+	LatencyThreshold           int
+	SSLCheckEnabled            bool
+	CertExpiryWarningEnabled   bool
+	CertExpiryWarningDays      int
+	DomainExpiryWarningEnabled bool
+	DomainExpiryWarningDays    int
+	FlappingEnabled            bool
+	FlappingWindowMinutes      int
+	FlappingThreshold          int
+	CheckRetentionDays         int
+	DeliveryRetentionDays      int
 	// The Settings page's SMTP block. Every field is optional: a blank one
 	// falls back to the matching SMTP_* environment variable, resolved in
 	// internal/settings — same precedence as resolveSmtpConfig() in
@@ -193,5 +282,12 @@ type DailyStat struct {
 	DegradedChecks  int
 	DownChecks      int
 	AvgResponseTime *int
+	// Response-time distribution for the day, in ms. An average hides the
+	// tail users actually feel, so the Reports page reads these instead.
+	// Nil when no check that day recorded a response time.
+	P50ResponseTime *int
+	P95ResponseTime *int
+	P99ResponseTime *int
+	MaxResponseTime *int
 	Uptime          float64
 }

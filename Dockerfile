@@ -114,7 +114,7 @@ COPY worker/ .
 # just `alpine` + `ca-certificates` instead of needing glibc/musl-dev shims.
 RUN --mount=type=cache,target=/root/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} sh -c '\
-    for cmd in https port ping dns integrations janitor; do \
+    for cmd in https port ping dns probes integrations janitor; do \
       go build -ldflags="-s -w" -o /out/$cmd ./cmd/$cmd; \
     done'
 

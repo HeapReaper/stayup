@@ -34,6 +34,9 @@ model User {
   auditLogs          AuditLog[]
   maintenanceWindows MaintenanceWindow[]
   escalationPolicies EscalationPolicy[]
+  onCallSchedules    OnCallSchedule[]
+  onCallShifts       OnCallParticipant[]
+  notificationRules  NotificationRule[]
 
   @@unique([email])
   @@map("user")
@@ -114,11 +117,39 @@ model Monitor {
   // ranges ("200", "200,201", "200-204,301"). Null/empty keeps the original
   // behavior — any 2xx is up, everything else is down.
   expectedStatusCodes String?
-  // Content assertion: the check fails unless the response body contains
-  // `keyword` — or, with keywordInverted, unless it doesn't. Only the first
-  // megabyte of the body is searched (see worker/internal/checkers/http.go).
+  // Content assertion. `keyword` is the operand and `assertionType` decides
+  // how it's applied to the response body; `keywordInverted` negates whichever
+  // one is selected. Only the first megabyte of the body is searched (see
+  // worker/internal/checkers/http.go).
+  //   Contains — `keyword` must appear in the body verbatim (the original,
+  //              and still the default for every existing row)
+  //   Regex    — `keyword` is an RE2 pattern that must match somewhere
+  //   JsonPath — `jsonPath` selects a value out of the JSON body, which must
+  //              equal `keyword`; a blank keyword asserts the path merely
+  //              resolves to something
   keyword         String?
   keywordInverted Boolean  @default(false)
+  assertionType   String   @default("Contains") // Contains | Regex | JsonPath
+  jsonPath        String?
+  // Secret half of a non-HTTP check's credentials: the Redis/database
+  // password, or the SMTP/IMAP password. The username and everything else
+  // lives in `url` (a DSN for Postgres/MySQL, a bare host otherwise), so this
+  // is the only field that has to be kept out of logs.
+  credential      String?
+  // NotAfter equivalent for a Domain monitor: the registry expiry date the
+  // last RDAP lookup saw (worker/internal/checkers/domain.go). Same role
+  // certExpiresAt plays for HTTPS — a vergeten domeinverlenging takes a site
+  // down just as hard as an expired certificate.
+  domainExpiresAt DateTime?
+  // When this monitor was first seen flapping, or null when it isn't. Set and
+  // cleared by the check workers (worker/internal/flapping); while it's set,
+  // incident open/close is suppressed the same way a maintenance window
+  // suppresses it, so a monitor bouncing 20x an hour pages once instead of 20
+  // times.
+  flappingSince   DateTime?
+  // Availability target this monitor is measured against on the Reports page,
+  // as a percentage (99.9). Null means it isn't held to one.
+  sloTarget       Float?
   // NotAfter of the TLS certificate seen on the most recent check, or null if
   // that check wasn't HTTPS. Written by the https worker; read by the
   // "Certificate Expiry Warning" logic and shown in the monitors list.
@@ -139,6 +170,7 @@ model Monitor {
   statusPages         StatusPageMonitor[]
   maintenanceWindows  MaintenanceWindowMonitor[]
   tags                MonitorTag[]
+  notificationRules   NotificationRule[]
 
   @@index([createdById])
   @@index([escalationPolicyId])
@@ -178,6 +210,15 @@ model MonitorDailyStat {
   degradedChecks  Int
   downChecks      Int
   avgResponseTime Int?
+  // Response-time distribution for the day, in ms. An average hides the tail
+  // that users actually feel, so the Reports page reads these instead;
+  // computed by cmd/janitor from the same raw checks the counters come from
+  // (nearest-rank percentiles). Null on rows rolled up before these columns
+  // existed, and on days where no check recorded a response time.
+  p50ResponseTime Int?
+  p95ResponseTime Int?
+  p99ResponseTime Int?
+  maxResponseTime Int?
   uptime          Float
   createdAt       DateTime @default(now())
 
@@ -420,8 +461,10 @@ model Integration {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  deliveries      IntegrationDelivery[]
-  escalationSteps EscalationStep[]
+  deliveries         IntegrationDelivery[]
+  escalationSteps    EscalationStep[]
+  onCallParticipants OnCallParticipant[]
+  notificationRules  NotificationRuleIntegration[]
 
   @@index([createdById])
   @@map("integration")
@@ -471,21 +514,168 @@ model EscalationPolicy {
 
 // One rung of an EscalationPolicy's ladder: after `delayMinutes` of no
 // acknowledgement (counted from the incident opening, or from the previous
-// step firing), page `integration`. `order` is 0-indexed and matches
+// step firing), page this step's target. `order` is 0-indexed and matches
 // Incident.escalationStep.
+//
+// A step targets exactly one of two things, enforced by the escalationPolicy
+// router rather than by the schema (neither provider can express an XOR):
+//   integrationId    — a fixed channel, the original behaviour
+//   onCallScheduleId — whoever the rotation says is on call *at the moment
+//                      the step fires*, resolved through that person's
+//                      Integration (see src/lib/oncall.ts / internal/oncall)
 model EscalationStep {
   id                 String           @id @default(cuid())
   escalationPolicyId String
   escalationPolicy   EscalationPolicy @relation(fields: [escalationPolicyId], references: [id], onDelete: Cascade)
   order              Int              @default(0)
   delayMinutes       Int
-  integrationId      String
-  integration        Integration      @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  integrationId      String?
+  integration        Integration?     @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  onCallScheduleId   String?
+  onCallSchedule     OnCallSchedule?  @relation(fields: [onCallScheduleId], references: [id], onDelete: Cascade)
 
   @@unique([escalationPolicyId, order])
   @@index([escalationPolicyId])
   @@index([integrationId])
+  @@index([onCallScheduleId])
   @@map("escalation_step")
+}
+
+// A rotation: an ordered list of people, each reachable through one
+// Integration, taking the pager in turn. Resolved at paging time — nothing
+// precomputes a calendar, so changing the roster takes effect immediately.
+model OnCallSchedule {
+  id       String @id @default(cuid())
+  name     String
+  // IANA zone the handoff happens in ("Europe/Amsterdam"). Separate from
+  // AppSettings.timezone so a follow-the-sun rotation can hand off at 09:00
+  // local while the rest of the dashboard stays on the instance's zone.
+  timezone String @default("UTC")
+  // How long one person holds the pager, and when the handoff lands.
+  rotationType String @default("Weekly") // Daily | Weekly
+  handoffHour  Int    @default(9)        // 0-23, in `timezone`
+  handoffDay   Int    @default(1)        // ISO weekday 1-7, Weekly rotations only
+  // Anchor the rotation counts from. Every handoff is a whole number of
+  // periods after this instant, so it decides *who* is first, not just when.
+  startsAt     DateTime @default(now())
+
+  createdById String?
+  createdBy   User?    @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  participants OnCallParticipant[]
+  overrides    OnCallOverride[]
+  steps        EscalationStep[]
+
+  @@index([createdById])
+  @@map("on_call_schedule")
+}
+
+// One person in a rotation. `integrationId` is how they're actually paged —
+// their personal Telegram chat, their phone's Web Push subscription, an
+// email. `userId` is optional and only used to show a familiar name in the
+// dashboard; someone can be on call without having a login.
+model OnCallParticipant {
+  id         String         @id @default(cuid())
+  scheduleId String
+  schedule   OnCallSchedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+  order      Int            @default(0)
+  name       String
+  userId     String?
+  user       User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+  integrationId String
+  integration   Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+
+  overrides OnCallOverride[]
+
+  @@unique([scheduleId, order])
+  @@index([scheduleId])
+  @@index([userId])
+  @@index([integrationId])
+  @@map("on_call_participant")
+}
+
+// "I'm ill this week" — a fixed window where the rotation's answer is
+// replaced. A null participant means nobody covers: paging falls through to
+// the next escalation step instead of waking the person who is nominally up.
+model OnCallOverride {
+  id         String         @id @default(cuid())
+  scheduleId String
+  schedule   OnCallSchedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+  startsAt   DateTime
+  endsAt     DateTime
+  participantId String?
+  participant   OnCallParticipant? @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  reason     String?
+  createdAt  DateTime @default(now())
+
+  @@index([scheduleId, startsAt, endsAt])
+  @@index([participantId])
+  @@map("on_call_override")
+}
+
+// Routing for monitors that *don't* have an escalation policy. Without any
+// rules the default is unchanged — every incident broadcasts to every enabled
+// Integration. With rules, the first enabled one (by `order`) whose match
+// clauses all hold decides what happens instead, so "staging alerts only
+// during office hours, and only to #dev" is one row.
+//
+// Evaluated by notifyOrEscalate() in src/lib/incidents.ts and its Go mirror
+// in worker/internal/incidents.
+model NotificationRule {
+  id      String  @id @default(cuid())
+  name    String
+  enabled Boolean @default(true)
+  order   Int     @default(0)
+
+  // Match clauses. Every one that is set must hold; all null matches
+  // everything, which is how you write an instance-wide quiet-hours rule.
+  matchTagId     String?
+  matchTag       Tag?     @relation(fields: [matchTagId], references: [id], onDelete: Cascade)
+  matchMonitorId String?
+  matchMonitor   Monitor? @relation(fields: [matchMonitorId], references: [id], onDelete: Cascade)
+  matchImpact    String? // Critical | Major | Minor
+
+  // The window this rule's action applies in, in AppSettings.timezone.
+  // activeDays is a comma-separated ISO weekday list ("1,2,3,4,5"); the two
+  // minute-of-day bounds are inclusive-exclusive and may wrap past midnight
+  // (22:00-06:00 is activeFromMinute 1320, activeUntilMinute 360). All three
+  // null means "always".
+  activeDays        String?
+  activeFromMinute  Int?
+  activeUntilMinute Int?
+
+  // Route    — inside the window, deliver to `integrations` instead of
+  //            broadcasting; outside it, deliver nothing.
+  // Suppress — inside the window, deliver nothing at all (quiet hours).
+  action String @default("Route") // Route | Suppress
+
+  integrations NotificationRuleIntegration[]
+
+  createdById String?
+  createdBy   User?    @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([matchTagId])
+  @@index([matchMonitorId])
+  @@index([createdById])
+  @@map("notification_rule")
+}
+
+// Join row: which Integrations a Route rule delivers to.
+model NotificationRuleIntegration {
+  id            String           @id @default(cuid())
+  ruleId        String
+  rule          NotificationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  integrationId String
+  integration   Integration      @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+
+  @@unique([ruleId, integrationId])
+  @@index([ruleId])
+  @@index([integrationId])
+  @@map("notification_rule_integration")
 }
 
 // A label attachable to monitors (e.g. "production", "third-party") via
@@ -498,7 +688,8 @@ model Tag {
   color     String   @default("#7c3aed")
   createdAt DateTime @default(now())
 
-  monitors MonitorTag[]
+  monitors          MonitorTag[]
+  notificationRules NotificationRule[]
 
   @@map("tag")
 }
@@ -564,6 +755,22 @@ model AppSettings {
   // while it's still serving traffic fine.
   certExpiryWarningEnabled Boolean  @default(true)
   certExpiryWarningDays    Int      @default(14)
+  // The same warning, one layer down the stack: a Domain monitor reports
+  // Degraded once the registry expiry RDAP reports is inside this window.
+  // Registrar renewal windows are measured in weeks, not days, hence the
+  // wider default.
+  domainExpiryWarningEnabled Boolean @default(true)
+  domainExpiryWarningDays    Int     @default(30)
+  // --- Flapping detection (worker/internal/flapping) ---
+  // failedAttemptsThreshold debounces a single dip; this catches the opposite
+  // failure, a monitor that alternates Up/Down all day. A monitor with at
+  // least `flappingThreshold` status transitions inside
+  // `flappingWindowMinutes` is marked flapping (monitor.flappingSince) and
+  // stops opening and closing incidents until it settles — one "is flapping"
+  // incident stands in for the storm.
+  flappingEnabled          Boolean  @default(true)
+  flappingWindowMinutes    Int      @default(60)
+  flappingThreshold        Int      @default(6)
   // Retention, enforced once a day by worker/cmd/janitor: raw MonitorCheck
   // rows and finished (Sent/Failed) IntegrationDelivery rows older than this
   // are deleted. MonitorDailyStat rollups are never pruned, so status-page

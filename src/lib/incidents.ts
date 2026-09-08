@@ -19,6 +19,8 @@ import { logger } from '@/lib/logging';
 import { sendEmail } from '@/lib/email';
 import { sendDiscordAlert, type AlertContext } from '@/lib/discord';
 import IncidentUpdateEmail from '@/emails/incident-update-email';
+import { getSettings } from '@/lib/settings';
+import { decideRouting, type RoutingDecision } from '@/lib/notification-rules';
 
 export const incidentImpactEnum = z.enum(['Critical', 'Major', 'Minor']);
 export const incidentStatusEnum = z.enum(['Investigating', 'Identified', 'Monitoring', 'Resolved']);
@@ -270,8 +272,11 @@ async function queueIntegrationDeliveries(
   incidentTitle: string,
   status: string,
   message: string,
+  integrationIds?: string[],
 ) {
-  const integrations = await prisma.integration.findMany({ where: { enabled: true } });
+  const integrations = await prisma.integration.findMany({
+    where: { enabled: true, ...(integrationIds ? { id: { in: integrationIds } } : {}) },
+  });
   if (integrations.length === 0) return;
 
   await prisma.integrationDelivery.createMany({
@@ -287,6 +292,45 @@ async function queueIntegrationDeliveries(
 }
 
 /**
+ * Evaluates the NotificationRule list against this incident. Mirrors
+ * routeFor() in worker/internal/incidents — the dashboard's manual incident
+ * actions route through here and the workers' automatic ones through there,
+ * so the same incident has to reach the same people either way.
+ */
+async function routeFor(incident: {
+  id: string;
+  impact?: string;
+  monitorId: string | null;
+}): Promise<RoutingDecision> {
+  const rules = await prisma.notificationRule.findMany({
+    where: { enabled: true },
+    orderBy: { order: 'asc' },
+    include: { integrations: { include: { integration: { select: { enabled: true } } } } },
+  });
+  if (rules.length === 0) return { kind: 'Broadcast' };
+
+  const settings = await getSettings();
+
+  const monitorTagIds = incident.monitorId
+    ? (await prisma.monitorTag.findMany({ where: { monitorId: incident.monitorId }, select: { tagId: true } })).map(
+        (row) => row.tagId,
+      )
+    : [];
+
+  return decideRouting(
+    rules.map((rule) => ({
+      ...rule,
+      // A disabled integration would otherwise make a Route rule look like it
+      // delivered — same filter the Go store applies in its join.
+      integrationIds: rule.integrations.filter((link) => link.integration.enabled).map((link) => link.integrationId),
+    })),
+    { monitorId: incident.monitorId, monitorTagIds, impact: incident.impact ?? null },
+    new Date(),
+    settings.timezone,
+  );
+}
+
+/**
  * Routes an incident's Integration notification: the normal broadcast to
  * every enabled Integration, unless the incident's monitor has an
  * EscalationPolicy attached — in which case the broadcast is skipped
@@ -295,7 +339,13 @@ async function queueIntegrationDeliveries(
  * stopping as soon as someone acknowledges the incident.
  */
 async function notifyOrEscalate(
-  incident: { id: string; title: string; monitor: { escalationPolicyId: string | null } | null },
+  incident: {
+    id: string;
+    title: string;
+    impact?: string;
+    monitorId: string | null;
+    monitor: { escalationPolicyId: string | null } | null;
+  },
   status: string,
   message: string,
 ) {
@@ -303,6 +353,35 @@ async function notifyOrEscalate(
     logger.info(
       `[Incidents] ${incident.id} is on an escalation policy — skipping the Integration broadcast, escalation steps will page instead`,
     );
+    return;
+  }
+
+  let decision: RoutingDecision;
+  try {
+    decision = await routeFor(incident);
+  } catch (error) {
+    // A rule that can't be read must not silence an alert — falling back to
+    // the broadcast is the safe direction to fail in.
+    logger.error(`[Incidents] Could not evaluate notification rules for ${incident.id} — broadcasting: ${error}`);
+    decision = { kind: 'Broadcast' };
+  }
+
+  if (decision.kind === 'Suppress') {
+    logger.info(`[Incidents] ${incident.id} not notified: ${decision.reason}`);
+    return;
+  }
+
+  if (decision.kind === 'Route') {
+    if (decision.integrationIds.length === 0) {
+      logger.warn(
+        `[Incidents] Rule "${decision.rule.name}" matched ${incident.id} but has no enabled integrations — nobody was notified`,
+      );
+      return;
+    }
+    logger.info(
+      `[Incidents] ${incident.id} routed by rule "${decision.rule.name}" to ${decision.integrationIds.length} integration(s)`,
+    );
+    await queueIntegrationDeliveries(incident.id, incident.title, status, message, decision.integrationIds);
     return;
   }
 

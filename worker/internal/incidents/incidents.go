@@ -13,6 +13,8 @@ import (
 	"stayup/worker/internal/delivery"
 	"stayup/worker/internal/logging"
 	"stayup/worker/internal/notify"
+	"stayup/worker/internal/oncall"
+	"stayup/worker/internal/routing"
 	"stayup/worker/internal/settings"
 	"stayup/worker/internal/store"
 )
@@ -122,27 +124,81 @@ func EscalateOverdueIncidents(ctx context.Context, s *store.Store) error {
 			continue // not due yet
 		}
 
-		if step.Integration.Enabled {
+		target := resolveStepTarget(ctx, s, step, now)
+
+		if target.integrationID != "" && target.enabled {
 			monitorLabel := ""
 			if incident.Monitor != nil {
 				monitorLabel = fmt.Sprintf(" (%s)", incident.Monitor.Name)
 			}
 			message := fmt.Sprintf("[Step %d/%d] %q%s is still unacknowledged.", incident.EscalationStep+1, len(steps), incident.Title, monitorLabel)
-			if err := s.CreateEscalationDelivery(ctx, step.IntegrationID, incident.ID, "Escalation Alert", message); err != nil {
+			if err := s.CreateEscalationDelivery(ctx, target.integrationID, incident.ID, "Escalation Alert", message); err != nil {
 				logging.Error(fmt.Sprintf("[Incidents] Failed to queue escalation delivery for %s", incident.ID), err)
 				continue
 			}
 		}
 
+		// The step is recorded as fired even when it paged nobody — an
+		// unstaffed rotation or a disabled integration must not stall the
+		// chain, or the incident would sit on a step that can never deliver
+		// and never reach the steps below it.
 		if err := s.RecordEscalation(ctx, incident.ID, now); err != nil {
 			logging.Error(fmt.Sprintf("[Incidents] Failed to record escalation for %s", incident.ID), err)
 			continue
 		}
 
-		logging.Info(fmt.Sprintf("[Incidents] Escalated %s to step %d/%d (%s)", incident.ID, incident.EscalationStep+1, len(steps), step.Integration.Name))
+		logging.Info(fmt.Sprintf("[Incidents] Escalated %s to step %d/%d (%s)", incident.ID, incident.EscalationStep+1, len(steps), target.label))
 	}
 
 	return nil
+}
+
+// stepTarget is where one escalation step actually pages, after a rotation
+// step has been resolved to a person.
+type stepTarget struct {
+	integrationID string
+	enabled       bool
+	// Human-readable, for the log line that says who was paged.
+	label string
+}
+
+// resolveStepTarget turns a step into a concrete Integration. A fixed step is
+// already one; a rotation step asks internal/oncall who holds the pager *now*
+// — not who held it when the incident opened, which is the whole point of
+// escalating on a clock.
+func resolveStepTarget(ctx context.Context, s *store.Store, step store.EscalationStep, now time.Time) stepTarget {
+	if step.Integration != nil {
+		return stepTarget{integrationID: step.Integration.ID, enabled: step.Integration.Enabled, label: step.Integration.Name}
+	}
+
+	if step.OnCallScheduleID == nil {
+		return stepTarget{label: "no target"}
+	}
+
+	schedule, err := s.OnCallScheduleByID(ctx, *step.OnCallScheduleID)
+	if err != nil {
+		logging.Error(fmt.Sprintf("[Incidents] Failed to load on-call schedule %s", *step.OnCallScheduleID), err)
+		return stepTarget{label: "unreadable on-call schedule"}
+	}
+	if schedule == nil {
+		return stepTarget{label: "missing on-call schedule"}
+	}
+
+	resolution := oncall.At(*schedule, now)
+	if resolution.Participant == nil {
+		logging.Warn(fmt.Sprintf("[Incidents] Nobody is on call for %q: %s", schedule.Name, resolution.Reason))
+		return stepTarget{label: fmt.Sprintf("on call for %s: nobody", schedule.Name)}
+	}
+
+	label := fmt.Sprintf("on call for %s: %s", schedule.Name, resolution.Participant.Name)
+	if resolution.Overridden {
+		label += " (override)"
+	}
+	return stepTarget{
+		integrationID: resolution.Participant.IntegrationID,
+		enabled:       resolution.Participant.Integration.Enabled,
+		label:         label,
+	}
 }
 
 type createIncidentInput struct {
@@ -321,7 +377,69 @@ func notifyOrEscalate(ctx context.Context, s *store.Store, incident store.Incide
 		logging.Info(fmt.Sprintf("[Incidents] %s is on an escalation policy — skipping the Integration broadcast, escalation steps will page instead", incident.ID))
 		return nil
 	}
-	return queueIntegrationDeliveries(ctx, s, incident.ID, incident.Title, status, message)
+
+	decision, err := routeFor(ctx, s, incident)
+	if err != nil {
+		// A rule that can't be read must not silence an alert — fall back to
+		// the default broadcast, which is the safe direction to fail in.
+		logging.Error(fmt.Sprintf("[Incidents] Could not evaluate notification rules for %s — broadcasting", incident.ID), err)
+		return queueIntegrationDeliveries(ctx, s, incident.ID, incident.Title, status, message)
+	}
+
+	switch decision.Kind {
+	case routing.Suppress:
+		logging.Info(fmt.Sprintf("[Incidents] %s not notified: %s", incident.ID, decision.Reason))
+		return nil
+
+	case routing.Route:
+		if len(decision.IntegrationIDs) == 0 {
+			logging.Warn(fmt.Sprintf("[Incidents] Rule %q matched %s but has no enabled integrations — nobody was notified",
+				decision.RuleName, incident.ID))
+			return nil
+		}
+		logging.Info(fmt.Sprintf("[Incidents] %s routed by rule %q to %d integration(s)",
+			incident.ID, decision.RuleName, len(decision.IntegrationIDs)))
+		return s.CreateDeliveries(ctx, decision.IntegrationIDs, incident.ID, "Incident Alert",
+			fmt.Sprintf("[%s] %s: %s", status, incident.Title, message))
+
+	default:
+		return queueIntegrationDeliveries(ctx, s, incident.ID, incident.Title, status, message)
+	}
+}
+
+// routeFor evaluates the notification rules against this incident. Mirrors
+// the same call in notifyOrEscalate() on the TypeScript side.
+func routeFor(ctx context.Context, s *store.Store, incident store.Incident) (routing.Decision, error) {
+	rules, err := s.ListNotificationRules(ctx)
+	if err != nil {
+		return routing.Decision{}, err
+	}
+	if len(rules) == 0 {
+		return routing.Decision{Kind: routing.Broadcast}, nil
+	}
+
+	cfg, err := settings.Get(ctx, s)
+	if err != nil {
+		return routing.Decision{}, err
+	}
+
+	impact, err := s.IncidentImpact(ctx, incident.ID)
+	if err != nil {
+		return routing.Decision{}, err
+	}
+
+	var tagIDs []string
+	if incident.MonitorID != nil {
+		if tagIDs, err = s.MonitorTagIDs(ctx, *incident.MonitorID); err != nil {
+			return routing.Decision{}, err
+		}
+	}
+
+	return routing.Decide(rules, routing.Context{
+		MonitorID:     incident.MonitorID,
+		MonitorTagIDs: tagIDs,
+		Impact:        impact,
+	}, time.Now(), cfg.Timezone), nil
 }
 
 // queueIntegrationDeliveries mirrors queueIntegrationDeliveries(): one

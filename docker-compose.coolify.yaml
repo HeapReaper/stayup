@@ -198,6 +198,14 @@ services:
     <<: *worker
     command: ["/usr/local/bin/dns"]
 
+  # Connection-level monitors — Postgres, MySQL, Redis, SMTP, IMAP, gRPC,
+  # WebSocket and Domain (RDAP) checks. One worker for the whole family: they
+  # all open a connection and exchange the minimum that proves the service is
+  # really answering, and none is hot enough to deserve its own process.
+  worker-probes:
+    <<: *worker
+    command: ["/usr/local/bin/probes"]
+
   # Not a monitor checker: delivers queued notifications (Discord, Slack,
   # Webhook, Telegram, Email, PagerDuty, Push) and drives escalation policies.
   worker-integrations:

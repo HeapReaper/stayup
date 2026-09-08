@@ -19,7 +19,7 @@ import { useTRPC } from '@/trpc/client';
 import UpdatesCard from '@/app/(dashboard)/dashboard/settings/updates-card';
 import type { AppSettingsView } from '@/trpc/routers/settings';
 import type { UpdateStatusView } from '@/trpc/routers/update';
-import type { MonitorInterval } from '@/trpc/routers/monitor';
+import type { MonitorInterval } from '@/lib/monitor-types';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -60,6 +60,9 @@ const INTERVAL_LABELS: Record<MonitorInterval, string> = {
   '30s': 'Every 30 sec',
   '60s': 'Every minute',
   '5m': 'Every 5 min',
+  '1h': 'Every hour',
+  '12h': 'Every 12 hours',
+  '24h': 'Once a day',
 };
 
 function SavedBadge({ show }: { show: boolean }) {
@@ -123,6 +126,11 @@ export default function SettingsClientPage({
     sslCheckEnabled: initialSettings.sslCheckEnabled,
     certExpiryWarningEnabled: initialSettings.certExpiryWarningEnabled,
     certExpiryWarningDays: initialSettings.certExpiryWarningDays,
+    domainExpiryWarningEnabled: initialSettings.domainExpiryWarningEnabled,
+    domainExpiryWarningDays: initialSettings.domainExpiryWarningDays,
+    flappingEnabled: initialSettings.flappingEnabled,
+    flappingWindowMinutes: initialSettings.flappingWindowMinutes,
+    flappingThreshold: initialSettings.flappingThreshold,
     checkRetentionDays: initialSettings.checkRetentionDays,
     deliveryRetentionDays: initialSettings.deliveryRetentionDays,
   }));
@@ -139,6 +147,11 @@ export default function SettingsClientPage({
           sslCheckEnabled: result.sslCheckEnabled,
           certExpiryWarningEnabled: result.certExpiryWarningEnabled,
           certExpiryWarningDays: result.certExpiryWarningDays,
+          domainExpiryWarningEnabled: result.domainExpiryWarningEnabled,
+          domainExpiryWarningDays: result.domainExpiryWarningDays,
+          flappingEnabled: result.flappingEnabled,
+          flappingWindowMinutes: result.flappingWindowMinutes,
+          flappingThreshold: result.flappingThreshold,
           checkRetentionDays: result.checkRetentionDays,
           deliveryRetentionDays: result.deliveryRetentionDays,
         });
@@ -449,6 +462,91 @@ export default function SettingsClientPage({
                         checked={monitoring.certExpiryWarningEnabled}
                         onCheckedChange={(checked) =>
                           setMonitoring({ ...monitoring, certExpiryWarningEnabled: checked })
+                        }
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="space-y-0.5">
+                      <Label className="text-base">Domain Expiry Warning</Label>
+                      <p className="text-xs text-muted-foreground">
+                        The same warning for a Domain monitor's registration, from its RDAP record. A
+                        lapsed domain takes the site, the mail and the certificate renewal with it, and
+                        nothing renews it automatically — so the window is wider than the certificate one.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <Input
+                        id="domainExpiryWarningDays"
+                        type="number"
+                        min={1}
+                        max={365}
+                        className="w-20"
+                        aria-label="Days before domain expiry"
+                        disabled={!monitoring.domainExpiryWarningEnabled}
+                        value={monitoring.domainExpiryWarningDays}
+                        onChange={(e) =>
+                          setMonitoring({ ...monitoring, domainExpiryWarningDays: Number(e.target.value) })
+                        }
+                      />
+                      <span className="text-xs text-muted-foreground">days</span>
+                      <Switch
+                        checked={monitoring.domainExpiryWarningEnabled}
+                        onCheckedChange={(checked) =>
+                          setMonitoring({ ...monitoring, domainExpiryWarningEnabled: checked })
+                        }
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <Separator />
+
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="space-y-0.5">
+                      <Label className="text-base">Flapping Detection</Label>
+                      <p className="text-xs text-muted-foreground">
+                        'Failed attempts before alerting' above debounces a single dip. This catches the
+                        opposite: a monitor that keeps changing its mind. Past this many up/down
+                        transitions inside the window, it is marked as flapping and stops opening and
+                        closing incidents — one standing 'is flapping' incident replaces the storm —
+                        until it settles.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={monitoring.flappingEnabled}
+                      onCheckedChange={(checked) => setMonitoring({ ...monitoring, flappingEnabled: checked })}
+                    />
+                  </div>
+
+                  <div className="grid sm:grid-cols-2 gap-4">
+                    <div className="grid gap-2">
+                      <Label htmlFor="flappingThreshold">Transitions before flagging</Label>
+                      <Input
+                        id="flappingThreshold"
+                        type="number"
+                        min={2}
+                        max={100}
+                        disabled={!monitoring.flappingEnabled}
+                        value={monitoring.flappingThreshold}
+                        onChange={(e) =>
+                          setMonitoring({ ...monitoring, flappingThreshold: Number(e.target.value) })
+                        }
+                      />
+                    </div>
+                    <div className="grid gap-2">
+                      <Label htmlFor="flappingWindowMinutes">Window (minutes)</Label>
+                      <Input
+                        id="flappingWindowMinutes"
+                        type="number"
+                        min={1}
+                        max={1440}
+                        disabled={!monitoring.flappingEnabled}
+                        value={monitoring.flappingWindowMinutes}
+                        onChange={(e) =>
+                          setMonitoring({ ...monitoring, flappingWindowMinutes: Number(e.target.value) })
                         }
                       />
                     </div>

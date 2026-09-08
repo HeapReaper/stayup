@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"time"
 
 	"stayup/worker/internal/db"
@@ -108,7 +109,116 @@ func (s *Store) AggregateChecksByDay(ctx context.Context, from, to time.Time) ([
 		}
 		stats = append(stats, stat)
 	}
-	return stats, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Percentiles need the distribution, not an aggregate, and only Postgres
+	// can do them in SQL (percentile_disc ... WITHIN GROUP; SQLite has no
+	// equivalent). Streaming the ordered response times and picking by rank
+	// in Go is the one implementation that works on both.
+	distribution, err := s.responseTimeDistribution(ctx, from, to)
+	if err != nil {
+		return nil, err
+	}
+	for i := range stats {
+		if p, ok := distribution[statKey{stats[i].MonitorID, stats[i].Day.Unix()}]; ok {
+			stats[i].P50ResponseTime = p.p50
+			stats[i].P95ResponseTime = p.p95
+			stats[i].P99ResponseTime = p.p99
+			stats[i].MaxResponseTime = p.max
+		}
+	}
+	return stats, nil
+}
+
+type statKey struct {
+	monitorID string
+	day       int64
+}
+
+type percentiles struct{ p50, p95, p99, max *int }
+
+// responseTimeDistribution streams every recorded response time in the window,
+// ordered so that each (monitor, day) group arrives together and already
+// sorted — so one group can be reduced to its percentiles and released before
+// the next begins, instead of holding the whole window in memory.
+func (s *Store) responseTimeDistribution(ctx context.Context, from, to time.Time) (map[statKey]percentiles, error) {
+	day := s.dayExpr(`"checkedAt"`)
+
+	rows, err := s.db.QueryContext(ctx, s.q(fmt.Sprintf(`
+		SELECT "monitorId", %s AS day, "responseTime"
+		FROM monitor_check
+		WHERE "checkedAt" >= ? AND "checkedAt" < ? AND "responseTime" IS NOT NULL
+		ORDER BY "monitorId", %s, "responseTime"
+	`, day, day)), s.db.TimeArg(from), s.db.TimeArg(to))
+	if err != nil {
+		return nil, fmt.Errorf("store: response time distribution: %w", err)
+	}
+	defer rows.Close()
+
+	result := map[statKey]percentiles{}
+	var current statKey
+	var haveCurrent bool
+	var values []int
+
+	flush := func() {
+		if haveCurrent && len(values) > 0 {
+			result[current] = percentilesOf(values)
+		}
+		values = values[:0]
+	}
+
+	for rows.Next() {
+		var monitorID string
+		var rawDay any
+		var responseTime int
+
+		if err := rows.Scan(&monitorID, &rawDay, &responseTime); err != nil {
+			return nil, fmt.Errorf("store: scan response time: %w", err)
+		}
+		parsed, err := parseDay(rawDay)
+		if err != nil {
+			return nil, err
+		}
+
+		key := statKey{monitorID, parsed.Unix()}
+		if !haveCurrent || key != current {
+			flush()
+			current, haveCurrent = key, true
+		}
+		values = append(values, responseTime)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	flush()
+
+	return result, nil
+}
+
+// percentilesOf picks nearest-rank percentiles out of an ascending slice.
+// Nearest-rank rather than interpolated: every value it reports is a response
+// time that was actually observed, which is what makes "p95 was 840ms"
+// defensible in front of the customer the SLA is with.
+func percentilesOf(sorted []int) percentiles {
+	pick := func(p float64) *int {
+		if len(sorted) == 0 {
+			return nil
+		}
+		index := int(math.Ceil(p/100*float64(len(sorted)))) - 1
+		if index < 0 {
+			index = 0
+		}
+		if index >= len(sorted) {
+			index = len(sorted) - 1
+		}
+		value := sorted[index]
+		return &value
+	}
+
+	max := sorted[len(sorted)-1]
+	return percentiles{p50: pick(50), p95: pick(95), p99: pick(99), max: &max}
 }
 
 // UpsertDailyStat writes one rollup row, replacing an existing one for the
@@ -117,17 +227,23 @@ func (s *Store) AggregateChecksByDay(ctx context.Context, from, to time.Time) ([
 func (s *Store) UpsertDailyStat(ctx context.Context, stat DailyStat) error {
 	_, err := s.db.ExecContext(ctx, s.q(`
 		INSERT INTO monitor_daily_stat
-			(id, "monitorId", day, "totalChecks", "upChecks", "degradedChecks", "downChecks", "avgResponseTime", uptime, "createdAt")
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			(id, "monitorId", day, "totalChecks", "upChecks", "degradedChecks", "downChecks", "avgResponseTime",
+			 "p50ResponseTime", "p95ResponseTime", "p99ResponseTime", "maxResponseTime", uptime, "createdAt")
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT ("monitorId", day) DO UPDATE SET
 			"totalChecks" = excluded."totalChecks",
 			"upChecks" = excluded."upChecks",
 			"degradedChecks" = excluded."degradedChecks",
 			"downChecks" = excluded."downChecks",
 			"avgResponseTime" = excluded."avgResponseTime",
+			"p50ResponseTime" = excluded."p50ResponseTime",
+			"p95ResponseTime" = excluded."p95ResponseTime",
+			"p99ResponseTime" = excluded."p99ResponseTime",
+			"maxResponseTime" = excluded."maxResponseTime",
 			uptime = excluded.uptime
 	`), ids.New(), stat.MonitorID, s.db.TimeArg(stat.Day), stat.TotalChecks, stat.UpChecks, stat.DegradedChecks,
-		stat.DownChecks, stat.AvgResponseTime, stat.Uptime, s.db.TimeArg(time.Now()))
+		stat.DownChecks, stat.AvgResponseTime, stat.P50ResponseTime, stat.P95ResponseTime, stat.P99ResponseTime,
+		stat.MaxResponseTime, stat.Uptime, s.db.TimeArg(time.Now()))
 	if err != nil {
 		return fmt.Errorf("store: upsert daily stat: %w", err)
 	}

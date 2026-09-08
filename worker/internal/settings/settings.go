@@ -21,7 +21,10 @@ import (
 )
 
 type Settings struct {
-	SupportEmail    *string
+	SupportEmail *string
+	// Timezone the notification rules' active windows are evaluated in
+	// (internal/routing).
+	Timezone        string
 	HTTPTimeoutSecs int
 	// How many checks in a row must fail before a monitor is reported as
 	// Down/Degraded — the Settings page's "Failed Attempts Before Alert".
@@ -36,6 +39,14 @@ type Settings struct {
 	// its certificate is within CertExpiryWarningDays of expiring.
 	CertExpiryWarningEnabled bool
 	CertExpiryWarningDays    int
+	// The same warning for a Domain monitor's registry expiry, from RDAP.
+	DomainExpiryWarningEnabled bool
+	DomainExpiryWarningDays    int
+	// Flapping detection (internal/flapping): how many healthy<->unhealthy
+	// transitions inside FlappingWindowMinutes mark a monitor as flapping.
+	FlappingEnabled       bool
+	FlappingWindowMinutes int
+	FlappingThreshold     int
 	// Retention windows enforced by cmd/janitor, in days.
 	CheckRetentionDays    int
 	DeliveryRetentionDays int
@@ -154,6 +165,7 @@ func Get(ctx context.Context, s *store.Store) (Settings, error) {
 
 	return Settings{
 		SupportEmail:            row.SupportEmail,
+		Timezone:                row.Timezone,
 		HTTPTimeoutSecs:         row.HTTPTimeoutSecs,
 		FailedAttemptsThreshold: threshold,
 		LatencyThreshold:        row.LatencyThreshold,
@@ -163,12 +175,21 @@ func Get(ctx context.Context, s *store.Store) (Settings, error) {
 		// to the schema defaults rather than trusting a hand-edited row.
 		CertExpiryWarningEnabled: row.CertExpiryWarningEnabled,
 		CertExpiryWarningDays:    atLeast(row.CertExpiryWarningDays, 1, 14),
-		CheckRetentionDays:       atLeast(row.CheckRetentionDays, 1, 90),
-		DeliveryRetentionDays:    atLeast(row.DeliveryRetentionDays, 1, 30),
-		UpdateCheckEnabled:       row.UpdateCheckEnabled,
-		VapidPublicKey:           *row.VapidPublicKey,
-		VapidPrivateKey:          *row.VapidPrivateKey,
-		SMTP:                     resolveSMTP(row),
+
+		DomainExpiryWarningEnabled: row.DomainExpiryWarningEnabled,
+		DomainExpiryWarningDays:    atLeast(row.DomainExpiryWarningDays, 1, 30),
+
+		FlappingEnabled: row.FlappingEnabled,
+		// A zero window or threshold would mark every monitor as flapping and
+		// silence the instance, so floor both at something meaningful.
+		FlappingWindowMinutes: atLeast(row.FlappingWindowMinutes, 1, 60),
+		FlappingThreshold:     atLeast(row.FlappingThreshold, 2, 6),
+		CheckRetentionDays:    atLeast(row.CheckRetentionDays, 1, 90),
+		DeliveryRetentionDays: atLeast(row.DeliveryRetentionDays, 1, 30),
+		UpdateCheckEnabled:    row.UpdateCheckEnabled,
+		VapidPublicKey:        *row.VapidPublicKey,
+		VapidPrivateKey:       *row.VapidPrivateKey,
+		SMTP:                  resolveSMTP(row),
 	}, nil
 }
 

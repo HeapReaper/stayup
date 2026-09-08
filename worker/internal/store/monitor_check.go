@@ -68,3 +68,41 @@ func (s *Store) TrailingFailureCount(ctx context.Context, monitorID string, limi
 	}
 	return failures, nil
 }
+
+// RecentCheckStatuses returns the status of every check for this monitor
+// since `since`, oldest first — the raw material internal/flapping counts
+// healthy<->unhealthy transitions in. Bounded by the flapping window (an hour
+// by default), so at the fastest 15s interval this is a few hundred rows.
+func (s *Store) RecentCheckStatuses(ctx context.Context, monitorID string, since time.Time) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, s.q(`
+		SELECT status FROM monitor_check
+		WHERE "monitorId" = ? AND "checkedAt" >= ?
+		ORDER BY "checkedAt" ASC
+	`), monitorID, s.db.TimeArg(since))
+	if err != nil {
+		return nil, fmt.Errorf("store: recent check statuses: %w", err)
+	}
+	defer rows.Close()
+
+	var statuses []string
+	for rows.Next() {
+		var status string
+		if err := rows.Scan(&status); err != nil {
+			return nil, fmt.Errorf("store: scan check status: %w", err)
+		}
+		statuses = append(statuses, status)
+	}
+	return statuses, rows.Err()
+}
+
+// SetFlappingSince marks a monitor as flapping (or, with a nil timestamp,
+// clears it). Written by internal/flapping; the dashboard only reads it.
+func (s *Store) SetFlappingSince(ctx context.Context, monitorID string, since *time.Time, now time.Time) error {
+	_, err := s.db.ExecContext(ctx, s.q(`
+		UPDATE monitor SET "flappingSince" = ?, "updatedAt" = ? WHERE id = ?
+	`), s.db.NullTimeArg(since), s.db.TimeArg(now), monitorID)
+	if err != nil {
+		return fmt.Errorf("store: set flapping since: %w", err)
+	}
+	return nil
+}

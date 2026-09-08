@@ -21,6 +21,11 @@ export type AppSettingsView = {
   sslCheckEnabled: boolean;
   certExpiryWarningEnabled: boolean;
   certExpiryWarningDays: number;
+  domainExpiryWarningEnabled: boolean;
+  domainExpiryWarningDays: number;
+  flappingEnabled: boolean;
+  flappingWindowMinutes: number;
+  flappingThreshold: number;
   checkRetentionDays: number;
   deliveryRetentionDays: number;
   smtpHost: string;
@@ -47,6 +52,11 @@ function serialize(settings: Awaited<ReturnType<typeof getSettings>>): AppSettin
     sslCheckEnabled: settings.sslCheckEnabled,
     certExpiryWarningEnabled: settings.certExpiryWarningEnabled,
     certExpiryWarningDays: settings.certExpiryWarningDays,
+    domainExpiryWarningEnabled: settings.domainExpiryWarningEnabled,
+    domainExpiryWarningDays: settings.domainExpiryWarningDays,
+    flappingEnabled: settings.flappingEnabled,
+    flappingWindowMinutes: settings.flappingWindowMinutes,
+    flappingThreshold: settings.flappingThreshold,
     checkRetentionDays: settings.checkRetentionDays,
     deliveryRetentionDays: settings.deliveryRetentionDays,
     smtpHost: settings.smtpHost ?? '',
@@ -105,6 +115,14 @@ export const settingsRouter = createTRPCRouter({
         sslCheckEnabled: z.boolean(),
         certExpiryWarningEnabled: z.boolean(),
         certExpiryWarningDays: z.number().int().min(1).max(365),
+        domainExpiryWarningEnabled: z.boolean(),
+        domainExpiryWarningDays: z.number().int().min(1).max(365),
+        // Flapping detection (worker/internal/flapping). The threshold floor
+        // is 2 because one transition is not an oscillation, and the window
+        // floor is 1 minute because a zero window would mark everything.
+        flappingEnabled: z.boolean(),
+        flappingWindowMinutes: z.number().int().min(1).max(1440),
+        flappingThreshold: z.number().int().min(2).max(100),
         // Retention, enforced by worker/cmd/janitor. The floor is 1 day
         // rather than 0 because 0 would mean "delete everything, including
         // the check that just ran".

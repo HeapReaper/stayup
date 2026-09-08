@@ -18,10 +18,19 @@ import {
   Pause,
   Play,
   ShieldAlert,
+  Activity,
 } from 'lucide-react';
 
 import { useTRPC } from '@/trpc/client';
-import type { Monitor, MonitorType, MonitorInterval, MonitorMethod } from '@/trpc/routers/monitor';
+import type { Monitor } from '@/trpc/routers/monitor';
+import {
+  PROBE_TYPES,
+  DEFAULT_PORTS,
+  type MonitorType,
+  type MonitorInterval,
+  type MonitorMethod,
+} from '@/lib/monitor-types';
+import type { AssertionType } from '@/lib/assertions';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -87,6 +96,11 @@ type MonitorFormState = {
   expectedStatusCodes: string;
   keyword: string;
   keywordInverted: boolean;
+  assertionType: AssertionType;
+  jsonPath: string;
+  // Write-only: never sent back down, blank means "keep the stored secret".
+  credential: string;
+  sloTarget: string;
 };
 
 // Base UI's <SelectValue> only resolves a label once its item list has
@@ -98,13 +112,57 @@ const MONITOR_TYPE_LABELS: Record<MonitorType, string> = {
   Ping: 'Ping',
   Port: 'Port',
   DNS: 'DNS',
+  Postgres: 'PostgreSQL',
+  MySQL: 'MySQL',
+  Redis: 'Redis',
+  SMTP: 'SMTP',
+  IMAP: 'IMAP',
+  gRPC: 'gRPC',
+  WebSocket: 'WebSocket',
+  Domain: 'Domain expiry',
 };
+
+/** What the URL/host field means per type — it is not always a URL. */
+const TARGET_LABELS: Partial<Record<MonitorType, { label: string; placeholder: string; hint?: string }>> = {
+  Postgres: {
+    label: 'Connection string',
+    placeholder: 'postgresql://user@db.internal:5432/appdb',
+    hint: 'The check connects and runs SELECT 1. Leave the password out and put it below.',
+  },
+  MySQL: { label: 'Host', placeholder: 'db.internal', hint: 'Reads the server handshake — no credentials needed.' },
+  Redis: { label: 'Host', placeholder: 'cache.internal', hint: 'Sends PING and expects PONG.' },
+  SMTP: { label: 'Host', placeholder: 'mail.example.com', hint: 'Greeting, EHLO, NOOP, QUIT. Port 465 uses implicit TLS.' },
+  IMAP: { label: 'Host', placeholder: 'mail.example.com', hint: 'Reads the * OK greeting. Port 993 uses implicit TLS.' },
+  gRPC: {
+    label: 'Target',
+    placeholder: 'grpc://service.internal',
+    hint: 'Calls grpc.health.v1.Health/Check. Use grpcs:// for TLS.',
+  },
+  WebSocket: { label: 'URL', placeholder: 'wss://example.com/socket', hint: 'Performs the RFC 6455 upgrade handshake.' },
+  Domain: {
+    label: 'Domain name',
+    placeholder: 'example.com',
+    hint: 'Looks the registry expiry up over RDAP. Use a slow interval — RDAP servers are rate-limited.',
+  },
+};
+
+/** Types whose check takes an optional password (stored write-only). */
+const CREDENTIAL_TYPES: MonitorType[] = ['Postgres', 'Redis'];
 
 const MONITOR_INTERVAL_LABELS: Record<MonitorInterval, string> = {
   '15s': 'Every 15 sec',
   '30s': 'Every 30 sec',
   '60s': 'Every minute',
   '5m': 'Every 5 min',
+  '1h': 'Every hour',
+  '12h': 'Every 12 hours',
+  '24h': 'Once a day',
+};
+
+const ASSERTION_LABELS: Record<AssertionType, string> = {
+  Contains: 'Body contains',
+  Regex: 'Body matches regex',
+  JsonPath: 'JSON path equals',
 };
 
 function emptyForm(): MonitorFormState {
@@ -123,6 +181,10 @@ function emptyForm(): MonitorFormState {
     expectedStatusCodes: '',
     keyword: '',
     keywordInverted: false,
+    assertionType: 'Contains',
+    jsonPath: '',
+    credential: '',
+    sloTarget: '',
   };
 }
 
@@ -142,6 +204,10 @@ function monitorToForm(monitor: Monitor): MonitorFormState {
     expectedStatusCodes: monitor.expectedStatusCodes ?? '',
     keyword: monitor.keyword ?? '',
     keywordInverted: monitor.keywordInverted,
+    assertionType: monitor.assertionType,
+    jsonPath: monitor.jsonPath ?? '',
+    credential: '',
+    sloTarget: monitor.sloTarget === null ? '' : String(monitor.sloTarget),
   };
 }
 
@@ -155,13 +221,25 @@ function formatLastChecked(date: Date | string | null) {
 const CERT_EXPIRY_NOTICE_DAYS = 30;
 
 function certExpiryNotice(certExpiresAt: string | null): string | null {
-  if (!certExpiresAt) return null;
+  return expiryNotice(certExpiresAt, 'Certificate', CERT_EXPIRY_NOTICE_DAYS);
+}
 
-  const days = Math.floor((new Date(certExpiresAt).getTime() - Date.now()) / 86_400_000);
-  if (days > CERT_EXPIRY_NOTICE_DAYS) return null;
-  if (days < 0) return 'Certificate expired';
-  if (days === 0) return 'Certificate expires today';
-  return `Certificate expires in ${days} day${days === 1 ? '' : 's'}`;
+// Same treatment for a Domain monitor's registry expiry: a lapsed domain is
+// as fatal as a lapsed certificate, and renewal windows are longer.
+const DOMAIN_EXPIRY_NOTICE_DAYS = 60;
+
+function domainExpiryNotice(domainExpiresAt: string | null): string | null {
+  return expiryNotice(domainExpiresAt, 'Domain', DOMAIN_EXPIRY_NOTICE_DAYS);
+}
+
+function expiryNotice(expiresAt: string | null, subject: string, withinDays: number): string | null {
+  if (!expiresAt) return null;
+
+  const days = Math.floor((new Date(expiresAt).getTime() - Date.now()) / 86_400_000);
+  if (days > withinDays) return null;
+  if (days < 0) return `${subject} expired`;
+  if (days === 0) return `${subject} expires today`;
+  return `${subject} expires in ${days} day${days === 1 ? '' : 's'}`;
 }
 
 export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPageProps) {
@@ -295,7 +373,7 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
       url: form.url,
       type: form.type,
       interval: form.interval,
-      port: form.type === 'Port' ? Number(form.port) : undefined,
+      port: form.port ? Number(form.port) : undefined,
       tagNames: form.tags,
       escalationPolicyId: form.escalationPolicyId === NO_ESCALATION_POLICY ? null : form.escalationPolicyId,
       method: form.method,
@@ -305,6 +383,10 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
       expectedStatusCodes: form.expectedStatusCodes,
       keyword: form.keyword,
       keywordInverted: form.keywordInverted,
+      assertionType: form.assertionType,
+      jsonPath: form.jsonPath,
+      credential: form.credential,
+      sloTarget: form.sloTarget ? Number(form.sloTarget) : null,
     };
 
     if (editingId) {
@@ -373,29 +455,57 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                 />
               </div>
               <div className="grid gap-2">
-                <Label htmlFor="url">URL, host or IP address</Label>
+                <Label htmlFor="url">{TARGET_LABELS[form.type]?.label ?? 'URL, host or IP address'}</Label>
                 <Input
                   id="url"
-                  placeholder="https://api.example.com/health"
+                  placeholder={TARGET_LABELS[form.type]?.placeholder ?? 'https://api.example.com/health'}
                   value={form.url}
                   onChange={(e) => setForm({ ...form, url: e.target.value })}
                   required
                 />
+                {TARGET_LABELS[form.type]?.hint && (
+                  <p className="text-xs text-muted-foreground">{TARGET_LABELS[form.type]?.hint}</p>
+                )}
               </div>
 
-              {form.type === 'Port' && (
-                <div className="grid gap-2">
-                  <Label htmlFor="port">Port</Label>
-                  <Input
-                    id="port"
-                    type="number"
-                    min={1}
-                    max={65535}
-                    placeholder="80"
-                    value={form.port}
-                    onChange={(e) => setForm({ ...form, port: e.target.value })}
-                    required
-                  />
+              {(form.type === 'Port' || PROBE_TYPES.includes(form.type)) && form.type !== 'Domain' && (
+                <div className="grid sm:grid-cols-2 gap-4">
+                  <div className="grid gap-2">
+                    <Label htmlFor="port">Port</Label>
+                    <Input
+                      id="port"
+                      type="number"
+                      min={1}
+                      max={65535}
+                      placeholder={DEFAULT_PORTS[form.type] ? String(DEFAULT_PORTS[form.type]) : '80'}
+                      value={form.port}
+                      onChange={(e) => setForm({ ...form, port: e.target.value })}
+                      required={form.type === 'Port'}
+                    />
+                    {form.type !== 'Port' && DEFAULT_PORTS[form.type] && (
+                      <p className="text-xs text-muted-foreground">
+                        Leave blank for the default ({DEFAULT_PORTS[form.type]}).
+                      </p>
+                    )}
+                  </div>
+
+                  {CREDENTIAL_TYPES.includes(form.type) && (
+                    <div className="grid gap-2">
+                      <Label htmlFor="credential">Password</Label>
+                      <Input
+                        id="credential"
+                        type="password"
+                        placeholder={
+                          editingId && monitors.find((m) => m.id === editingId)?.credentialSet
+                            ? 'Leave blank to keep the current secret'
+                            : 'Optional'
+                        }
+                        value={form.credential}
+                        onChange={(e) => setForm({ ...form, credential: e.target.value })}
+                      />
+                      <p className="text-xs text-muted-foreground">Stored write-only; never sent back to the browser.</p>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -532,14 +642,27 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                   </div>
 
                   <div className="grid gap-2">
-                    <Label htmlFor="keyword">Response must contain</Label>
+                    <Label htmlFor="assertionType">Response assertion</Label>
                     <div className="flex items-center gap-2">
-                      <Input
-                        id="keyword"
-                        placeholder='e.g. "healthy"'
-                        value={form.keyword}
-                        onChange={(e) => setForm({ ...form, keyword: e.target.value })}
-                      />
+                      <Select
+                        value={form.assertionType}
+                        onValueChange={(val) => {
+                          if (val) setForm({ ...form, assertionType: val as AssertionType });
+                        }}
+                      >
+                        <SelectTrigger id="assertionType" className="w-[190px] shrink-0">
+                          <SelectValue>
+                            {(val: AssertionType) => ASSERTION_LABELS[val] ?? ASSERTION_LABELS.Contains}
+                          </SelectValue>
+                        </SelectTrigger>
+                        <SelectContent>
+                          {(Object.keys(ASSERTION_LABELS) as AssertionType[]).map((type) => (
+                            <SelectItem key={type} value={type}>
+                              {ASSERTION_LABELS[type]}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                       <div className="flex items-center gap-1.5 shrink-0">
                         <Switch
                           id="keywordInverted"
@@ -551,9 +674,38 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                         </Label>
                       </div>
                     </div>
+
+                    {form.assertionType === 'JsonPath' && (
+                      <Input
+                        id="jsonPath"
+                        className="font-mono text-xs"
+                        placeholder="$.status"
+                        value={form.jsonPath}
+                        onChange={(e) => setForm({ ...form, jsonPath: e.target.value })}
+                      />
+                    )}
+
+                    <Input
+                      id="keyword"
+                      className={form.assertionType === 'Contains' ? undefined : 'font-mono text-xs'}
+                      placeholder={
+                        form.assertionType === 'Regex'
+                          ? '"status":\\s*"(healthy|ok)"'
+                          : form.assertionType === 'JsonPath'
+                            ? 'ok'
+                            : 'e.g. "healthy"'
+                      }
+                      value={form.keyword}
+                      onChange={(e) => setForm({ ...form, keyword: e.target.value })}
+                    />
+
                     <p className="text-xs text-muted-foreground">
-                      The check fails when the body doesn't contain this text — or, inverted, when it
-                      does. Only the first megabyte of the response is searched.
+                      {form.assertionType === 'Regex'
+                        ? 'The check fails unless the body matches this pattern — or, inverted, when it does. Patterns use RE2, so lookahead, lookbehind and backreferences are not available.'
+                        : form.assertionType === 'JsonPath'
+                          ? 'The path selects a value from the JSON body, which must equal the text below. Leave the value blank to assert only that the path resolves. Supports $.a.b, $["a"] and $.list[0].'
+                          : "The check fails when the body doesn't contain this text — or, inverted, when it does."}{' '}
+                      Only the first megabyte of the response is searched.
                     </p>
                   </div>
 
@@ -596,6 +748,24 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
               )}
 
               <div className="grid gap-2">
+                <Label htmlFor="sloTarget">Availability target (SLO)</Label>
+                <Input
+                  id="sloTarget"
+                  type="number"
+                  min={0}
+                  max={100}
+                  step="0.01"
+                  placeholder="e.g. 99.9 — leave blank for no target"
+                  value={form.sloTarget}
+                  onChange={(e) => setForm({ ...form, sloTarget: e.target.value })}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Used on the Reports page to work out whether the month met its target, and how much
+                  of the error budget it spent. It does not affect alerting.
+                </p>
+              </div>
+
+              <div className="grid gap-2">
                 <Label htmlFor="escalation">Escalation policy</Label>
                 <Select
                   value={form.escalationPolicyId}
@@ -622,8 +792,8 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
-                  Leave as-is to notify every enabled integration on an incident. Pick a policy to
-                  page its steps in order instead.
+                  Leave as-is to notify every enabled integration on an incident (or whatever the
+                  notification rules say). Pick a policy to page its steps in order instead.
                 </p>
               </div>
 
@@ -718,6 +888,18 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                         <span className="text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1 mt-0.5">
                           <ShieldAlert className="h-3 w-3" />
                           {certExpiryNotice(monitor.certExpiresAt)}
+                        </span>
+                      )}
+                      {domainExpiryNotice(monitor.domainExpiresAt) && (
+                        <span className="text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1 mt-0.5">
+                          <ShieldAlert className="h-3 w-3" />
+                          {domainExpiryNotice(monitor.domainExpiresAt)}
+                        </span>
+                      )}
+                      {monitor.flappingSince && (
+                        <span className="text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1 mt-0.5">
+                          <Activity className="h-3 w-3" />
+                          Flapping since {new Date(monitor.flappingSince).toLocaleString()} — incidents suppressed
                         </span>
                       )}
                       {monitor.tags.length > 0 && (
