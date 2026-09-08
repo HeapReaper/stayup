@@ -21,6 +21,15 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: 'StayUp',
   description: 'Uptime monitor the way i like it',
+  // The same mark the sidebar shows collapsed. This replaces the Next.js
+  // template's src/app/favicon.ico, which was deleted rather than left in
+  // place: Next emits a <link rel="icon" sizes="any"> for that file whenever
+  // it exists, and browsers pick unpredictably between two competing icon
+  // declarations.
+  icons: {
+    icon: [{ url: '/logo.webp', type: 'image/webp' }],
+    apple: '/logo.webp',
+  },
 };
 
 export default function RootLayout({

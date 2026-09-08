@@ -2,6 +2,7 @@
 
 import * as React from 'react';
 import Link from 'next/link';
+import Image from 'next/image';
 import { usePathname } from 'next/navigation';
 import { useTheme } from 'next-themes';
 import { useQuery } from '@tanstack/react-query';
@@ -76,9 +77,43 @@ export default function Sidebar() {
 
   return (
     <ShadcnSidebar collapsible="icon">
-      <SidebarHeader className="border-b h-16 flex items-center px-4 justify-between">
-        <Link href="/dashboard" className={cn("font-bold text-lg mt-3", isCollapsed && "hidden")}>
-          StayUp
+      <SidebarHeader className="border-b h-16 flex items-center px-2 justify-between">
+        <Link
+          href="/dashboard"
+          className="flex w-full items-center justify-center overflow-hidden"
+          aria-label="StayUp — dashboard"
+        >
+          {/* Two crops of the same brand. The banner's wordmark is only
+              legible at the expanded sidebar's full width; collapsed, there's
+              room for the mark alone. `object-cover` is what makes the banner
+              usable here at all — it trims the generous empty margins around
+              the artwork so the wordmark fills a 64px-tall header instead of
+              shrinking to fit inside it, and the 45% vertical object-position
+              puts the visible band at 27%-67% of the artwork: arrow tip and
+              wordmark in, the "Uptime. Incidents. Status Pages." tagline
+              (which starts at 68%) cleanly out rather than half-sliced.
+              next/image (rather than a plain <img>) resizes both assets down
+              from their ~1400px originals — the sidebar fetches ~3kB instead
+              of the 426kB source. */}
+          {isCollapsed ? (
+            <Image
+              src="/logo.webp"
+              alt=""
+              width={1109}
+              height={960}
+              className="size-8 shrink-0 rounded-md object-cover"
+              priority
+            />
+          ) : (
+            <Image
+              src="/banner.webp"
+              alt=""
+              width={1408}
+              height={768}
+              className="h-14 w-full rounded-md object-cover object-[50%_45%]"
+              priority
+            />
+          )}
         </Link>
       </SidebarHeader>
 

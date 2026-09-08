@@ -12,7 +12,7 @@
 // Plain ES5-ish JS on purpose: it's served as-is, never bundled or
 // transpiled, and runs in the service worker global scope (no window, no DOM).
 
-const NOTIFICATION_ICON = '/favicon.ico';
+const NOTIFICATION_ICON = '/logo.webp';
 const INCIDENTS_PATH = '/dashboard/incidents';
 
 // Take over from a previous version of this worker immediately instead of
