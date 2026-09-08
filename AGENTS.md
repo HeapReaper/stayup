@@ -200,9 +200,11 @@ builds — so run them yourself before pushing.
 - **Enums are Zod enums in the router, plain strings in the DB** (SQLite has no enums). Narrow with
   `as` only when reading rows that were written through a validated mutation.
 - **Status/impact vocabularies** — keep these exact strings in sync across TS, Go and the DB:
-  - monitor `type`: `HTTP` | `Ping` | `Port` | `DNS`
+  - monitor `type`: `HTTP` | `Ping` | `Port` | `DNS` | `Postgres` | `MySQL` | `Redis` | `SMTP` |
+    `IMAP` | `gRPC` | `WebSocket` | `Domain`
   - monitor `status`: `Up` | `Down` | `Degraded`
-  - monitor `interval`: `15s` | `30s` | `60s` | `5m`
+  - monitor `interval`: `15s` | `30s` | `60s` | `5m` | `1h` | `12h` | `24h`
+  - monitor `dnsRecordType`: `A` | `AAAA` | `CNAME` | `MX` | `NS` | `TXT` | `SRV`
   - incident `status`: `Investigating` | `Identified` | `Monitoring` | `Resolved`
   - incident `impact`: `Critical` | `Major` | `Minor`
   - integration `type`: `Discord` | `Slack` | `Webhook` | `Telegram` | `Email` | `PagerDuty` | `Push`

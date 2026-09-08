@@ -34,6 +34,12 @@ type Monitor struct {
 	AssertionType string
 	JSONPath      *string
 
+	// DNS-only options; "A" and nil for every other monitor type. See the
+	// `monitor` model in src/prisma/schemas/*.prisma and
+	// internal/checkers/dns.go.
+	DNSRecordType    string
+	DNSExpectedValue *string
+
 	// Secret half of a non-HTTP check's credentials (Redis/database/mail
 	// password). Never logged — logResult only ever prints URL and port.
 	Credential *string

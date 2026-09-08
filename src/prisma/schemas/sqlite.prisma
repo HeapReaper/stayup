@@ -105,6 +105,20 @@ model Monitor {
   uptime        Float               @default(100)
   responseTime  Int?
   lastCheckedAt DateTime?
+  // --- DNS monitor options (ignored by every other worker) ---
+  // Which record is looked up for `url`, and optionally what it has to
+  // contain. A DNS monitor used to be an A-record lookup and nothing else,
+  // which is the one record an HTTP check already proves; the records worth
+  // watching separately are the ones whose loss breaks something invisible
+  // to the website — an MX (mail stops), a TXT holding SPF/DKIM, an NS
+  // delegation.
+  //
+  // `dnsExpectedValue` is a substring match against the answers, case
+  // insensitive: blank asserts only that the record resolves to something,
+  // which is what "is it still there" usually means. See
+  // worker/internal/checkers/dns.go.
+  dnsRecordType    String  @default("A") // A | AAAA | CNAME | MX | NS | TXT | SRV
+  dnsExpectedValue String?
   // --- HTTP monitor options (ignored by the Ping/Port/DNS workers) ---
   // How the request is made. `requestHeaders` is a JSON object
   // ({"Authorization": "Bearer ..."}) kept as text because it's only ever

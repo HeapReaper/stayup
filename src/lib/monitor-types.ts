@@ -62,3 +62,19 @@ export const DEFAULT_PORTS: Partial<Record<MonitorType, number>> = {
   SMTP: 25,
   IMAP: 143,
 };
+
+/**
+ * Record types a DNS monitor can look up. 'A' is the default and what every
+ * DNS monitor did before record selection existed, so existing rows keep
+ * their behavior.
+ *
+ * The point of the others is the record whose absence breaks something but
+ * that no HTTP check ever touches: an MX that stops resolving takes mail down
+ * while the website stays green, and a TXT (SPF, DKIM, a domain-verification
+ * token) that gets clobbered by a well-meaning DNS edit fails silently until
+ * someone's mail starts bouncing.
+ *
+ * Must stay in step with lookupRecords() in worker/internal/checkers/dns.go.
+ */
+export const dnsRecordTypeEnum = z.enum(['A', 'AAAA', 'CNAME', 'MX', 'NS', 'TXT', 'SRV']);
+export type DnsRecordType = z.infer<typeof dnsRecordTypeEnum>;

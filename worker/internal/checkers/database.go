@@ -7,12 +7,22 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
+
+	// Registers the "mysql" driver used by the authenticated MySQL check. The
+	// handshake check below needs no driver at all.
+	_ "github.com/go-sql-driver/mysql"
 
 	"stayup/worker/internal/settings"
 	"stayup/worker/internal/store"
 )
+
+// Default MySQL port, applied when the monitor leaves the port field blank.
+// Mirrors DEFAULT_PORTS in src/lib/monitor-types.ts.
+const mysqlPort = 3306
 
 // Postgres opens a real connection with the monitor's DSN and round-trips a
 // query. Unlike a TCP port check this proves the server is accepting
@@ -67,18 +77,117 @@ func postgresDSN(monitor store.Monitor) string {
 	return dsn + "?password=" + credential
 }
 
-// MySQL reads the server's initial handshake packet.
+// MySQL checks the server in one of two ways, decided by what the monitor's
+// target field holds:
 //
-// Deliberately no driver and no login: the handshake is the first thing
-// mysqld writes on an accepted connection, so receiving a well-formed one
-// proves the server is up and past its connection limit — without this
-// monitor needing credentials to a production database. A server that answers
-// the TCP connect but never sends a handshake (the classic "too many
-// connections" or a stuck server) fails here and passes a port check.
+//   - a bare host — read the initial handshake packet. No driver and no
+//     login: the handshake is the first thing mysqld writes on an accepted
+//     connection, so a well-formed one proves the server is up and past its
+//     connection limit, without this monitor needing credentials to a
+//     production database.
+//   - a mysql:// DSN — log in and round-trip SELECT 1, the way the Postgres
+//     checker does. The handshake alone cannot see a server that is
+//     authenticating fine but whose database is unreadable (a full disk, a
+//     replica still in recovery, a revoked grant), and that is an outage for
+//     whoever depends on it.
+//
+// Either way a server that answers the TCP connect but nothing more — the
+// classic "too many connections" or a stuck server — fails here and passes a
+// port check.
 func MySQL(ctx context.Context, cfg settings.Settings, monitor store.Monitor) store.CheckResult {
+	if isMySQLDSN(monitor.URL) {
+		return mysqlQuery(ctx, cfg, monitor)
+	}
+	return mysqlHandshake(ctx, cfg, monitor)
+}
+
+// mysqlQuery is the authenticated path: a real login followed by SELECT 1.
+func mysqlQuery(ctx context.Context, cfg settings.Settings, monitor store.Monitor) store.CheckResult {
+	timeout := time.Duration(cfg.HTTPTimeoutSecs) * time.Second
+	queryCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	started := time.Now()
 
-	conn, err := dialFor(ctx, cfg, monitor, 3306, false)
+	dsn, err := mysqlDSN(monitor, timeout)
+	if err != nil {
+		return downResult(started, err)
+	}
+
+	pool, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return downResult(started, err)
+	}
+	defer pool.Close()
+
+	// One connection, used once and thrown away: a monitor must not keep a
+	// pool warm against the system it's watching.
+	pool.SetMaxOpenConns(1)
+
+	var one int
+	if err := pool.QueryRowContext(queryCtx, "SELECT 1").Scan(&one); err != nil {
+		return downResult(started, err)
+	}
+
+	return gradedResult(cfg, started)
+}
+
+// isMySQLDSN distinguishes the two target shapes. Only the explicit scheme
+// selects the authenticated path, so every monitor created before it existed
+// (a bare host) keeps doing the handshake check.
+func isMySQLDSN(raw string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(raw)), "mysql://")
+}
+
+// mysqlDSN rewrites the mysql:// URL the form accepts into the driver's own
+// DSN form (user:pass@tcp(host:port)/dbname?params), folding in the password
+// from monitor.credential when the URL doesn't carry one — so the secret can
+// live in the column that is kept out of API responses.
+func mysqlDSN(monitor store.Monitor, timeout time.Duration) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(monitor.URL))
+	if err != nil {
+		return "", fmt.Errorf("invalid MySQL connection string: %w", err)
+	}
+
+	user := parsed.User.Username()
+	password, hasPassword := parsed.User.Password()
+	if !hasPassword {
+		password = deref(monitor.Credential)
+	}
+
+	credentials := user
+	if password != "" {
+		credentials = user + ":" + password
+	}
+	if credentials != "" {
+		credentials += "@"
+	}
+
+	host := parsed.Hostname()
+	if host == "" {
+		return "", fmt.Errorf("MySQL connection string has no host")
+	}
+	port := parsed.Port()
+	if port == "" {
+		port = strconv.Itoa(portOr(monitor, mysqlPort))
+	}
+
+	// Query parameters are carried through so a caller can ask for TLS
+	// (?tls=true) or a specific collation; the timeouts are ours, and match
+	// the deadline the query context is already under.
+	params := parsed.Query()
+	params.Set("timeout", timeout.String())
+	params.Set("readTimeout", timeout.String())
+
+	return fmt.Sprintf("%stcp(%s)/%s?%s", credentials, net.JoinHostPort(host, port),
+		strings.TrimPrefix(parsed.Path, "/"), params.Encode()), nil
+}
+
+// mysqlHandshake is the credential-free path: read the server's greeting.
+func mysqlHandshake(ctx context.Context, cfg settings.Settings, monitor store.Monitor) store.CheckResult {
+	started := time.Now()
+
+	conn, err := dialFor(ctx, cfg, monitor, mysqlPort, false)
 	if err != nil {
 		return downResult(started, err)
 	}

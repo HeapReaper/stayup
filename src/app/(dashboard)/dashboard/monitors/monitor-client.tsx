@@ -26,6 +26,9 @@ import type { Monitor } from '@/trpc/routers/monitor';
 import {
   PROBE_TYPES,
   DEFAULT_PORTS,
+  dnsRecordTypeEnum,
+  monitorTypeEnum,
+  type DnsRecordType,
   type MonitorType,
   type MonitorInterval,
   type MonitorMethod,
@@ -98,6 +101,9 @@ type MonitorFormState = {
   keywordInverted: boolean;
   assertionType: AssertionType;
   jsonPath: string;
+  // DNS-only, same deal: the server blanks them out for every other type.
+  dnsRecordType: DnsRecordType;
+  dnsExpectedValue: string;
   // Write-only: never sent back down, blank means "keep the stored secret".
   credential: string;
   sloTarget: string;
@@ -128,12 +134,21 @@ const MONITOR_TYPE_LABELS: Record<MonitorType, string> = {
 
 /** What the URL/host field means per type — it is not always a URL. */
 const TARGET_LABELS: Partial<Record<MonitorType, { label: string; placeholder: string; hint?: string }>> = {
+  DNS: {
+    label: 'Hostname',
+    placeholder: 'example.com',
+    hint: 'The name that is looked up. For SRV, write it out in full: _sip._tcp.example.com.',
+  },
   Postgres: {
     label: 'Connection string',
     placeholder: 'postgresql://user@db.internal:5432/appdb',
     hint: 'The check connects and runs SELECT 1. Leave the password out and put it below.',
   },
-  MySQL: { label: 'Host', placeholder: 'db.internal', hint: 'Reads the server handshake — no credentials needed.' },
+  MySQL: {
+    label: 'Host or connection string',
+    placeholder: 'db.internal',
+    hint: 'A host reads the server handshake — no credentials needed. Give mysql://user@db.internal:3306/appdb instead and the check logs in and runs SELECT 1.',
+  },
   Redis: { label: 'Host', placeholder: 'cache.internal', hint: 'Sends PING and expects PONG.' },
   SMTP: { label: 'Host', placeholder: 'mail.example.com', hint: 'Greeting, EHLO, NOOP, QUIT. Port 465 uses implicit TLS.' },
   IMAP: { label: 'Host', placeholder: 'mail.example.com', hint: 'Reads the * OK greeting. Port 993 uses implicit TLS.' },
@@ -151,7 +166,7 @@ const TARGET_LABELS: Partial<Record<MonitorType, { label: string; placeholder: s
 };
 
 /** Types whose check takes an optional password (stored write-only). */
-const CREDENTIAL_TYPES: MonitorType[] = ['Postgres', 'Redis'];
+const CREDENTIAL_TYPES: MonitorType[] = ['Postgres', 'MySQL', 'Redis'];
 
 const MONITOR_INTERVAL_LABELS: Record<MonitorInterval, string> = {
   '15s': 'Every 15 sec',
@@ -187,6 +202,8 @@ function emptyForm(): MonitorFormState {
     keywordInverted: false,
     assertionType: 'Contains',
     jsonPath: '',
+    dnsRecordType: 'A',
+    dnsExpectedValue: '',
     credential: '',
     sloTarget: '',
     httpTimeoutSeconds: '',
@@ -213,6 +230,8 @@ function monitorToForm(monitor: Monitor): MonitorFormState {
     keywordInverted: monitor.keywordInverted,
     assertionType: monitor.assertionType,
     jsonPath: monitor.jsonPath ?? '',
+    dnsRecordType: monitor.dnsRecordType,
+    dnsExpectedValue: monitor.dnsExpectedValue ?? '',
     credential: '',
     sloTarget: monitor.sloTarget === null ? '' : String(monitor.sloTarget),
     httpTimeoutSeconds: monitor.httpTimeoutSeconds === null ? '' : String(monitor.httpTimeoutSeconds),
@@ -396,6 +415,8 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
       keywordInverted: form.keywordInverted,
       assertionType: form.assertionType,
       jsonPath: form.jsonPath,
+      dnsRecordType: form.dnsRecordType,
+      dnsExpectedValue: form.dnsExpectedValue,
       credential: form.credential,
       sloTarget: form.sloTarget ? Number(form.sloTarget) : null,
       httpTimeoutSeconds: form.httpTimeoutSeconds ? Number(form.httpTimeoutSeconds) : null,
@@ -523,6 +544,45 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                 </div>
               )}
 
+              {form.type === 'DNS' && (
+                <div className="grid sm:grid-cols-2 gap-4">
+                  <div className="grid gap-2">
+                    <Label htmlFor="dnsRecordType">Record type</Label>
+                    <Select
+                      value={form.dnsRecordType}
+                      onValueChange={(val) => {
+                        if (val) setForm({ ...form, dnsRecordType: val as DnsRecordType });
+                      }}
+                    >
+                      <SelectTrigger id="dnsRecordType">
+                        <SelectValue>{(val: DnsRecordType) => val}</SelectValue>
+                      </SelectTrigger>
+                      <SelectContent>
+                        {dnsRecordTypeEnum.options.map((record) => (
+                          <SelectItem key={record} value={record}>
+                            {record}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="grid gap-2">
+                    <Label htmlFor="dnsExpectedValue">Expected value</Label>
+                    <Input
+                      id="dnsExpectedValue"
+                      placeholder="Ex. mail.protection.outlook.com"
+                      value={form.dnsExpectedValue}
+                      onChange={(e) => setForm({ ...form, dnsExpectedValue: e.target.value })}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Optional, matched case-insensitively anywhere in the answer. Blank checks only that the
+                      record still resolves.
+                    </p>
+                  </div>
+                </div>
+              )}
+
               <div className="grid sm:grid-cols-2 gap-4">
                 <div className="grid gap-2">
                   <Label htmlFor="type">Type</Label>
@@ -536,10 +596,11 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                       <SelectValue>{(val: MonitorType) => MONITOR_TYPE_LABELS[val]}</SelectValue>
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="HTTP">HTTP(s)</SelectItem>
-                      <SelectItem value="Ping">Ping</SelectItem>
-                      <SelectItem value="Port">Port</SelectItem>
-                      <SelectItem value="DNS">DNS</SelectItem>
+                      {monitorTypeEnum.options.map((type) => (
+                        <SelectItem key={type} value={type}>
+                          {MONITOR_TYPE_LABELS[type]}
+                        </SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
                 </div>

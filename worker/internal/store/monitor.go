@@ -41,7 +41,7 @@ func (s *Store) listMonitors(ctx context.Context, where string, args ...any) ([]
 	rows, err := s.db.QueryContext(ctx, s.q(`
 		SELECT id, name, url, type, status, interval, port, enabled, "lastCheckedAt", "escalationPolicyId",
 		       method, "requestHeaders", "requestBody", "followRedirects", "expectedStatusCodes", keyword, "keywordInverted",
-		       "assertionType", "jsonPath", credential, "flappingSince",
+		       "assertionType", "jsonPath", "dnsRecordType", "dnsExpectedValue", credential, "flappingSince",
 		       "httpTimeoutSeconds", "failedAttemptsThreshold", "latencyThresholdMs"
 		FROM monitor
 		`+where), args...)
@@ -57,13 +57,13 @@ func (s *Store) listMonitors(ctx context.Context, where string, args ...any) ([]
 		var enabled, followRedirects, keywordInverted db.Bool
 		var lastCheckedAt, flappingSince sql.NullTime
 		var escalationPolicyID, requestHeaders, requestBody, expectedStatusCodes, keyword sql.NullString
-		var jsonPath, credential sql.NullString
+		var jsonPath, dnsExpectedValue, credential sql.NullString
 		var httpTimeout, failedAttempts, latencyThreshold sql.NullInt64
 
 		if err := rows.Scan(
 			&m.ID, &m.Name, &m.URL, &m.Type, &m.Status, &m.Interval, &port, &enabled, &lastCheckedAt, &escalationPolicyID,
 			&m.Method, &requestHeaders, &requestBody, &followRedirects, &expectedStatusCodes, &keyword, &keywordInverted,
-			&m.AssertionType, &jsonPath, &credential, &flappingSince,
+			&m.AssertionType, &jsonPath, &m.DNSRecordType, &dnsExpectedValue, &credential, &flappingSince,
 			&httpTimeout, &failedAttempts, &latencyThreshold,
 		); err != nil {
 			return nil, fmt.Errorf("store: scan monitor: %w", err)
@@ -92,6 +92,7 @@ func (s *Store) listMonitors(ctx context.Context, where string, args ...any) ([]
 		m.ExpectedStatusCodes = nullString(expectedStatusCodes)
 		m.Keyword = nullString(keyword)
 		m.JSONPath = nullString(jsonPath)
+		m.DNSExpectedValue = nullString(dnsExpectedValue)
 		m.Credential = nullString(credential)
 		m.HTTPTimeoutSeconds = nullInt(httpTimeout)
 		m.FailedAttemptsThreshold = nullInt(failedAttempts)

@@ -11,10 +11,12 @@ import { ASSERTION_TYPES, type AssertionType, validateJsonPath, validateRegex } 
 import {
   DEFAULT_PORTS,
   PROBE_TYPES,
+  dnsRecordTypeEnum,
   monitorIntervalEnum,
   monitorMethodEnum,
   monitorStatusEnum,
   monitorTypeEnum,
+  type DnsRecordType,
   type MonitorInterval,
   type MonitorMethod,
   type MonitorStatus,
@@ -24,12 +26,13 @@ import {
 export {
   DEFAULT_PORTS,
   PROBE_TYPES,
+  dnsRecordTypeEnum,
   monitorIntervalEnum,
   monitorMethodEnum,
   monitorStatusEnum,
   monitorTypeEnum,
 };
-export type { MonitorInterval, MonitorMethod, MonitorStatus, MonitorType };
+export type { DnsRecordType, MonitorInterval, MonitorMethod, MonitorStatus, MonitorType };
 
 /** Monitor changes: Admin and Member (see src/lib/permissions.ts). */
 const writeMonitors = capabilityProcedure('monitors:write');
@@ -56,6 +59,7 @@ export type Monitor = Omit<
   | 'interval'
   | 'method'
   | 'assertionType'
+  | 'dnsRecordType'
   | 'createdAt'
   | 'updatedAt'
   | 'lastCheckedAt'
@@ -72,6 +76,7 @@ export type Monitor = Omit<
   interval: MonitorInterval;
   method: MonitorMethod;
   assertionType: AssertionType;
+  dnsRecordType: DnsRecordType;
   createdAt: string;
   updatedAt: string;
   lastCheckedAt: string | null;
@@ -93,6 +98,7 @@ function serializeMonitor(monitor: RawMonitor): Monitor {
     interval: monitor.interval as MonitorInterval,
     method: monitor.method as MonitorMethod,
     assertionType: monitor.assertionType as AssertionType,
+    dnsRecordType: monitor.dnsRecordType as DnsRecordType,
     createdAt: monitor.createdAt.toISOString(),
     updatedAt: monitor.updatedAt.toISOString(),
     lastCheckedAt: monitor.lastCheckedAt ? monitor.lastCheckedAt.toISOString() : null,
@@ -199,6 +205,12 @@ const monitorBaseInput = z.object({
   assertionType: assertionTypeEnum.optional().default('Contains'),
   jsonPath: optionalText(200),
 
+  // DNS-only options, blanked out below for every other type. 'A' is the
+  // default because that is what a DNS monitor checked before record
+  // selection existed.
+  dnsRecordType: dnsRecordTypeEnum.optional().default('A'),
+  dnsExpectedValue: optionalText(500),
+
   // Probe-family options. Like the HTTP block above they're accepted for
   // every type and blanked out server-side for the types that ignore them.
   // Blank means "keep the stored one" on update, so the form never has to
@@ -254,6 +266,20 @@ const withPortRequiredForPortType = <T extends typeof monitorBaseInput>(schema: 
       message: 'Give a full connection string, e.g. postgresql://user:pass@host:5432/dbname',
       path: ['url'],
     })
+    // A MySQL monitor takes either a bare host (handshake check) or a
+    // mysql:// DSN (authenticated SELECT 1) — a postgresql:// string pasted
+    // into the wrong monitor type would otherwise fail every check with a
+    // driver error nobody reads.
+    .refine(
+      (data) =>
+        data.type !== 'MySQL' ||
+        !/^[a-z][a-z0-9+.-]*:\/\//i.test(data.url.trim()) ||
+        /^mysql:\/\//i.test(data.url.trim()),
+      {
+        message: 'Give a host (db.internal) or a mysql://user@host:3306/dbname connection string',
+        path: ['url'],
+      },
+    )
     // RDAP is looked up per registrable domain, not per URL or host.
     .refine((data) => data.type !== 'Domain' || /^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(data.url.trim()), {
       message: 'Give a bare domain name, e.g. example.com',
@@ -299,6 +325,18 @@ function httpOptionsFor(input: z.infer<typeof monitorBaseInput>) {
     // a stale path behind that silently reactivates on a mode switch.
     jsonPath: input.assertionType === 'JsonPath' ? input.jsonPath : null,
   };
+}
+
+/**
+ * The DNS-only columns, reduced to their defaults for every other type — the
+ * same reasoning as httpOptionsFor: a monitor switched away from DNS must not
+ * keep an expected MX value that silently reactivates if it is switched back.
+ */
+function dnsOptionsFor(input: z.infer<typeof monitorBaseInput>) {
+  if (input.type !== 'DNS') {
+    return { dnsRecordType: 'A', dnsExpectedValue: null };
+  }
+  return { dnsRecordType: input.dnsRecordType, dnsExpectedValue: input.dnsExpectedValue };
 }
 
 /**
@@ -380,6 +418,7 @@ export const monitorRouter = createTRPCRouter({
             sloTarget: input.sloTarget ?? null,
             ...overridesFor(input),
             ...httpOptionsFor(input),
+            ...dnsOptionsFor(input),
           },
         });
 
@@ -423,6 +462,7 @@ export const monitorRouter = createTRPCRouter({
             sloTarget: input.sloTarget ?? null,
             ...overridesFor(input),
             ...httpOptionsFor(input),
+            ...dnsOptionsFor(input),
             // A monitor that stops being HTTP can't have a meaningful
             // certificate expiry any more, and one that stops being a Domain
             // monitor can't have a meaningful registry expiry.
