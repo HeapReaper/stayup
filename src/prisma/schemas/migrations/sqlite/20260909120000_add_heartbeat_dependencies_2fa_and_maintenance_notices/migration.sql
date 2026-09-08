@@ -49,4 +49,10 @@ CREATE INDEX "two_factor_secret_idx" ON "two_factor"("secret");
 
 -- 5 — OIDC. better-auth stores the provider's id token here; RP-initiated
 -- logout needs it, and without the column every OIDC sign-in fails on write.
-ALTER TABLE "account" ADD COLUMN "idToken" TEXT;
+--
+-- "Account", not "account": every other table in this schema is snake_cased by
+-- an @@map, but `Account` is the one model that has none, so its table keeps
+-- Prisma's default PascalCase. SQLite compares table names case-insensitively
+-- and would accept either; Postgres would not, and the first version of this
+-- pair failed there on exactly this line.
+ALTER TABLE "Account" ADD COLUMN "idToken" TEXT;

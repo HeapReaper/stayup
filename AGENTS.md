@@ -310,6 +310,30 @@ since those files are the deploy documentation for people who never clone the re
 `DB_PROVIDER=postgresql npx prisma migrate dev` → update `worker/internal/store/` if a worker reads
 or writes the column.
 
+**Hand-written migration SQL must be applied against a real Postgres before it ships.** SQLite is
+the forgiving provider — it compares table names case-insensitively, among other things — so a
+migration that runs clean against `dev.db` proves nothing about the other half of the pair. The
+table that catches people is `Account`: every model in this schema is snake_cased by an `@@map`
+except that one, so its table is `"Account"`, and `ALTER TABLE "account"` fails on Postgres with
+`relation "account" does not exist` while succeeding on SQLite.
+
+Throwaway Postgres, apply everything from empty, then ask whether the result matches the schema:
+
+```bash
+docker run -d --name migtest -e POSTGRES_USER=stayup -e POSTGRES_PASSWORD=testpw \
+  -e POSTGRES_DB=stayup -p 55432:5432 postgres:16-alpine
+export PG="postgresql://stayup:testpw@localhost:55432/stayup?schema=public"
+
+DB_PROVIDER=postgresql DB_URL=$PG npx prisma migrate deploy
+DB_PROVIDER=postgresql DB_URL=$PG npx prisma migrate diff \
+  --from-config-datasource --to-schema src/prisma/schemas/postgresql.prisma --exit-code
+docker rm -f migtest
+```
+
+`migrate diff` answering "No difference detected" is the actual check — it compares the migrated
+database against the schema, so a migration that applied cleanly but built the wrong thing still
+fails it. Run the same pair against `dev.db` with `DB_PROVIDER=sqlite` for the other provider.
+
 ## 7. Known rough edges (don't mistake these for bugs to "fix" silently)
 
 - `worker/internal/incidents` hardcodes `http://localhost:3000/dashboard/incidents` as the incident
