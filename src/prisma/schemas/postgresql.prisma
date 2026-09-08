@@ -779,6 +779,12 @@ model WorkerHeartbeat {
   // Build stamp of the image the worker is running (worker/internal/version).
   version         String?
   revision        String?
+  // This process's resident set size at the last tick — the figure `docker
+  // stats` shows (worker/internal/procstat). Kibibytes rather than bytes
+  // because Postgres INTEGER tops out at 2.1 GB, and BigInt has no JSON
+  // representation for a tRPC response that configures no superjson
+  // transformer. Null for a heartbeat written by an older worker image.
+  memoryKb        Int?
 
   @@map("worker_heartbeat")
 }

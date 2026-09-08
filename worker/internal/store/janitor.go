@@ -340,6 +340,10 @@ type Heartbeat struct {
 	LastSeenAt      time.Time
 	Version         string
 	Revision        string
+	// Resident set size in KiB (internal/procstat). Zero means "couldn't
+	// tell", and is written as NULL so the dashboard can leave it blank
+	// instead of claiming this worker uses no memory.
+	MemoryKB int
 }
 
 // RecordHeartbeat upserts this worker's liveness row. It has no TypeScript
@@ -356,31 +360,39 @@ func (s *Store) RecordHeartbeat(ctx context.Context, in Heartbeat) error {
 	switch s.db.Provider {
 	case db.Postgres:
 		query = `
-			INSERT INTO worker_heartbeat (id, "lastSeenAt", "intervalSeconds", "startedAt", version, revision)
-			VALUES (?, ?, ?, ?, ?, ?)
+			INSERT INTO worker_heartbeat (id, "lastSeenAt", "intervalSeconds", "startedAt", version, revision, "memoryKb")
+			VALUES (?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (id) DO UPDATE SET
 				"lastSeenAt" = EXCLUDED."lastSeenAt",
 				"intervalSeconds" = EXCLUDED."intervalSeconds",
 				"startedAt" = EXCLUDED."startedAt",
 				version = EXCLUDED.version,
-				revision = EXCLUDED.revision
+				revision = EXCLUDED.revision,
+				"memoryKb" = EXCLUDED."memoryKb"
 		`
 	default:
 		// Every column is written on every tick, so a full row replace is
 		// equivalent to the upsert above.
 		query = `
-			INSERT OR REPLACE INTO worker_heartbeat (id, "lastSeenAt", "intervalSeconds", "startedAt", version, revision)
-			VALUES (?, ?, ?, ?, ?, ?)
+			INSERT OR REPLACE INTO worker_heartbeat (id, "lastSeenAt", "intervalSeconds", "startedAt", version, revision, "memoryKb")
+			VALUES (?, ?, ?, ?, ?, ?, ?)
 		`
 	}
 
 	_, err := s.db.ExecContext(ctx, s.q(query),
 		in.Worker, s.db.TimeArg(in.LastSeenAt), in.IntervalSeconds, s.db.TimeArg(in.StartedAt),
-		nullIfEmpty(in.Version), nullIfEmpty(in.Revision))
+		nullIfEmpty(in.Version), nullIfEmpty(in.Revision), nullIfZero(in.MemoryKB))
 	if err != nil {
 		return fmt.Errorf("store: record heartbeat: %w", err)
 	}
 	return nil
+}
+
+func nullIfZero(value int) any {
+	if value == 0 {
+		return nil
+	}
+	return value
 }
 
 func nullIfEmpty(value string) any {

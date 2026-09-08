@@ -23,6 +23,7 @@ import (
 	"stayup/worker/internal/delivery"
 	"stayup/worker/internal/incidents"
 	"stayup/worker/internal/logging"
+	"stayup/worker/internal/procstat"
 	"stayup/worker/internal/settings"
 	"stayup/worker/internal/store"
 	"stayup/worker/internal/version"
@@ -87,6 +88,7 @@ func tick(ctx context.Context, s *store.Store, startedAt time.Time) {
 		LastSeenAt:      time.Now(),
 		Version:         version.Current(),
 		Revision:        version.Revision(),
+		MemoryKB:        procstat.ResidentKB(),
 	}); err != nil {
 		logging.Error("[integrations-worker] Failed to record heartbeat", err)
 	}

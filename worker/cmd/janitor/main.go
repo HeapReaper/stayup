@@ -29,6 +29,7 @@ import (
 
 	"stayup/worker/internal/db"
 	"stayup/worker/internal/logging"
+	"stayup/worker/internal/procstat"
 	"stayup/worker/internal/settings"
 	"stayup/worker/internal/store"
 	"stayup/worker/internal/updates"
@@ -165,6 +166,7 @@ func heartbeat(ctx context.Context, s *store.Store, startedAt time.Time) {
 		LastSeenAt:      time.Now(),
 		Version:         version.Current(),
 		Revision:        version.Revision(),
+		MemoryKB:        procstat.ResidentKB(),
 	}); err != nil {
 		logging.Error("[janitor] Failed to record heartbeat", err)
 	}

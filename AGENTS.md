@@ -223,7 +223,8 @@ builds — so run them yourself before pushing.
    `docker-compose.coolify.yaml`, plus its name to `EXPECTED_WORKERS` in `src/lib/workers.ts` —
    a worker missing from that list is invisible on the dashboard rather than reported as down.
    (A worker built on `internal/runner` gets its heartbeat for free; one with its own loop must
-   call `store.RecordHeartbeat` per tick, like `cmd/integrations` and `cmd/janitor` do.)
+   call `store.RecordHeartbeat` per tick, like `cmd/integrations` and `cmd/janitor` do — including
+   `MemoryKB: procstat.ResidentKB()`, or its tile on the dashboard shows no memory figure.)
 4. Extend `monitorTypeEnum` in `src/trpc/routers/monitor.ts` and `normalizeUrl`, plus the monitor form.
    Per-type request options belong behind `httpOptionsFor()`-style blanking so they can't leak
    between types.

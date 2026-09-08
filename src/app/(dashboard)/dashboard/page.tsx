@@ -82,6 +82,14 @@ function formatDuration(seconds: number | null): string {
   return `${Math.floor(seconds / 86_400)}d ${Math.floor((seconds % 86_400) / 3600)}h`;
 }
 
+/** "48 MB" / "1.2 GB". Takes KiB, the unit both the heartbeat and the web process report in. */
+function formatMemory(kb: number | null): string | null {
+  if (kb === null || kb <= 0) return null;
+  if (kb < 1024) return `${kb} KB`;
+  const mb = kb / 1024;
+  return mb < 1024 ? `${Math.round(mb)} MB` : `${(mb / 1024).toFixed(1)} GB`;
+}
+
 function daysUntil(iso: string): number {
   return Math.ceil((new Date(iso).getTime() - Date.now()) / 86_400_000);
 }
@@ -132,12 +140,13 @@ export default async function DashboardPage() {
   const session = await auth.api.getSession({ headers: await headers() });
   if (!session) redirect('/login');
 
-  const [monitors, incidents, windows, settings, workers] = await Promise.all([
+  const [monitors, incidents, windows, settings, workers, appProcess] = await Promise.all([
     caller.monitor.getAll(),
     caller.incident.getAll(),
     caller.maintenance.getAll(),
     caller.settings.get(),
     caller.worker.getAll(),
+    caller.worker.getAppProcess(),
   ]);
 
   const now = Date.now();
@@ -516,12 +525,39 @@ export default async function DashboardPage() {
               <ServerCog className="h-5 w-5 text-muted-foreground" /> Workers
             </CardTitle>
             <CardDescription>
-              Each binary upserts a heartbeat on every tick. A worker that stops reporting leaves
-              its monitors frozen at their last known status — which is why this is here and not
-              inferred from the monitors themselves.
+              Each binary upserts a heartbeat on every tick, carrying the memory it was using at
+              that moment. A worker that stops reporting leaves its monitors frozen at their last
+              known status — which is why this is here and not inferred from the monitors
+              themselves. Memory is each process&apos;s resident set, the figure{' '}
+              <span className="font-mono">docker stats</span> shows; behind more than one app
+              replica, the web figure is whichever one served this page.
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {/*
+              Not a worker and not from the heartbeat table: this is the process
+              rendering the page, reporting on itself (see getAppProcessStatus).
+              It leads the list because it's the one every other number here had
+              to travel through.
+            */}
+            <div className="rounded-md border border-dashed p-3">
+              <div className="flex items-center justify-between gap-2">
+                <span className="truncate font-mono text-sm font-medium">web</span>
+                <Badge
+                  variant="outline"
+                  className="border-emerald-500/20 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                >
+                  this process
+                </Badge>
+              </div>
+              <p className="mt-1 truncate text-xs text-muted-foreground">{appProcess.label}</p>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                up {formatDuration(appProcess.uptimeSeconds)} ·{' '}
+                <span className="font-medium text-foreground">{formatMemory(appProcess.memoryKb)}</span>
+                {formatMemory(appProcess.heapUsedKb) && ` · ${formatMemory(appProcess.heapUsedKb)} JS heap`}
+              </p>
+            </div>
+
             {workers.map((worker) => (
               <div
                 key={worker.id}
@@ -550,9 +586,23 @@ export default async function DashboardPage() {
                 </div>
                 <p className="mt-1 truncate text-xs text-muted-foreground">{worker.label}</p>
                 <p className="mt-0.5 text-xs text-muted-foreground">
-                  {worker.state === 'missing'
-                    ? 'No heartbeat yet — is this service running?'
-                    : `Last tick ${relativeTime(worker.lastSeenAt)} · up ${formatDuration(worker.uptimeSeconds)}`}
+                  {worker.state === 'missing' ? (
+                    'No heartbeat yet — is this service running?'
+                  ) : (
+                    <>
+                      Last tick {relativeTime(worker.lastSeenAt)} · up{' '}
+                      {formatDuration(worker.uptimeSeconds)}
+                      {/* Blank on a worker running an image from before it reported this. */}
+                      {formatMemory(worker.memoryKb) && (
+                        <>
+                          {' · '}
+                          <span className="font-medium text-foreground">
+                            {formatMemory(worker.memoryKb)}
+                          </span>
+                        </>
+                      )}
+                    </>
+                  )}
                 </p>
               </div>
             ))}

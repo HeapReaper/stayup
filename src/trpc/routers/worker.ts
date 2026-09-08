@@ -1,7 +1,7 @@
 import { createTRPCRouter, protectedProcedure } from '../init';
-import { getWorkerStatuses } from '@/lib/workers';
+import { getAppProcessStatus, getWorkerStatuses } from '@/lib/workers';
 
-export type { WorkerStatusView } from '@/lib/workers';
+export type { AppProcessView, WorkerStatusView } from '@/lib/workers';
 
 /**
  * Worker liveness for the dashboard. Read-only by nature — the heartbeat rows
@@ -9,4 +9,11 @@ export type { WorkerStatusView } from '@/lib/workers';
  */
 export const workerRouter = createTRPCRouter({
   getAll: protectedProcedure.query(async () => getWorkerStatuses()),
+
+  /**
+   * The web process's own memory and uptime. Separate from getAll because it
+   * comes from this process rather than from a heartbeat row — see
+   * getAppProcessStatus().
+   */
+  getAppProcess: protectedProcedure.query(() => getAppProcessStatus()),
 });

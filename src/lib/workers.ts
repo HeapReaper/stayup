@@ -11,6 +11,7 @@
 // *which* worker — which is the thing you actually need when a container is
 // crash-looping.
 import { prisma } from '@/lib/prisma';
+import { currentRevision, currentVersion, UNKNOWN_BUILD } from '@/lib/version';
 
 /**
  * Every binary the Dockerfile builds and both compose files run. Listed here
@@ -54,6 +55,12 @@ export type WorkerStatusView = {
   state: 'running' | 'stale' | 'missing';
   /** How long this process has been up, in seconds — a value that keeps resetting means it's crash-looping. */
   uptimeSeconds: number | null;
+  /**
+   * Resident set size at the last tick, in kibibytes — what `docker stats`
+   * reports for that container. Null when the worker has never been seen, or
+   * when it runs an image from before workers reported this.
+   */
+  memoryKb: number | null;
 };
 
 /**
@@ -92,6 +99,7 @@ export async function getWorkerStatuses(): Promise<WorkerStatusView[]> {
         revision: null,
         state: 'missing' as const,
         uptimeSeconds: null,
+        memoryKb: null,
       };
     }
 
@@ -105,6 +113,46 @@ export async function getWorkerStatuses(): Promise<WorkerStatusView[]> {
       revision: row.revision,
       state: isStale(row.lastSeenAt, row.intervalSeconds, now) ? ('stale' as const) : ('running' as const),
       uptimeSeconds: Math.max(Math.floor((row.lastSeenAt.getTime() - row.startedAt.getTime()) / 1000), 0),
+      memoryKb: row.memoryKb,
     };
   });
+}
+
+/**
+ * The Next.js process's own footprint.
+ *
+ * Deliberately *not* part of getWorkerStatuses(): that function's result is
+ * counted by /api/health, and folding a process that is running by definition
+ * (it is the one answering) into those counts would inflate them. It also has
+ * no heartbeat row and needs none — the process being measured is the process
+ * answering the query, so the number is read live rather than out of the
+ * database.
+ *
+ * Caveat worth knowing when reading the dashboard: behind more than one app
+ * replica this is whichever replica served the request, not a total.
+ */
+export type AppProcessView = {
+  label: string;
+  /** Resident set size right now, in kibibytes — the same measure the workers report. */
+  memoryKb: number;
+  /** Of that RSS, what V8's JS heap is using. The rest is the runtime, buffers and native memory. */
+  heapUsedKb: number;
+  uptimeSeconds: number;
+  version: string | null;
+  revision: string | null;
+};
+
+export function getAppProcessStatus(): AppProcessView {
+  const memory = process.memoryUsage();
+  const version = currentVersion();
+  const revision = currentRevision();
+
+  return {
+    label: 'Dashboard, API & status pages',
+    memoryKb: Math.round(memory.rss / 1024),
+    heapUsedKb: Math.round(memory.heapUsed / 1024),
+    uptimeSeconds: Math.floor(process.uptime()),
+    version: version === UNKNOWN_BUILD ? null : version,
+    revision: revision === UNKNOWN_BUILD ? null : revision,
+  };
 }
