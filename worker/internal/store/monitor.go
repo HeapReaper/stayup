@@ -42,7 +42,7 @@ func (s *Store) listMonitors(ctx context.Context, where string, args ...any) ([]
 		SELECT id, name, url, type, status, interval, port, enabled, "lastCheckedAt", "escalationPolicyId",
 		       method, "requestHeaders", "requestBody", "followRedirects", "expectedStatusCodes", keyword, "keywordInverted",
 		       "assertionType", "jsonPath", "dnsRecordType", "dnsExpectedValue", credential, "flappingSince",
-		       "httpTimeoutSeconds", "failedAttemptsThreshold", "latencyThresholdMs"
+		       "httpTimeoutSeconds", "failedAttemptsThreshold", "latencyThresholdMs", "autoIncidents"
 		FROM monitor
 		`+where), args...)
 	if err != nil {
@@ -54,7 +54,7 @@ func (s *Store) listMonitors(ctx context.Context, where string, args ...any) ([]
 	for rows.Next() {
 		var m Monitor
 		var port sql.NullInt64
-		var enabled, followRedirects, keywordInverted db.Bool
+		var enabled, followRedirects, keywordInverted, autoIncidents db.Bool
 		var lastCheckedAt, flappingSince sql.NullTime
 		var escalationPolicyID, requestHeaders, requestBody, expectedStatusCodes, keyword sql.NullString
 		var jsonPath, dnsExpectedValue, credential sql.NullString
@@ -64,7 +64,7 @@ func (s *Store) listMonitors(ctx context.Context, where string, args ...any) ([]
 			&m.ID, &m.Name, &m.URL, &m.Type, &m.Status, &m.Interval, &port, &enabled, &lastCheckedAt, &escalationPolicyID,
 			&m.Method, &requestHeaders, &requestBody, &followRedirects, &expectedStatusCodes, &keyword, &keywordInverted,
 			&m.AssertionType, &jsonPath, &m.DNSRecordType, &dnsExpectedValue, &credential, &flappingSince,
-			&httpTimeout, &failedAttempts, &latencyThreshold,
+			&httpTimeout, &failedAttempts, &latencyThreshold, &autoIncidents,
 		); err != nil {
 			return nil, fmt.Errorf("store: scan monitor: %w", err)
 		}
@@ -85,6 +85,7 @@ func (s *Store) listMonitors(ctx context.Context, where string, args ...any) ([]
 			m.EscalationPolicyID = &id
 		}
 		m.Enabled = bool(enabled)
+		m.AutoIncidents = bool(autoIncidents)
 		m.FollowRedirects = bool(followRedirects)
 		m.KeywordInverted = bool(keywordInverted)
 		m.RequestHeaders = nullString(requestHeaders)

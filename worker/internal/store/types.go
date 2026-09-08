@@ -55,6 +55,14 @@ type Monitor struct {
 	HTTPTimeoutSeconds      *int
 	FailedAttemptsThreshold *int
 	LatencyThresholdMs      *int
+
+	// AutoIncidents is false for a monitor that must never open an incident
+	// of its own accord: it is still checked, its status still moves and its
+	// history is still written, but runner skips the incident — which is also
+	// what stops it alerting, since every notification hangs off an incident.
+	// Recovery is deliberately not gated on it (see runner.checkOne), so an
+	// incident opened before the switch was flipped still closes out.
+	AutoIncidents bool
 }
 
 // IsDue reports whether this monitor's check interval has elapsed since its

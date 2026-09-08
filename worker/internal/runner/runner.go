@@ -221,6 +221,15 @@ func noteFlappingStarted(ctx context.Context, s *store.Store, workerLabel string
 	logging.Warn(fmt.Sprintf("[%s] %s is flapping: %d transitions in the last %d minutes",
 		workerLabel, monitor.Name, flap.Transitions, cfg.FlappingWindowMinutes))
 
+	// Same gate as syncIncidentForResult: a monitor with automatic incidents
+	// switched off gets no standing flapping incident either. The flapping
+	// state itself is still recorded (flapping.Sync ran before this), so the
+	// dashboard still shows it — it just doesn't page anyone.
+	if !monitor.AutoIncidents {
+		logging.Info(fmt.Sprintf("[%s] %s has automatic incidents switched off — not opening a flapping incident", workerLabel, monitor.Name))
+		return
+	}
+
 	underMaintenance, err := maintenance.IsMonitorUnderMaintenance(ctx, s, monitor.ID)
 	if err != nil {
 		logging.Error(fmt.Sprintf("[%s] Failed to open flapping incident for %q", workerLabel, monitor.Name), err)
@@ -296,6 +305,16 @@ func syncIncidentForResult(ctx context.Context, s *store.Store, workerLabel stri
 	ref := incidents.MonitorRef{ID: monitor.ID, Name: monitor.Name}
 
 	if status == "Down" || status == "Degraded" {
+		// Monitor.autoIncidents off: watch it, chart it, don't page for it.
+		// Checked before the maintenance window because it is the cheaper
+		// question (a column already in hand, versus a query) and answers the
+		// same way regardless of what maintenance says.
+		if !monitor.AutoIncidents {
+			logging.Info(fmt.Sprintf("[%s] %s is %s but has automatic incidents switched off — no incident, no alert",
+				workerLabel, monitor.Name, strings.ToLower(status)))
+			return
+		}
+
 		underMaintenance, err := maintenance.IsMonitorUnderMaintenance(ctx, s, monitor.ID)
 		if err != nil {
 			logging.Error(fmt.Sprintf("[%s] Failed to sync incident for %q", workerLabel, monitor.Name), err)
@@ -321,6 +340,11 @@ func syncIncidentForResult(ctx context.Context, s *store.Store, workerLabel stri
 		return
 	}
 
+	// Recovery is deliberately *not* gated on autoIncidents: the switch only
+	// suppresses opening incidents. An incident that is already open — opened
+	// before the switch was flipped, or by a human — must still be moved to
+	// "Monitoring" when the monitor comes back, or flipping the switch
+	// mid-outage would strand it as permanently investigating.
 	incident, err := incidents.NoteMonitorRecovered(ctx, s, ref)
 	if err != nil {
 		logging.Error(fmt.Sprintf("[%s] Failed to sync incident for %q", workerLabel, monitor.Name), err)

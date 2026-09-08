@@ -20,9 +20,9 @@ configuration lives in the single-row `AppSettings` table, which the workers re-
 | `src/app/(dashboard)/dashboard/*` | Authenticated pages. Always a pair: `page.tsx` (server component, fetches via the tRPC `caller`) + `*-client.tsx` (`'use client'`, mutations/interactivity). |
 | `src/app/(status)/status/[slug]` | The public status page. |
 | `src/app/(public)`, `login/`, `register/`, `logout/` | Auth surfaces. `/` redirects to `/login`. |
-| `src/app/api/` | better-auth handler, tRPC handler, and `public/status-domain` (custom-domain → slug lookup for the proxy). |
+| `src/app/api/` | better-auth handler, tRPC handler, `reports/pdf` (server-rendered SLA report — a file response, which is why it isn't a tRPC procedure), and `public/status-domain` (custom-domain → slug lookup for the proxy). |
 | `src/trpc/routers/` | The entire API. `init.ts` defines `baseProcedure` / `protectedProcedure`; `_app.ts` is the registry. |
-| `src/lib/` | Server-side domain logic and clients (prisma, auth, settings, incidents, integration-delivery, maintenance, email, discord, push, audit, logging, redis, updates, version, permissions, workers). |
+| `src/lib/` | Server-side domain logic and clients (prisma, auth, settings, incidents, integration-delivery, maintenance, email, discord, push, audit, logging, redis, updates, version, permissions, workers, sla-report, report-pdf). `report-range.ts` and `monitor-types.ts` are the Prisma-free half: client components import them, so they must stay free of server imports. |
 | `src/lib/permissions.ts` | The whole authorization model: roles → capabilities. Enforced only by `capabilityProcedure` in `src/trpc/init.ts`. |
 | `src/app/api/health/` | Unauthenticated container healthcheck. 200/503 on the *database*; worker liveness is reported but never fails it. |
 | `src/prisma/schemas/` | `sqlite.prisma` and `postgresql.prisma` **plus one migration folder each**. |

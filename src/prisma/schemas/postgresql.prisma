@@ -174,6 +174,17 @@ model Monitor {
   httpTimeoutSeconds      Int?
   failedAttemptsThreshold Int?
   latencyThresholdMs      Int?
+  // Whether a failing check on this monitor may open an incident by itself.
+  // Off means it is still watched but never pages: checks are written, the
+  // status still flips to Down/Degraded, the graphs and status pages still
+  // show the outage — the workers just skip the incident, and since every
+  // alert hangs off an incident, no notification goes out either. That is the
+  // knob for a dependency you want on the dashboard but not on your phone.
+  // Only *creation* is suppressed: an already-open incident (or one a human
+  // opened) is still moved to "Monitoring" when the monitor recovers, so
+  // flipping this off mid-outage can't strand one. See syncIncidentForResult
+  // in worker/internal/runner/runner.go.
+  autoIncidents           Boolean @default(true)
   // NotAfter of the TLS certificate seen on the most recent check, or null if
   // that check wasn't HTTPS. Written by the https worker; read by the
   // "Certificate Expiry Warning" logic and shown in the monitors list.

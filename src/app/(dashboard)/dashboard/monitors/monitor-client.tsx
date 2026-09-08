@@ -107,6 +107,8 @@ type MonitorFormState = {
   // Write-only: never sent back down, blank means "keep the stored secret".
   credential: string;
   sloTarget: string;
+  // Off makes this a watch-only monitor: checked and charted, never alerted on.
+  autoIncidents: boolean;
   // Per-monitor overrides. Blank = "use the instance default from Settings".
   httpTimeoutSeconds: string;
   failedAttemptsThreshold: string;
@@ -206,6 +208,7 @@ function emptyForm(): MonitorFormState {
     dnsExpectedValue: '',
     credential: '',
     sloTarget: '',
+    autoIncidents: true,
     httpTimeoutSeconds: '',
     failedAttemptsThreshold: '',
     latencyThresholdMs: '',
@@ -234,6 +237,7 @@ function monitorToForm(monitor: Monitor): MonitorFormState {
     dnsExpectedValue: monitor.dnsExpectedValue ?? '',
     credential: '',
     sloTarget: monitor.sloTarget === null ? '' : String(monitor.sloTarget),
+    autoIncidents: monitor.autoIncidents,
     httpTimeoutSeconds: monitor.httpTimeoutSeconds === null ? '' : String(monitor.httpTimeoutSeconds),
     failedAttemptsThreshold:
       monitor.failedAttemptsThreshold === null ? '' : String(monitor.failedAttemptsThreshold),
@@ -419,6 +423,7 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
       dnsExpectedValue: form.dnsExpectedValue,
       credential: form.credential,
       sloTarget: form.sloTarget ? Number(form.sloTarget) : null,
+      autoIncidents: form.autoIncidents,
       httpTimeoutSeconds: form.httpTimeoutSeconds ? Number(form.httpTimeoutSeconds) : null,
       failedAttemptsThreshold: form.failedAttemptsThreshold ? Number(form.failedAttemptsThreshold) : null,
       latencyThresholdMs: form.latencyThresholdMs ? Number(form.latencyThresholdMs) : null,
@@ -890,8 +895,28 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                   onChange={(e) => setForm({ ...form, sloTarget: e.target.value })}
                 />
                 <p className="text-xs text-muted-foreground">
-                  Used on the Reports page to work out whether the month met its target, and how much
-                  of the error budget it spent. It does not affect alerting.
+                  Used on the Reports page to work out whether the reported period met its target,
+                  and how much of the error budget it spent. It does not affect alerting.
+                </p>
+              </div>
+
+              <div className="space-y-2 rounded-lg border p-3">
+                <div className="flex items-center justify-between gap-4">
+                  <Label htmlFor="autoIncidents" className="text-sm font-normal">
+                    Open incidents automatically
+                  </Label>
+                  <Switch
+                    id="autoIncidents"
+                    checked={form.autoIncidents}
+                    onCheckedChange={(checked) => setForm({ ...form, autoIncidents: checked })}
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Off makes this a watch-only monitor: it is still checked, and its outages still
+                  show up in its history, on the dashboard and on status pages — but no incident is
+                  opened for it, so nothing alerts or escalates either. For the noisy dependency you
+                  want on a graph and not on your phone. An incident that is already open still
+                  moves to Monitoring when the monitor recovers.
                 </p>
               </div>
 

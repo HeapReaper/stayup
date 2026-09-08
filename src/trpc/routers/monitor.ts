@@ -226,6 +226,13 @@ const monitorBaseInput = z.object({
   httpTimeoutSeconds: z.number().int().min(1).max(300).nullable().optional(),
   failedAttemptsThreshold: z.number().int().min(1).max(20).nullable().optional(),
   latencyThresholdMs: z.number().int().min(50).max(60_000).nullable().optional(),
+
+  // Whether a failing check may open an incident for this monitor on its own.
+  // Defaults to true — the behaviour every monitor had before the switch
+  // existed — and false makes it a watch-only monitor: still checked, still
+  // charted, but no incident and therefore no alert (see
+  // syncIncidentForResult in worker/internal/runner/runner.go).
+  autoIncidents: z.boolean().optional().default(true),
 });
 
 /** True when this monitor actually asserts something about the response body. */
@@ -413,6 +420,7 @@ export const monitorRouter = createTRPCRouter({
             interval: input.interval,
             port: portFor(input),
             escalationPolicyId: input.escalationPolicyId || null,
+            autoIncidents: input.autoIncidents,
             createdById: ctx.session.user.id,
             credential: credentialFor(input, null),
             sloTarget: input.sloTarget ?? null,
@@ -458,6 +466,7 @@ export const monitorRouter = createTRPCRouter({
             interval: input.interval,
             port: portFor(input),
             escalationPolicyId: input.escalationPolicyId || null,
+            autoIncidents: input.autoIncidents,
             credential: credentialFor(input, existing.credential),
             sloTarget: input.sloTarget ?? null,
             ...overridesFor(input),
