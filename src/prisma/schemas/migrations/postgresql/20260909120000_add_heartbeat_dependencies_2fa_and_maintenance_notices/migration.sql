@@ -19,10 +19,15 @@
 -- snake_cased by an @@map, but `Account` is the one model that has none, so
 -- its table keeps Prisma's default PascalCase. SQLite treats table names
 -- case-insensitively and applied it happily; Postgres does not, and the
--- migration failed on the very last statement. Postgres runs a multi-statement
--- script in an implicit transaction, so that failure rolled the whole thing
--- back — but a migration that has already been half-attempted against a
--- production database is not the place to rely on that being true.
+-- migration failed on the very last statement.
+--
+-- The guards are not belt-and-braces: Prisma does *not* wrap a migration file
+-- in a transaction, so that failure left the first four sections applied and
+-- only the fifth missing. Verified by reproducing it — after the failure the
+-- monitor columns and the two_factor table were present while
+-- Account."idToken" was not, with applied_steps_count still at 0. Any database
+-- that hit the broken version is therefore half-migrated, and this file has to
+-- be safe to run against one.
 
 -- 1 + 2 — heartbeat and dependency columns.
 ALTER TABLE "monitor" ADD COLUMN IF NOT EXISTS "heartbeatToken" TEXT;
