@@ -34,7 +34,22 @@ const (
 )
 
 func processDelivery(ctx context.Context, s *store.Store, cfg settings.Settings, d store.IntegrationDelivery) {
-	result := delivery.Deliver(d.Integration, d.Event, d.Message, cfg)
+	// The incident's own row is the source of the embed's detail fields
+	// (monitor, impact, response time). Read per delivery rather than joined
+	// into ListPendingDeliveries so there's exactly one query producing that
+	// context, shared with internal/incidents. A failure here costs the
+	// fields, not the alert.
+	var alert *store.IncidentAlert
+	if d.IncidentID != nil {
+		found, err := s.AlertForIncident(ctx, *d.IncidentID)
+		if err != nil {
+			logging.Error(fmt.Sprintf("[integrations-worker] Could not load incident detail for delivery %s", d.ID), err)
+		} else {
+			alert = found
+		}
+	}
+
+	result := delivery.Deliver(d.Integration, d.Event, d.Message, delivery.AlertContextFrom(alert), cfg)
 	attempts := d.Attempts + 1
 	label := fmt.Sprintf("%q via %s (%s)", d.Event, d.Integration.Name, d.Integration.Type)
 

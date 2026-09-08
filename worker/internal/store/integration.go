@@ -86,7 +86,7 @@ func (s *Store) CreateEscalationDelivery(ctx context.Context, integrationID, inc
 // include: { integration: true } })` call in the integrations worker's tick().
 func (s *Store) ListPendingDeliveries(ctx context.Context, limit int) ([]IntegrationDelivery, error) {
 	rows, err := s.db.QueryContext(ctx, s.q(`
-		SELECT d.id, d."integrationId", d.event, d.message, d.attempts,
+		SELECT d.id, d."integrationId", d."incidentId", d.event, d.message, d.attempts,
 		       integ.id, integ.name, integ.type, integ.target, integ.secret, integ.enabled
 		FROM integration_delivery d
 		JOIN integration integ ON integ.id = d."integrationId"
@@ -102,11 +102,14 @@ func (s *Store) ListPendingDeliveries(ctx context.Context, limit int) ([]Integra
 	var out []IntegrationDelivery
 	for rows.Next() {
 		var d IntegrationDelivery
-		var secret sql.NullString
+		var incidentID, secret sql.NullString
 		var enabled db.Bool
-		if err := rows.Scan(&d.ID, &d.IntegrationID, &d.Event, &d.Message, &d.Attempts,
+		if err := rows.Scan(&d.ID, &d.IntegrationID, &incidentID, &d.Event, &d.Message, &d.Attempts,
 			&d.Integration.ID, &d.Integration.Name, &d.Integration.Type, &d.Integration.Target, &secret, &enabled); err != nil {
 			return nil, fmt.Errorf("store: scan pending delivery: %w", err)
+		}
+		if incidentID.Valid {
+			d.IncidentID = &incidentID.String
 		}
 		if secret.Valid {
 			d.Integration.Secret = &secret.String

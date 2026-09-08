@@ -159,10 +159,13 @@ docker build --check --target runner .
 docker build --check --target worker-runner .
 ```
 
-The only tests are `worker/internal/checkers/http_test.go` (the HTTP checker's request options,
-status-code spec and certificate-expiry logic) and `worker/internal/updates/updates_test.go` (the
-version comparison — the table there mirrors the one in `src/lib/updates.ts`, so a change to either
-side's rules belongs in both). Everything else is verified by running the affected
+The tests are `worker/internal/checkers/http_test.go` (the HTTP checker's request options,
+status-code spec and certificate-expiry logic), `worker/internal/updates/updates_test.go` (the
+version comparison) and `worker/internal/notify/discord_test.go` (the alert embed's fields, colours
+and truncation). The last two exist because their logic is duplicated in TypeScript: the tables
+there mirror `src/lib/updates.ts` and `src/lib/discord.ts`, so a change to either side's rules
+belongs in both. Both pairs were checked by generating the same inputs through each
+implementation and diffing the output — worth redoing after touching either side. Everything else is verified by running the affected
 worker and/or the dashboard and watching `logs/` and the Logs page. `ping` needs `CAP_NET_RAW` (i.e.
 `sudo`) outside Docker.
 
@@ -208,6 +211,12 @@ builds — so run them yourself before pushing.
 1. Add it to `integrationTypeEnum` (`src/trpc/routers/integration.ts`) and the form UI.
 2. Implement it in **both** `src/lib/integration-delivery.ts` (used by "Send test") and
    `worker/internal/delivery/delivery.go` (used by real, queued alerts).
+3. Both take an alert *context* (the incident/monitor the alert is about) alongside subject and
+   message. Only Discord renders it today — as embed fields, see `src/lib/discord.ts` /
+   `worker/internal/notify/discord.go`. A channel that ignores it behaves exactly as before, so
+   adding one is not blocked on supporting it; a channel that uses it must read the same fields on
+   both sides. On the Go side that context comes from one query, `store.AlertForIncident`, so the
+   queued path and the status-page-subscriber path can't drift apart.
 
 **A new dashboard page**
 1. `src/app/(dashboard)/dashboard/<name>/{page.tsx,<name>-client.tsx}`.
@@ -227,7 +236,11 @@ or writes the column.
 ## 7. Known rough edges (don't mistake these for bugs to "fix" silently)
 
 - `worker/internal/incidents` hardcodes `http://localhost:3000/dashboard/incidents` as the incident
-  link in worker-sent e-mails.
+  link in worker-sent e-mails. The Discord embed's link does *not*: it reads `BETTER_AUTH_URL` and
+  only falls back to that same default (`dashboardBaseUrl()` in `src/lib/discord.ts`,
+  `dashboardBaseURL()` in `worker/internal/notify/discord.go`). So on a configured instance the
+  embed links to the real origin while the e-mails still point at localhost — fixing the e-mail
+  side means porting that helper to `src/emails/*` and `worker/internal/notify/email_templates.go`.
 - `src/lib/redis.ts` and `REDIS_URL` are a leftover from the NextTemp template — Redis is running in
   compose but nothing reads or writes it.
 - `src/trpc/routers/hello.ts` is template scaffolding.

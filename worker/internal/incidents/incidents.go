@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"time"
 
+	"stayup/worker/internal/delivery"
 	"stayup/worker/internal/logging"
 	"stayup/worker/internal/notify"
 	"stayup/worker/internal/store"
@@ -169,7 +170,7 @@ func createIncident(ctx context.Context, s *store.Store, in createIncidentInput)
 
 	logging.Info(fmt.Sprintf("[Incidents] Created %q (%s) %s", incident.Title, in.Impact, incident.ID))
 
-	if err := notifyStatusPageSubscribers(ctx, s, incident.MonitorID, incident.Title, incident.Status, in.Message); err != nil {
+	if err := notifyStatusPageSubscribers(ctx, s, incident.ID, incident.MonitorID, incident.Title, incident.Status, in.Message); err != nil {
 		logging.Error("[Incidents] Failed to notify status page subscribers", err)
 	}
 	if err := notifyOrEscalate(ctx, s, incident, incident.Status, in.Message); err != nil {
@@ -197,7 +198,7 @@ func postIncidentUpdate(ctx context.Context, s *store.Store, in store.UpdateInci
 	if err := notifySubscribers(ctx, s, incident.ID, incident.Title, monitorName, in.Status, in.Message); err != nil {
 		logging.Error("[Incidents] Failed to notify incident subscribers", err)
 	}
-	if err := notifyStatusPageSubscribers(ctx, s, incident.MonitorID, incident.Title, in.Status, in.Message); err != nil {
+	if err := notifyStatusPageSubscribers(ctx, s, incident.ID, incident.MonitorID, incident.Title, in.Status, in.Message); err != nil {
 		logging.Error("[Incidents] Failed to notify status page subscribers", err)
 	}
 	if err := notifyOrEscalate(ctx, s, incident, in.Status, in.Message); err != nil {
@@ -240,7 +241,7 @@ func notifySubscribers(ctx context.Context, s *store.Store, incidentID, incident
 // notifyStatusPageSubscribers mirrors notifyStatusPageSubscribers(): emails
 // or Discord-webhooks everyone subscribed to a published status page that
 // includes this monitor.
-func notifyStatusPageSubscribers(ctx context.Context, s *store.Store, monitorID *string, incidentTitle, status, message string) error {
+func notifyStatusPageSubscribers(ctx context.Context, s *store.Store, incidentID string, monitorID *string, incidentTitle, status, message string) error {
 	if monitorID == nil {
 		return nil
 	}
@@ -253,11 +254,24 @@ func notifyStatusPageSubscribers(ctx context.Context, s *store.Store, monitorID 
 		return nil
 	}
 
+	// Detail for the Discord embeds below, from the same query the queued
+	// deliveries use (cmd/integrations) so both render identical fields. Only
+	// worth the round trip if someone actually subscribed over Discord, and a
+	// failure costs the fields rather than the notification.
+	var alertCtx notify.AlertContext
+	if hasDiscordSubscriber(subs) {
+		alert, err := s.AlertForIncident(ctx, incidentID)
+		if err != nil {
+			logging.Error(fmt.Sprintf("[Incidents] Could not load incident detail for %s", incidentID), err)
+		}
+		alertCtx = delivery.AlertContextFrom(alert)
+	}
+
 	sent := 0
 	for _, sub := range subs {
 		var err error
 		if sub.Channel == "Discord" {
-			err = notify.SendDiscordWebhook(sub.Target, fmt.Sprintf("**[%s] %s**\n%s", status, incidentTitle, message))
+			err = notify.SendDiscordAlert(sub.Target, fmt.Sprintf("[%s] %s", status, incidentTitle), message, alertCtx)
 		} else {
 			err = notify.SendEmail(sub.Target, fmt.Sprintf("[%s] %s", status, incidentTitle), notify.IncidentUpdateTemplate(), notify.IncidentUpdateData{
 				IncidentTitle: incidentTitle,
@@ -274,6 +288,15 @@ func notifyStatusPageSubscribers(ctx context.Context, s *store.Store, monitorID 
 	}
 	logging.Info(fmt.Sprintf("[Incidents] Notified %d/%d status page subscriber(s) for monitor %s", sent, len(subs), *monitorID))
 	return nil
+}
+
+func hasDiscordSubscriber(subs []store.StatusPageSubscriber) bool {
+	for _, sub := range subs {
+		if sub.Channel == "Discord" {
+			return true
+		}
+	}
+	return false
 }
 
 // notifyOrEscalate mirrors notifyOrEscalate(): the normal broadcast to every

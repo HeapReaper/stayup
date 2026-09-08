@@ -296,3 +296,53 @@ func (s *Store) RecordEscalation(ctx context.Context, incidentID string, now tim
 	}
 	return nil
 }
+
+// AlertForIncident loads one incident joined with its monitor — the detail a
+// Discord embed renders beside the message (internal/notify's
+// BuildAlertEmbed). Returns (nil, nil) when the incident is gone, which is
+// normal: a queued delivery outlives the incident it describes if someone
+// deletes it, and an alert without fields is still worth sending.
+//
+// The monitor is a LEFT JOIN because an incident created by hand from the
+// dashboard needn't be attached to one.
+func (s *Store) AlertForIncident(ctx context.Context, incidentID string) (*IncidentAlert, error) {
+	var alert IncidentAlert
+	var monitorName, monitorType, monitorURL, monitorStatus sql.NullString
+	var responseTime sql.NullInt64
+	var uptime sql.NullFloat64
+	var lastCheckedAt sql.NullTime
+
+	err := s.queryRow(ctx, `
+		SELECT i.id, i.status, i.impact,
+		       m.name, m.type, m.url, m.status, m."responseTime", m.uptime, m."lastCheckedAt"
+		FROM incident i
+		LEFT JOIN monitor m ON m.id = i."monitorId"
+		WHERE i.id = ?
+	`, incidentID).Scan(&alert.IncidentID, &alert.IncidentStatus, &alert.IncidentImpact,
+		&monitorName, &monitorType, &monitorURL, &monitorStatus, &responseTime, &uptime, &lastCheckedAt)
+
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: alert for incident: %w", err)
+	}
+
+	alert.MonitorName = nullString(monitorName)
+	alert.MonitorType = nullString(monitorType)
+	alert.MonitorURL = nullString(monitorURL)
+	alert.MonitorStatus = nullString(monitorStatus)
+	if responseTime.Valid {
+		ms := int(responseTime.Int64)
+		alert.ResponseTimeMs = &ms
+	}
+	if uptime.Valid {
+		pct := uptime.Float64
+		alert.Uptime = &pct
+	}
+	if lastCheckedAt.Valid {
+		t := lastCheckedAt.Time
+		alert.LastCheckedAt = &t
+	}
+	return &alert, nil
+}

@@ -6,7 +6,7 @@
 // this file implements, so a test send and a real alert go out the same way.
 import { logger } from '@/lib/logging';
 import { sendEmail } from '@/lib/email';
-import { sendDiscordWebhook } from '@/lib/discord';
+import { sendDiscordAlert, type AlertContext } from '@/lib/discord';
 import { sendPushNotification, InvalidPushSubscriptionError } from '@/lib/push';
 import IntegrationAlertEmail from '@/emails/integration-alert-email';
 
@@ -24,16 +24,25 @@ export interface DeliveryResult {
   error?: string;
 }
 
-/** Sends one notification through an Integration. Never throws — always resolves with a result. */
+/**
+ * Sends one notification through an Integration. Never throws — always
+ * resolves with a result.
+ *
+ * `context` is what the alert is *about* (which monitor, which incident, how
+ * slow). Only Discord renders it today, as embed fields; every other channel
+ * still gets subject + message, so an empty context changes nothing for them.
+ * It is optional because a "Send test" click has no incident to describe.
+ */
 export async function deliverToIntegration(
   integration: IntegrationRef,
   subject: string,
   message: string,
+  context: AlertContext = {},
 ): Promise<DeliveryResult> {
   try {
     switch (integration.type) {
       case 'Discord': {
-        const result = await sendDiscordWebhook(integration.target, `**${subject}**\n${message}`);
+        const result = await sendDiscordAlert(integration.target, subject, message, context);
         return result.success ? { success: true } : { success: false, error: 'Discord webhook request failed' };
       }
 

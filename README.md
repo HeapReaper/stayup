@@ -28,7 +28,7 @@ no agent to install on the monitored machines — one `docker compose up` and yo
 | **Incidents** | Opened automatically when a monitor goes Down/Degraded and moved to *Monitoring* on recovery, or created by hand. Impact levels, a status timeline (Investigating → Identified → Monitoring → Resolved), acknowledgement, and post-mortems that can be drafted privately and published later. |
 | **Status pages** | Multiple pages, each with its own slug, branding (logo, primary colour, theme), ordered monitor groups, history window (7/30/90 days) and incident feed. Optionally reachable on a custom domain, or locked to signed-in users only. |
 | **Maintenance windows** | Scheduled windows that suppress incident creation for the covered monitors while active, and show as "Scheduled maintenance" on the status page instead of an outage. |
-| **Integrations** | Discord, Slack, generic Webhook, Telegram, E-mail, PagerDuty (Events API v2) and browser Web Push. Queued, retried up to 5×, with a delivery log. |
+| **Integrations** | Discord, Slack, generic Webhook, Telegram, E-mail, PagerDuty (Events API v2) and browser Web Push. Queued, retried up to 5×, with a delivery log. Discord alerts arrive as embeds — monitor, incident status, impact, endpoint, response time, 30-day uptime and a relative "last check", colour-coded by severity. |
 | **Escalation policies** | Ordered paging chains ("page on-call, then the team channel after 10 minutes if nobody acknowledged") attachable per monitor. |
 | **Subscribers** | E-mail/Discord subscribers per status page, and e-mail subscribers per incident, notified on every incident update. |
 | **Logs & audit trail** | Every check, every notification delivery and every significant dashboard action, with actor and IP. |

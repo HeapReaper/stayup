@@ -26,13 +26,47 @@ type Result struct {
 func ok() Result             { return Result{Success: true} }
 func fail(err string) Result { return Result{Success: false, Error: err} }
 
+// AlertContextFrom turns a joined incident row into what a Discord embed
+// shows — the Go half of buildAlertContext() in src/lib/incidents.ts. A nil
+// row (a test send, or an incident that has since been deleted) yields an
+// empty context, and BuildAlertEmbed then simply omits every field.
+func AlertContextFrom(alert *store.IncidentAlert) notify.AlertContext {
+	if alert == nil {
+		return notify.AlertContext{}
+	}
+
+	ctx := notify.AlertContext{
+		MonitorName:    alert.MonitorName,
+		MonitorType:    alert.MonitorType,
+		MonitorURL:     alert.MonitorURL,
+		MonitorStatus:  alert.MonitorStatus,
+		ResponseTimeMs: alert.ResponseTimeMs,
+		Uptime:         alert.Uptime,
+		LastCheckedAt:  alert.LastCheckedAt,
+	}
+	if alert.IncidentID != "" {
+		ctx.IncidentID = &alert.IncidentID
+	}
+	if alert.IncidentStatus != "" {
+		ctx.IncidentStatus = &alert.IncidentStatus
+	}
+	if alert.IncidentImpact != "" {
+		ctx.IncidentImpact = &alert.IncidentImpact
+	}
+	return ctx
+}
+
 // Deliver sends one notification through an Integration — mirrors
 // deliverToIntegration(). Never returns an error itself; failures come back
 // as Result.Error so callers always get a result to persist.
-func Deliver(integration store.Integration, subject, message string, cfg settings.Settings) Result {
+//
+// `alert` is what the notification is *about* (which monitor, which incident,
+// how slow). Only Discord renders it, as embed fields; every other channel
+// still gets subject + message, so an empty context changes nothing for them.
+func Deliver(integration store.Integration, subject, message string, alert notify.AlertContext, cfg settings.Settings) Result {
 	switch integration.Type {
 	case "Discord":
-		if err := notify.SendDiscordWebhook(integration.Target, fmt.Sprintf("**%s**\n%s", subject, message)); err != nil {
+		if err := notify.SendDiscordAlert(integration.Target, subject, message, alert); err != nil {
 			return fail("Discord webhook request failed")
 		}
 		return ok()

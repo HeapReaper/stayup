@@ -116,10 +116,32 @@ type Integration struct {
 type IntegrationDelivery struct {
 	ID            string
 	IntegrationID string
-	Event         string
-	Message       string
-	Attempts      int
-	Integration   Integration
+	// IncidentID is nil for a delivery that isn't about an incident (a
+	// "Send test"). When set, AlertForIncident turns it into the detail a
+	// Discord embed shows next to the message.
+	IncidentID  *string
+	Event       string
+	Message     string
+	Attempts    int
+	Integration Integration
+}
+
+// IncidentAlert is one incident joined with its monitor — the row behind a
+// Discord embed's fields (internal/notify's BuildAlertEmbed). It exists so
+// that both the queued-delivery path and the status-page subscriber path read
+// the *same* columns, the way both TypeScript call sites share
+// buildAlertContext() in src/lib/incidents.ts.
+type IncidentAlert struct {
+	IncidentID     string
+	IncidentStatus string
+	IncidentImpact string
+	MonitorName    *string
+	MonitorType    *string
+	MonitorURL     *string
+	MonitorStatus  *string
+	ResponseTimeMs *int
+	Uptime         *float64
+	LastCheckedAt  *time.Time
 }
 
 // StatusPageSubscriber mirrors `status_page_subscriber` rows reachable from a

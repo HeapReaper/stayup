@@ -17,7 +17,7 @@ import { z } from 'zod';
 import { prisma } from '@/lib/prisma';
 import { logger } from '@/lib/logging';
 import { sendEmail } from '@/lib/email';
-import { sendDiscordWebhook } from '@/lib/discord';
+import { sendDiscordAlert, type AlertContext } from '@/lib/discord';
 import IncidentUpdateEmail from '@/emails/incident-update-email';
 
 export const incidentImpactEnum = z.enum(['Critical', 'Major', 'Minor']);
@@ -40,6 +40,46 @@ interface IncidentNotifyContext {
   id: string;
   title: string;
   monitor: { name: string } | null;
+}
+
+// The monitor fields an alert can describe. Every one is optional: callers
+// pass whole Prisma rows (which satisfy this structurally), but a monitor
+// that has never been checked has no response time, and a Ping monitor has
+// nothing URL-shaped to show.
+interface AlertMonitorRef {
+  name: string;
+  type?: string;
+  url?: string;
+  status?: string;
+  responseTime?: number | null;
+  uptime?: number;
+  lastCheckedAt?: Date | null;
+}
+
+/**
+ * Assembles what a Discord embed shows next to the message — see
+ * buildAlertEmbed() in src/lib/discord.ts. Kept here (rather than inside the
+ * delivery code) because this is the only layer that still holds the incident
+ * and monitor rows; by the time a queued delivery is picked up, the Go worker
+ * re-reads the same fields with a join.
+ */
+function buildAlertContext(
+  incident: { id: string; impact?: string },
+  status: string,
+  monitor: AlertMonitorRef | null,
+): AlertContext {
+  return {
+    incidentId: incident.id,
+    incidentStatus: status,
+    incidentImpact: incident.impact ?? null,
+    monitorName: monitor?.name ?? null,
+    monitorType: monitor?.type ?? null,
+    monitorUrl: monitor?.url ?? null,
+    monitorStatus: monitor?.status ?? null,
+    responseTimeMs: monitor?.responseTime ?? null,
+    uptime: monitor?.uptime ?? null,
+    lastCheckedAt: monitor?.lastCheckedAt ?? null,
+  };
 }
 
 interface CreateIncidentInput {
@@ -73,7 +113,13 @@ export async function createIncident(input: CreateIncidentInput) {
   logger.info(`[Incidents] Created "${incident.title}" (${incident.impact}) ${incident.id}`);
 
   await Promise.all([
-    notifyStatusPageSubscribers(incident.monitorId, incident.title, incident.status, input.message),
+    notifyStatusPageSubscribers(
+      incident.monitorId,
+      incident.title,
+      incident.status,
+      input.message,
+      buildAlertContext(incident, incident.status, incident.monitor),
+    ),
     notifyOrEscalate(incident, incident.status, input.message),
   ]);
 
@@ -109,7 +155,13 @@ export async function postIncidentUpdate(input: PostUpdateInput) {
 
   await Promise.all([
     notifySubscribers(incident, input.status, input.message),
-    notifyStatusPageSubscribers(incident.monitorId, incident.title, input.status, input.message),
+    notifyStatusPageSubscribers(
+      incident.monitorId,
+      incident.title,
+      input.status,
+      input.message,
+      buildAlertContext(incident, input.status, incident.monitor),
+    ),
     notifyOrEscalate(incident, input.status, input.message),
   ]);
 
@@ -165,6 +217,7 @@ async function notifyStatusPageSubscribers(
   incidentTitle: string,
   status: string,
   message: string,
+  context: AlertContext = {},
 ) {
   if (!monitorId) return;
 
@@ -183,7 +236,7 @@ async function notifyStatusPageSubscribers(
       seen.add(key);
 
       if (subscriber.channel === 'Discord') {
-        jobs.push(() => sendDiscordWebhook(subscriber.target, `**[${status}] ${incidentTitle}**\n${message}`));
+        jobs.push(() => sendDiscordAlert(subscriber.target, `[${status}] ${incidentTitle}`, message, context));
       } else {
         jobs.push(() =>
           sendEmail({
