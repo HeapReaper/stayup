@@ -2,11 +2,20 @@ import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
 import { APIError } from 'better-auth';
 import { Prisma, type User as PrismaUser } from '@prisma/client';
-import { createTRPCRouter, protectedProcedure } from '../init';
+import { createTRPCRouter, protectedProcedure, capabilityProcedure } from '../init';
 import { prisma } from '@/lib/prisma';
 import { auth } from '@/lib/auth';
 import { logAudit } from '@/lib/audit';
 import { registerSchema } from '@/validations/auth';
+import {
+  USER_ROLES,
+  capabilitiesFor,
+  normalizeRole,
+  type UserRole,
+} from '@/lib/permissions';
+
+/** Other people's accounts: Admin only. `updateProfile` below is deliberately not gated — it only ever edits the caller's own account. */
+const manageUsers = capabilityProcedure('users:manage');
 
 /**
  * Shared shape of an edit, whether it's someone editing their own profile
@@ -82,22 +91,29 @@ async function applyUserEdit(
   }
 }
 
-export const userRoleEnum = z.enum(['Admin', 'Member', 'Viewer']);
-export type UserRole = z.infer<typeof userRoleEnum>;
+// The role vocabulary lives in src/lib/permissions.ts, next to what each one
+// is allowed to do; this is only the Zod mirror of it for router inputs.
+export const userRoleEnum = z.enum(USER_ROLES);
+export type { UserRole };
 
 // Dates serialized to ISO strings here so the shape returned by the direct
 // server-side caller (RSC) matches what actually comes back over the
 // httpBatchLink (no superjson transformer is configured, so Dates go over
 // the wire as strings) — see src/trpc/routers/monitor.ts for the same pattern.
-export type User = Omit<PrismaUser, 'createdAt' | 'updatedAt' | 'banExpires'> & {
+export type User = Omit<PrismaUser, 'createdAt' | 'updatedAt' | 'banExpires' | 'role'> & {
   createdAt: string;
   updatedAt: string;
   banExpires: string | null;
+  // Always one of this app's three roles: normalizeRole() maps better-auth's
+  // own default ("user", written into the first /register account) onto Admin
+  // rather than leaking it into the UI as a fourth, meaningless role.
+  role: UserRole;
 };
 
 function serializeUser(user: PrismaUser): User {
   return {
     ...user,
+    role: normalizeRole(user.role),
     createdAt: user.createdAt.toISOString(),
     updatedAt: user.updatedAt.toISOString(),
     banExpires: user.banExpires ? user.banExpires.toISOString() : null,
@@ -113,7 +129,12 @@ export const userRouter = createTRPCRouter({
   me: protectedProcedure.query(async ({ ctx }) => {
     const user = await prisma.user.findUnique({ where: { id: ctx.session.user.id } });
     if (!user) throw new TRPCError({ code: 'NOT_FOUND', message: 'User not found' });
-    return serializeUser(user);
+
+    const serialized = serializeUser(user);
+    // Sent along so the UI can hide what this role can't do, instead of
+    // offering buttons that come back FORBIDDEN. The server still decides —
+    // this is presentation, not enforcement.
+    return { ...serialized, capabilities: [...capabilitiesFor(serialized.role)] };
   }),
 
   getAll: protectedProcedure.query(async () => {
@@ -146,7 +167,7 @@ export const userRouter = createTRPCRouter({
    * so `protectedProcedure` (any logged-in user) is the real authorization
    * boundary here, same as every other mutation in this app.
    */
-  create: protectedProcedure
+  create: manageUsers
     .input(registerSchema.extend({ role: userRoleEnum }))
     .mutation(async ({ input, ctx }) => {
       try {
@@ -208,7 +229,7 @@ export const userRouter = createTRPCRouter({
     }),
 
   /** Edits any user from the Users page. Same authorization as everything else here: signed in. */
-  update: protectedProcedure
+  update: manageUsers
     .input(userEditSchema.extend({ id: z.string(), role: userRoleEnum }))
     .mutation(async ({ input, ctx }) => {
       const user = await applyUserEdit(input.id, input);
@@ -224,7 +245,7 @@ export const userRouter = createTRPCRouter({
       return serializeUser(user);
     }),
 
-  delete: protectedProcedure
+  delete: manageUsers
     .input(z.object({ id: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const existing = await prisma.user.findUnique({ where: { id: input.id } });

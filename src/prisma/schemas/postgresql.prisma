@@ -521,6 +521,31 @@ model MonitorTag {
 // shown on the Settings page. Use src/lib/settings.ts's getSettings() rather
 // than querying this directly — it creates the row (with generated API/
 // webhook secrets) on first use.
+// One row per running worker binary, upserted on every tick. The one table
+// the Next.js app only ever *reads*: it exists so the dashboard and
+// /api/health can tell "no checks are arriving" apart from "this specific
+// worker isn't running" — indistinguishable otherwise, since a monitor with
+// no checks yet looks exactly like a monitor whose worker died.
+model WorkerHeartbeat {
+  // The binary's own name ("https" | "port" | "ping" | "dns" |
+  // "integrations" | "janitor"), so there is exactly one row per worker and a
+  // tick is an upsert rather than an ever-growing log.
+  id              String   @id
+  lastSeenAt      DateTime
+  // This worker's tick cadence, so a reader can judge staleness without
+  // hardcoding each binary's schedule — the check workers tick every 5
+  // seconds, the janitor every 15 minutes.
+  intervalSeconds Int
+  // When this process started. Keeps moving on every restart, which is what
+  // makes a crash-looping container visible instead of merely "alive".
+  startedAt       DateTime
+  // Build stamp of the image the worker is running (worker/internal/version).
+  version         String?
+  revision        String?
+
+  @@map("worker_heartbeat")
+}
+
 model AppSettings {
   id                       String   @id @default("singleton")
   organizationName         String   @default("My Organization")

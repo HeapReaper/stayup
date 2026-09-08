@@ -79,7 +79,9 @@ services:
       - "${PORT:-3000}:${PORT:-3000}"
     command: ["sh", "-c", "npx prisma migrate deploy && npm start"]
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:${PORT:-3000}/login >/dev/null 2>&1 || exit 1"]
+      # See docker-compose.yaml: /api/health goes green only once the schema
+      # is applied, which is what the workers wait for.
+      test: ["CMD-SHELL", "wget -qO- http://localhost:${PORT:-3000}/api/health >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10

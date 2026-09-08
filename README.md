@@ -33,7 +33,8 @@ no agent to install on the monitored machines — one `docker compose up` and yo
 | **Subscribers** | E-mail/Discord subscribers per status page, and e-mail subscribers per incident, notified on every incident update. |
 | **Logs & audit trail** | Every check, every notification delivery and every significant dashboard action, with actor and IP. |
 | **Retention** | Raw checks and finished notifications are pruned on a schedule you set, after each day is summarized into a rollup — so a 90-day status page keeps working on a 7-day raw retention. |
-| **Users** | Invite-only. The first account is created through `/register`; after that self-service sign-up is closed and further users are created from the dashboard. |
+| **Users & roles** | Invite-only. The first account is created through `/register` (and is an Admin); after that self-service sign-up is closed and further users are invited from the dashboard. **Admin** runs the instance (accounts, settings), **Member** runs the monitoring, **Viewer** reads. Everyone can edit their own profile. |
+| **Worker health** | Every worker writes a heartbeat each tick, so the dashboard names the worker that stopped instead of leaving you to infer it from monitors that went quiet. `/api/health` reports the same thing, and is what the containers' healthcheck uses. |
 | **Update checks** | Knows which build it is running and, once a day, whether a newer one has been published — shown on Settings → Updates and as a badge in the sidebar. Switchable off; nothing is ever installed automatically. |
 
 ## Stack
@@ -199,7 +200,11 @@ top of the file): `STAYUP_VERSION` (image tag, default `latest`), `STAYUP_REGIST
 `BETTER_AUTH_URL` (set this to your public origin in production), `LOG_LEVEL` and `SMTP_*`.
 
 Then open the app and register — that first account is the only one the public sign-up form ever
-creates.
+creates, and it is an Admin. Everyone after that is invited from Dashboard → Users with a role.
+
+The stack is healthy once `web`'s healthcheck goes green, which now means `/api/health` answered
+200 — i.e. the database is reachable *and* `prisma migrate deploy` has finished. The workers wait
+for exactly that before they start.
 
 Upgrading is a pull plus a recreate:
 
@@ -338,6 +343,10 @@ live by the workers on every tick. Changing these takes effect on the *next chec
 | `worker/cmd/dns` | `DNS` | Resolves the hostname's A record(s) |
 | `worker/cmd/integrations` | — | Delivers queued notifications and drives escalation |
 | `worker/cmd/janitor` | — | Rolls finished days up into daily summaries, prunes past retention, and runs the daily update check |
+
+Every one of them upserts a row into `worker_heartbeat` at the top of each tick, which is what
+**Dashboard → Overview** and `/api/health` read to tell "this worker isn't running" apart from
+"this monitor has no checks yet".
 
 ---
 

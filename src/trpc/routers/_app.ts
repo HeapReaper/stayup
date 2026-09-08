@@ -11,6 +11,7 @@ import { maintenanceRouter } from './maintenance';
 import { escalationPolicyRouter } from './escalationPolicy';
 import { tagRouter } from './tag';
 import { updateRouter } from './update';
+import { workerRouter } from './worker';
 import { helloRouter } from '@/trpc/routers/hello';
 
 export const appRouter = createTRPCRouter({
@@ -26,6 +27,7 @@ export const appRouter = createTRPCRouter({
   escalationPolicy: escalationPolicyRouter,
   tag: tagRouter,
   update: updateRouter,
+  worker: workerRouter,
 });
 
 // export type definition of API

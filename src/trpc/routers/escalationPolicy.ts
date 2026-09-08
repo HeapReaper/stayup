@@ -10,9 +10,12 @@
 import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
 import type { Prisma } from '@prisma/client';
-import { createTRPCRouter, protectedProcedure } from '../init';
+import { createTRPCRouter, protectedProcedure, capabilityProcedure } from '../init';
 import { prisma } from '@/lib/prisma';
 import { logAudit } from '@/lib/audit';
+
+/** Escalation policy changes: Admin and Member. */
+const writeEscalations = capabilityProcedure('escalations:write');
 
 export type EscalationPolicySummary = {
   id: string;
@@ -115,7 +118,7 @@ export const escalationPolicyRouter = createTRPCRouter({
       };
     }),
 
-  create: protectedProcedure.input(escalationPolicyInput).mutation(async ({ input, ctx }) => {
+  create: writeEscalations.input(escalationPolicyInput).mutation(async ({ input, ctx }) => {
     const policy = await prisma.$transaction(async (tx) => {
       const created = await tx.escalationPolicy.create({
         data: { name: input.name, createdById: ctx.session.user.id },
@@ -137,7 +140,7 @@ export const escalationPolicyRouter = createTRPCRouter({
     return { id: policy.id };
   }),
 
-  update: protectedProcedure
+  update: writeEscalations
     .input(escalationPolicyInput.extend({ id: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const existing = await prisma.escalationPolicy.findUnique({ where: { id: input.id } });
@@ -165,7 +168,7 @@ export const escalationPolicyRouter = createTRPCRouter({
       return { id: policy.id };
     }),
 
-  delete: protectedProcedure.input(z.object({ id: z.string() })).mutation(async ({ input, ctx }) => {
+  delete: writeEscalations.input(z.object({ id: z.string() })).mutation(async ({ input, ctx }) => {
     const existing = await prisma.escalationPolicy.findUnique({ where: { id: input.id } });
     if (!existing) throw new TRPCError({ code: 'NOT_FOUND', message: 'Escalation policy not found' });
 

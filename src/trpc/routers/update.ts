@@ -1,7 +1,10 @@
 import { z } from 'zod';
-import { createTRPCRouter, protectedProcedure } from '../init';
+import { createTRPCRouter, protectedProcedure, capabilityProcedure } from '../init';
 import { checkForUpdates, getUpdateStatus, setUpdateCheckEnabled } from '@/lib/updates';
 import { logAudit } from '@/lib/audit';
+
+/** Instance-wide settings: Admin only. */
+const writeSettings = capabilityProcedure('settings:write');
 
 export type { UpdateStatusView, UpdateChannel } from '@/lib/updates';
 
@@ -14,7 +17,7 @@ export type { UpdateStatusView, UpdateChannel } from '@/lib/updates';
 export const updateRouter = createTRPCRouter({
   status: protectedProcedure.query(async () => getUpdateStatus()),
 
-  check: protectedProcedure.mutation(async ({ ctx }) => {
+  check: writeSettings.mutation(async ({ ctx }) => {
     const status = await checkForUpdates();
 
     await logAudit({
@@ -28,7 +31,7 @@ export const updateRouter = createTRPCRouter({
     return status;
   }),
 
-  setAutoCheck: protectedProcedure
+  setAutoCheck: writeSettings
     .input(z.object({ enabled: z.boolean() }))
     .mutation(async ({ input, ctx }) => {
       const status = await setUpdateCheckEnabled(input.enabled);

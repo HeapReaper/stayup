@@ -1,8 +1,11 @@
 import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
-import { createTRPCRouter, protectedProcedure } from '../init';
+import { createTRPCRouter, protectedProcedure, capabilityProcedure } from '../init';
 import { prisma } from '@/lib/prisma';
 import { logAudit } from '@/lib/audit';
+
+/** Maintenance windows: Admin and Member. */
+const writeMaintenance = capabilityProcedure('maintenance:write');
 
 export const maintenanceStatusEnum = z.enum(['Scheduled', 'Active', 'Completed', 'Cancelled']);
 export type MaintenanceStatus = z.infer<typeof maintenanceStatusEnum>;
@@ -82,7 +85,7 @@ export const maintenanceRouter = createTRPCRouter({
     return windows.map(serialize);
   }),
 
-  create: protectedProcedure.input(maintenanceInput).mutation(async ({ input, ctx }) => {
+  create: writeMaintenance.input(maintenanceInput).mutation(async ({ input, ctx }) => {
     const window = await prisma.maintenanceWindow.create({
       data: {
         title: input.title,
@@ -106,7 +109,7 @@ export const maintenanceRouter = createTRPCRouter({
     return serialize(window);
   }),
 
-  update: protectedProcedure
+  update: writeMaintenance
     .input(maintenanceInput.extend({ id: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const existing = await prisma.maintenanceWindow.findUnique({ where: { id: input.id } });
@@ -139,7 +142,7 @@ export const maintenanceRouter = createTRPCRouter({
       return serialize(window);
     }),
 
-  cancel: protectedProcedure.input(z.object({ id: z.string() })).mutation(async ({ input, ctx }) => {
+  cancel: writeMaintenance.input(z.object({ id: z.string() })).mutation(async ({ input, ctx }) => {
     const existing = await prisma.maintenanceWindow.findUnique({ where: { id: input.id } });
     if (!existing) throw new TRPCError({ code: 'NOT_FOUND', message: 'Maintenance window not found' });
 
@@ -159,7 +162,7 @@ export const maintenanceRouter = createTRPCRouter({
     return { id: window.id };
   }),
 
-  delete: protectedProcedure.input(z.object({ id: z.string() })).mutation(async ({ input, ctx }) => {
+  delete: writeMaintenance.input(z.object({ id: z.string() })).mutation(async ({ input, ctx }) => {
     const existing = await prisma.maintenanceWindow.findUnique({ where: { id: input.id } });
     if (!existing) throw new TRPCError({ code: 'NOT_FOUND', message: 'Maintenance window not found' });
 

@@ -1,11 +1,14 @@
 import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
 import type { Prisma } from '@prisma/client';
-import { createTRPCRouter, protectedProcedure } from '../init';
+import { createTRPCRouter, protectedProcedure, capabilityProcedure } from '../init';
 import { prisma } from '@/lib/prisma';
 import { logAudit } from '@/lib/audit';
 import { deliverToIntegration } from '@/lib/integration-delivery';
 import { getSettings } from '@/lib/settings';
+
+/** Integration changes, including test sends: Admin and Member. */
+const writeIntegrations = capabilityProcedure('integrations:write');
 
 export const integrationTypeEnum = z.enum(['Discord', 'Slack', 'Webhook', 'Telegram', 'Email', 'PagerDuty', 'Push']);
 export type IntegrationType = z.infer<typeof integrationTypeEnum>;
@@ -60,7 +63,7 @@ export const integrationRouter = createTRPCRouter({
     return integrations.map(serialize);
   }),
 
-  create: protectedProcedure.input(integrationInput).mutation(async ({ input, ctx }) => {
+  create: writeIntegrations.input(integrationInput).mutation(async ({ input, ctx }) => {
     const integration = await prisma.integration.create({
       data: {
         name: input.name,
@@ -83,7 +86,7 @@ export const integrationRouter = createTRPCRouter({
     return { id: integration.id };
   }),
 
-  update: protectedProcedure.input(integrationInput.extend({ id: z.string() })).mutation(async ({ input, ctx }) => {
+  update: writeIntegrations.input(integrationInput.extend({ id: z.string() })).mutation(async ({ input, ctx }) => {
     const existing = await prisma.integration.findUnique({ where: { id: input.id } });
     if (!existing) throw new TRPCError({ code: 'NOT_FOUND', message: 'Integration not found' });
 
@@ -110,7 +113,7 @@ export const integrationRouter = createTRPCRouter({
     return { id: integration.id };
   }),
 
-  delete: protectedProcedure.input(z.object({ id: z.string() })).mutation(async ({ input, ctx }) => {
+  delete: writeIntegrations.input(z.object({ id: z.string() })).mutation(async ({ input, ctx }) => {
     const existing = await prisma.integration.findUnique({ where: { id: input.id } });
     if (!existing) throw new TRPCError({ code: 'NOT_FOUND', message: 'Integration not found' });
 
@@ -127,7 +130,7 @@ export const integrationRouter = createTRPCRouter({
     return { id: input.id };
   }),
 
-  toggleEnabled: protectedProcedure
+  toggleEnabled: writeIntegrations
     .input(z.object({ id: z.string(), enabled: z.boolean() }))
     .mutation(async ({ input }) => {
       const integration = await prisma.integration.update({
@@ -139,7 +142,7 @@ export const integrationRouter = createTRPCRouter({
     }),
 
   /** Delivers a test notification immediately (not queued) so the user gets instant feedback. */
-  testSend: protectedProcedure.input(z.object({ id: z.string() })).mutation(async ({ input }) => {
+  testSend: writeIntegrations.input(z.object({ id: z.string() })).mutation(async ({ input }) => {
     const integration = await prisma.integration.findUnique({ where: { id: input.id } });
     if (!integration) throw new TRPCError({ code: 'NOT_FOUND', message: 'Integration not found' });
 
@@ -181,7 +184,7 @@ export const integrationRouter = createTRPCRouter({
    * it completes the PushManager.subscribe() handshake — the subscription
    * itself (endpoint + keys) is what gets stored as the target.
    */
-  registerPush: protectedProcedure
+  registerPush: writeIntegrations
     .input(
       z.object({
         name: z.string().trim().min(1).max(120),

@@ -20,6 +20,8 @@ import {
 
 interface UpdatesCardProps {
   initialStatus: UpdateStatusView;
+  /** Checking and the daily-check toggle are Admin-only, like the rest of Settings. */
+  canWrite: boolean;
 }
 
 /**
@@ -39,7 +41,7 @@ function formatTimestamp(value: string | null): string {
   return new Date(value).toLocaleString();
 }
 
-export default function UpdatesCard({ initialStatus }: UpdatesCardProps) {
+export default function UpdatesCard({ initialStatus, canWrite }: UpdatesCardProps) {
   const trpc = useTRPC();
   const queryClient = useQueryClient();
 
@@ -153,7 +155,7 @@ export default function UpdatesCard({ initialStatus }: UpdatesCardProps) {
           </div>
           <Switch
             checked={status.updateCheckEnabled}
-            disabled={setAutoCheck.isPending}
+            disabled={!canWrite || setAutoCheck.isPending}
             onCheckedChange={(checked) => setAutoCheck.mutate({ enabled: checked })}
           />
         </div>
@@ -164,7 +166,7 @@ export default function UpdatesCard({ initialStatus }: UpdatesCardProps) {
           type="button"
           variant="outline"
           className="gap-2"
-          disabled={check.isPending}
+          disabled={!canWrite || check.isPending}
           onClick={() => check.mutate()}
         >
           <RefreshCw className={`h-4 w-4 ${check.isPending ? 'animate-spin' : ''}`} />

@@ -221,7 +221,7 @@ export default function Sidebar() {
                       <span className="flex min-w-0 flex-col items-start leading-tight">
                         <span className="w-full truncate text-xs font-medium">{me.data.name}</span>
                         <span className="w-full truncate text-[11px] font-normal text-muted-foreground">
-                          {me.data.email}
+                          {me.data.role} · {me.data.email}
                         </span>
                       </span>
                     )}
@@ -233,10 +233,12 @@ export default function Sidebar() {
                   <UserCog className="mr-2 h-4 w-4" />
                   Edit profile
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => router.push('/dashboard/users')}>
-                  <Users className="mr-2 h-4 w-4" />
-                  Manage users
-                </DropdownMenuItem>
+                {me.data.capabilities.includes('users:manage') && (
+                  <DropdownMenuItem onClick={() => router.push('/dashboard/users')}>
+                    <Users className="mr-2 h-4 w-4" />
+                    Manage users
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={() => router.push('/logout')}>
                   <LogOut className="mr-2 h-4 w-4" />

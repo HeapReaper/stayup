@@ -25,6 +25,7 @@ import (
 	"stayup/worker/internal/logging"
 	"stayup/worker/internal/settings"
 	"stayup/worker/internal/store"
+	"stayup/worker/internal/version"
 )
 
 const (
@@ -78,7 +79,18 @@ func processDelivery(ctx context.Context, s *store.Store, cfg settings.Settings,
 	logging.Warn(fmt.Sprintf("[integrations-worker] ⚠ Attempt %d/%d failed for %s: %s", attempts, maxAttempts, label, result.Error))
 }
 
-func tick(ctx context.Context, s *store.Store) {
+func tick(ctx context.Context, s *store.Store, startedAt time.Time) {
+	if err := s.RecordHeartbeat(ctx, store.Heartbeat{
+		Worker:          "integrations",
+		IntervalSeconds: int(tickInterval.Seconds()),
+		StartedAt:       startedAt,
+		LastSeenAt:      time.Now(),
+		Version:         version.Current(),
+		Revision:        version.Revision(),
+	}); err != nil {
+		logging.Error("[integrations-worker] Failed to record heartbeat", err)
+	}
+
 	if err := incidents.EscalateOverdueIncidents(ctx, s); err != nil {
 		logging.Error("[integrations-worker] Failed to escalate overdue incidents", err)
 	}
@@ -124,12 +136,14 @@ func main() {
 
 	s := store.New(conn)
 
-	logging.Info(fmt.Sprintf("[integrations-worker] Started — polling every %ds", int(tickInterval.Seconds())))
+	logging.Info(fmt.Sprintf("[integrations-worker] Started (%s) — polling every %ds", version.Current(), int(tickInterval.Seconds())))
+
+	startedAt := time.Now()
 
 	for {
 		// A tick already in flight when the shutdown signal arrives runs to
 		// completion — see the matching comment in internal/runner.Run.
-		tick(context.Background(), s)
+		tick(context.Background(), s, startedAt)
 
 		select {
 		case <-ctx.Done():

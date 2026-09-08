@@ -19,6 +19,7 @@ import (
 	"stayup/worker/internal/maintenance"
 	"stayup/worker/internal/settings"
 	"stayup/worker/internal/store"
+	"stayup/worker/internal/version"
 )
 
 // How far back to look when recomputing the uptime percentage shown in the UI.
@@ -50,7 +51,13 @@ func Run(ctx context.Context, s *store.Store, opts Options) {
 		interval = defaultTickInterval
 	}
 
-	logging.Info(fmt.Sprintf("[%s] Started — polling every %ds", opts.WorkerLabel, int(interval.Seconds())))
+	logging.Info(fmt.Sprintf("[%s] Started (%s) — polling every %ds", opts.WorkerLabel, version.Current(), int(interval.Seconds())))
+
+	// Captured once: the heartbeat row's startedAt is what makes a
+	// crash-looping container distinguishable from a healthy one — it keeps
+	// moving forward on every restart, while lastSeenAt would look fine
+	// either way.
+	startedAt := time.Now()
 
 	for {
 		// A tick already in flight when the shutdown signal arrives runs to
@@ -58,7 +65,7 @@ func Run(ctx context.Context, s *store.Store, opts Options) {
 		// stops scheduling the *next* iteration. Deliberately not `ctx` here:
 		// once cancelled, it would abort this tick's DB writes/HTTP calls
 		// mid-flight instead of letting them finish.
-		tick(context.Background(), s, opts)
+		tick(context.Background(), s, opts, startedAt, interval)
 
 		select {
 		case <-ctx.Done():
@@ -69,7 +76,22 @@ func Run(ctx context.Context, s *store.Store, opts Options) {
 	}
 }
 
-func tick(ctx context.Context, s *store.Store, opts Options) {
+func tick(ctx context.Context, s *store.Store, opts Options, startedAt time.Time, interval time.Duration) {
+	// First thing in the tick, before any work that can fail: this answers
+	// "is this process still ticking", which is a different question from
+	// "are its checks succeeding".
+	if err := s.RecordHeartbeat(ctx, store.Heartbeat{
+		// The row is keyed on the binary's name, not the log label.
+		Worker:          strings.TrimSuffix(opts.WorkerLabel, "-worker"),
+		IntervalSeconds: int(interval.Seconds()),
+		StartedAt:       startedAt,
+		LastSeenAt:      time.Now(),
+		Version:         version.Current(),
+		Revision:        version.Revision(),
+	}); err != nil {
+		logging.Error(fmt.Sprintf("[%s] Failed to record heartbeat", opts.WorkerLabel), err)
+	}
+
 	monitors, err := s.ListByType(ctx, opts.MonitorType)
 	if err != nil {
 		logging.Error(fmt.Sprintf("[%s] Tick failed", opts.WorkerLabel), err)

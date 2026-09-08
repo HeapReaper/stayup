@@ -153,6 +153,23 @@ func pass(ctx context.Context, s *store.Store) {
 	}
 }
 
+// heartbeat records that this worker is still ticking. Written every
+// tickInterval (15 minutes) rather than once per pass (once a day), because
+// "alive" has to be answerable on a human timescale — a daily row would make
+// every reader wait a day to distinguish a stopped janitor from a healthy one.
+func heartbeat(ctx context.Context, s *store.Store, startedAt time.Time) {
+	if err := s.RecordHeartbeat(ctx, store.Heartbeat{
+		Worker:          "janitor",
+		IntervalSeconds: int(tickInterval.Seconds()),
+		StartedAt:       startedAt,
+		LastSeenAt:      time.Now(),
+		Version:         version.Current(),
+		Revision:        version.Revision(),
+	}); err != nil {
+		logging.Error("[janitor] Failed to record heartbeat", err)
+	}
+}
+
 // checkForUpdates records whether a newer StayUp has been published. The
 // error is already persisted by updates.Check (the Updates tab reads it) —
 // logging it here is what makes it visible in Dashboard -> Logs too.
@@ -184,6 +201,9 @@ func main() {
 
 	logging.Info(fmt.Sprintf("[janitor] Started (%s) — one pass now, then once per UTC day", version.Current()))
 
+	startedAt := time.Now()
+	heartbeat(context.Background(), s, startedAt)
+
 	// A pass already in flight when the shutdown signal arrives runs to
 	// completion — same reasoning as internal/runner.Run.
 	pass(context.Background(), s)
@@ -195,6 +215,8 @@ func main() {
 			logging.Info("[janitor] Received shutdown signal, shutting down...")
 			return
 		case <-time.After(tickInterval):
+			heartbeat(context.Background(), s, startedAt)
+
 			today := truncateDay(time.Now())
 			if today.After(lastRunDay) {
 				pass(context.Background(), s)

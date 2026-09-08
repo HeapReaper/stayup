@@ -70,8 +70,13 @@
 #                        configured (and overridden) in Dashboard → Settings.
 #
 # First run: open the app and register — that first account is the only one
-# the public sign-up form ever creates. Everyone after that is invited from
-# Dashboard → Users.
+# the public sign-up form ever creates, and it is an Admin. Everyone after
+# that is invited from Dashboard → Users with a role.
+#
+# `web` reports healthy once /api/health answers 200 (database reachable and
+# migrated), which is what the workers wait for. If a worker container ends up
+# in a restart loop, Dashboard → Overview names it — Coolify only tells you
+# that something restarted.
 #
 # To upgrade: Redeploy (on `latest`), or point STAYUP_VERSION at a newer tag
 # and redeploy. `web` runs `prisma migrate deploy` on every start, so schema
@@ -161,7 +166,9 @@ services:
         condition: service_healthy
     command: ["sh", "-c", "npx prisma migrate deploy && npm start"]
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/login >/dev/null 2>&1 || exit 1"]
+      # See docker-compose.yaml: /api/health goes green only once the schema
+      # is applied, which is what the workers wait for.
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10

@@ -1,9 +1,12 @@
 import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
 import { Prisma } from '@prisma/client';
-import { createTRPCRouter, protectedProcedure, baseProcedure } from '../init';
+import { createTRPCRouter, protectedProcedure, baseProcedure, capabilityProcedure } from '../init';
 import { prisma } from '@/lib/prisma';
 import { logAudit } from '@/lib/audit';
+
+/** Incident changes: Admin and Member. */
+const writeIncidents = capabilityProcedure('incidents:write');
 import {
   incidentImpactEnum,
   incidentStatusEnum,
@@ -144,7 +147,7 @@ export const incidentRouter = createTRPCRouter({
       };
     }),
 
-  create: protectedProcedure
+  create: writeIncidents
     .input(
       z.object({
         title: z.string().trim().min(1, 'Title is required').max(200),
@@ -173,7 +176,7 @@ export const incidentRouter = createTRPCRouter({
       return { id: incident.id };
     }),
 
-  addUpdate: protectedProcedure
+  addUpdate: writeIncidents
     .input(
       z.object({
         incidentId: z.string(),
@@ -198,7 +201,7 @@ export const incidentRouter = createTRPCRouter({
       return { id: incident.id };
     }),
 
-  resolve: protectedProcedure
+  resolve: writeIncidents
     .input(
       z.object({
         incidentId: z.string(),
@@ -234,7 +237,7 @@ export const incidentRouter = createTRPCRouter({
    * integrations worker's EscalateOverdueIncidents (worker/internal/incidents).
    * No-op (not an error) if it's already acknowledged, so double-clicking is safe.
    */
-  acknowledge: protectedProcedure
+  acknowledge: writeIncidents
     .input(z.object({ incidentId: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const incident = await acknowledgeIncident(input.incidentId, ctx.session.user.id);
@@ -254,7 +257,7 @@ export const incidentRouter = createTRPCRouter({
       return { id: incident.id };
     }),
 
-  delete: protectedProcedure
+  delete: writeIncidents
     .input(z.object({ id: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const existing = await prisma.incident.findUnique({ where: { id: input.id } });
@@ -283,7 +286,7 @@ export const incidentRouter = createTRPCRouter({
    * postmortemPublishedAt explicitly, which the dashboard UI doesn't expose
    * (a published postmortem can still be edited in place).
    */
-  setPostmortem: protectedProcedure
+  setPostmortem: writeIncidents
     .input(
       z.object({
         incidentId: z.string(),

@@ -1,5 +1,12 @@
 import { initTRPC, TRPCError } from '@trpc/server';
 import { auth } from '@/lib/auth';
+import { prisma } from '@/lib/prisma';
+import {
+  can,
+  normalizeRole,
+  type Capability,
+  CAPABILITY_LABELS,
+} from '@/lib/permissions';
 
 /**
  * Context creator which fetches session from headers
@@ -56,3 +63,33 @@ export const protectedProcedure = t.procedure.use(async ({ ctx, next }) => {
     },
   });
 });
+
+/**
+ * A protected procedure that also requires one capability (src/lib/permissions.ts).
+ *
+ * Every mutation that changes shared state goes through one of these; queries
+ * stay on `protectedProcedure`, because reading is not gated by role.
+ *
+ * The role is read from the database on each call rather than taken from the
+ * session: a session cookie carries whatever the role was at sign-in, so
+ * demoting someone would leave their existing session at full strength until
+ * it expired. One primary-key lookup per mutation is a fair price for a
+ * demotion that takes effect immediately.
+ */
+export const capabilityProcedure = (capability: Capability) =>
+  protectedProcedure.use(async ({ ctx, next }) => {
+    const user = await prisma.user.findUnique({
+      where: { id: ctx.session.user.id },
+      select: { role: true },
+    });
+
+    const role = normalizeRole(user?.role);
+    if (!can(role, capability)) {
+      throw new TRPCError({
+        code: 'FORBIDDEN',
+        message: `Your role (${role}) is not allowed to ${CAPABILITY_LABELS[capability]}.`,
+      });
+    }
+
+    return next({ ctx: { ...ctx, role } });
+  });

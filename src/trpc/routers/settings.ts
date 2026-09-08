@@ -1,11 +1,14 @@
 import { z } from 'zod';
-import { createTRPCRouter, protectedProcedure } from '../init';
+import { createTRPCRouter, protectedProcedure, capabilityProcedure } from '../init';
 import { prisma } from '@/lib/prisma';
 import { getSettings, generateApiKey, generateWebhookSecret } from '@/lib/settings';
 import { logAudit } from '@/lib/audit';
 import { sendEmail } from '@/lib/email';
 import IntegrationAlertEmail from '@/emails/integration-alert-email';
 import { monitorIntervalEnum } from '@/trpc/routers/monitor';
+
+/** Instance-wide settings: Admin only. */
+const writeSettings = capabilityProcedure('settings:write');
 
 export type AppSettingsView = {
   organizationName: string;
@@ -62,7 +65,7 @@ function serialize(settings: Awaited<ReturnType<typeof getSettings>>): AppSettin
 export const settingsRouter = createTRPCRouter({
   get: protectedProcedure.query(async () => serialize(await getSettings())),
 
-  updateGeneral: protectedProcedure
+  updateGeneral: writeSettings
     .input(
       z.object({
         organizationName: z.string().trim().min(1, 'Organization name is required').max(200),
@@ -92,7 +95,7 @@ export const settingsRouter = createTRPCRouter({
       return serialize(settings);
     }),
 
-  updateMonitoring: protectedProcedure
+  updateMonitoring: writeSettings
     .input(
       z.object({
         defaultCheckInterval: monitorIntervalEnum,
@@ -127,7 +130,7 @@ export const settingsRouter = createTRPCRouter({
       return serialize(settings);
     }),
 
-  updateSmtp: protectedProcedure
+  updateSmtp: writeSettings
     .input(
       z.object({
         smtpHost: z.string().trim().max(255).optional(),
@@ -173,7 +176,7 @@ export const settingsRouter = createTRPCRouter({
    * already-initialized transporter, so this won't reflect unsaved/just-saved
    * changes here without a server restart.
    */
-  sendTestEmail: protectedProcedure.mutation(async ({ ctx }) => {
+  sendTestEmail: writeSettings.mutation(async ({ ctx }) => {
     const result = await sendEmail({
       to: ctx.session.user.email,
       subject: 'Test email from your monitoring dashboard',
@@ -190,7 +193,7 @@ export const settingsRouter = createTRPCRouter({
     return { success: true };
   }),
 
-  regenerateApiKey: protectedProcedure.mutation(async ({ ctx }) => {
+  regenerateApiKey: writeSettings.mutation(async ({ ctx }) => {
     await getSettings();
     const settings = await prisma.appSettings.update({
       where: { id: 'singleton' },
@@ -208,7 +211,7 @@ export const settingsRouter = createTRPCRouter({
     return serialize(settings);
   }),
 
-  regenerateWebhookSecret: protectedProcedure.mutation(async ({ ctx }) => {
+  regenerateWebhookSecret: writeSettings.mutation(async ({ ctx }) => {
     await getSettings();
     const settings = await prisma.appSettings.update({
       where: { id: 'singleton' },

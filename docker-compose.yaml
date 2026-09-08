@@ -45,8 +45,14 @@
 #                        configured (and overridden) in Dashboard → Settings.
 #
 # First run: open the app and register — that first account is the only one
-# the public sign-up form ever creates. Everyone after that is invited from
-# Dashboard → Users.
+# the public sign-up form ever creates, and it is an Admin. Everyone after
+# that is invited from Dashboard → Users with a role: Admin (runs the
+# instance), Member (runs the monitoring) or Viewer (reads).
+#
+# `web` reports healthy once /api/health answers 200, which means the database
+# is reachable and migrated — that is what the workers below wait for. Worker
+# liveness shows up on the dashboard and in that endpoint's body, but never
+# fails the check: a dead worker must not restart the web container.
 #
 # To upgrade: `docker compose pull && docker compose up -d`.
 # `web` runs `prisma migrate deploy` on every start, so schema changes apply
@@ -109,7 +115,12 @@ services:
         condition: service_healthy
     command: ["sh", "-c", "npx prisma migrate deploy && npm start"]
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:${PORT:-3000}/login >/dev/null 2>&1 || exit 1"]
+      # /api/health, not a page: it runs a real query, so this only goes
+      # green once the database is reachable *and* migrate-deploy has applied
+      # the schema — which is exactly what the workers below are waiting for.
+      # Worker liveness is reported in the response body but never fails this
+      # check; a dead worker must not restart the web container.
+      test: ["CMD-SHELL", "wget -qO- http://localhost:${PORT:-3000}/api/health >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10

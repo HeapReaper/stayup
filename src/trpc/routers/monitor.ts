@@ -1,9 +1,12 @@
 import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
 import type { Monitor as PrismaMonitor, Prisma } from '@prisma/client';
-import { createTRPCRouter, protectedProcedure } from '../init';
+import { createTRPCRouter, protectedProcedure, capabilityProcedure } from '../init';
 import { prisma } from '@/lib/prisma';
 import { logAudit } from '@/lib/audit';
+
+/** Monitor changes: Admin and Member (see src/lib/permissions.ts). */
+const writeMonitors = capabilityProcedure('monitors:write');
 
 export const monitorTypeEnum = z.enum(['HTTP', 'Ping', 'Port', 'DNS']);
 export const monitorStatusEnum = z.enum(['Up', 'Down', 'Degraded']);
@@ -222,7 +225,7 @@ export const monitorRouter = createTRPCRouter({
       return serializeMonitor(monitor);
     }),
 
-  create: protectedProcedure
+  create: writeMonitors
     .input(monitorCreateInput)
     .mutation(async ({ input, ctx }) => {
       const monitor = await prisma.$transaction(async (tx) => {
@@ -256,7 +259,7 @@ export const monitorRouter = createTRPCRouter({
       return serializeMonitor(full);
     }),
 
-  update: protectedProcedure
+  update: writeMonitors
     .input(monitorUpdateInput)
     .mutation(async ({ input, ctx }) => {
       const existing = await prisma.monitor.findUnique({ where: { id: input.id } });
@@ -305,7 +308,7 @@ export const monitorRouter = createTRPCRouter({
    * figure and its place on any status page, and any incident it already has
    * open stays open — nobody's outage disappears because someone hit pause.
    */
-  setEnabled: protectedProcedure
+  setEnabled: writeMonitors
     .input(z.object({ id: z.string(), enabled: z.boolean() }))
     .mutation(async ({ input, ctx }) => {
       const existing = await prisma.monitor.findUnique({ where: { id: input.id } });
@@ -331,7 +334,7 @@ export const monitorRouter = createTRPCRouter({
       return serializeMonitor(full);
     }),
 
-  delete: protectedProcedure
+  delete: writeMonitors
     .input(z.object({ id: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const existing = await prisma.monitor.findUnique({ where: { id: input.id } });

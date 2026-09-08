@@ -12,6 +12,7 @@ import {
   MonitorCheck,
   PauseCircle,
   Plus,
+  ServerCog,
   ShieldAlert,
   Siren,
   Wrench,
@@ -72,6 +73,15 @@ function relativeTime(iso: string | null): string {
   return `${Math.floor(seconds / 86_400)}d ago`;
 }
 
+/** "3d 4h" / "12m" — a process that keeps resetting to seconds is crash-looping. */
+function formatDuration(seconds: number | null): string {
+  if (seconds === null) return 'unknown';
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+  return `${Math.floor(seconds / 86_400)}d ${Math.floor((seconds % 86_400) / 3600)}h`;
+}
+
 function daysUntil(iso: string): number {
   return Math.ceil((new Date(iso).getTime() - Date.now()) / 86_400_000);
 }
@@ -122,11 +132,12 @@ export default async function DashboardPage() {
   const session = await auth.api.getSession({ headers: await headers() });
   if (!session) redirect('/login');
 
-  const [monitors, incidents, windows, settings] = await Promise.all([
+  const [monitors, incidents, windows, settings, workers] = await Promise.all([
     caller.monitor.getAll(),
     caller.incident.getAll(),
     caller.maintenance.getAll(),
     caller.settings.get(),
+    caller.worker.getAll(),
   ]);
 
   const now = Date.now();
@@ -152,6 +163,11 @@ export default async function DashboardPage() {
     : null;
 
   const stale = active.filter((monitor) => isStale(monitor, now));
+
+  // Heartbeats (worker_heartbeat, written by the Go binaries) turn "no checks
+  // are arriving" into "this worker isn't running", which is the difference
+  // between a guess and an answer.
+  const workersOffline = workers.filter((worker) => worker.state !== 'running');
 
   const activeWindows = windows.filter((window) => window.status === 'Active');
   const upcomingWindows = windows.filter((window) => window.status === 'Scheduled');
@@ -214,7 +230,15 @@ export default async function DashboardPage() {
             detail:
               'Answering, but slower than the latency threshold or close to a certificate expiry.',
           }
-        : stale.length > 0
+        : workersOffline.length > 0
+          ? {
+              tone: 'bad' as const,
+              icon: ServerCog,
+              title: `${workersOffline.length} worker${workersOffline.length === 1 ? " isn't" : "s aren't"} reporting`,
+              detail:
+                'Nothing is checking the monitors they own, so their status below is only the last thing that was measured.',
+            }
+          : stale.length > 0
           ? {
               // Deliberately not "operational": the status shown for these is
               // whatever they were when the checks stopped arriving, which
@@ -482,6 +506,56 @@ export default async function DashboardPage() {
                 +{attention.length - 8} more, {criticalCount} critical in total.
               </p>
             )}
+          </CardContent>
+        </Card>
+
+        {/* Workers */}
+        <Card className="shadow-sm lg:col-span-3">
+          <CardHeader className="space-y-0">
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <ServerCog className="h-5 w-5 text-muted-foreground" /> Workers
+            </CardTitle>
+            <CardDescription>
+              Each binary upserts a heartbeat on every tick. A worker that stops reporting leaves
+              its monitors frozen at their last known status — which is why this is here and not
+              inferred from the monitors themselves.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {workers.map((worker) => (
+              <div
+                key={worker.id}
+                className={`rounded-md border p-3 ${
+                  worker.state === 'running'
+                    ? ''
+                    : 'border-rose-500/30 bg-rose-500/10'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="truncate font-mono text-sm font-medium">{worker.id}</span>
+                  <Badge
+                    variant="outline"
+                    className={
+                      worker.state === 'running'
+                        ? 'border-emerald-500/20 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                        : 'border-rose-500/30 bg-rose-500/10 text-rose-600 dark:text-rose-400'
+                    }
+                  >
+                    {worker.state === 'running'
+                      ? 'running'
+                      : worker.state === 'stale'
+                        ? 'not reporting'
+                        : 'never seen'}
+                  </Badge>
+                </div>
+                <p className="mt-1 truncate text-xs text-muted-foreground">{worker.label}</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  {worker.state === 'missing'
+                    ? 'No heartbeat yet — is this service running?'
+                    : `Last tick ${relativeTime(worker.lastSeenAt)} · up ${formatDuration(worker.uptimeSeconds)}`}
+                </p>
+              </div>
+            ))}
           </CardContent>
         </Card>
       </div>

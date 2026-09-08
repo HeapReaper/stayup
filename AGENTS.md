@@ -22,7 +22,9 @@ configuration lives in the single-row `AppSettings` table, which the workers re-
 | `src/app/(public)`, `login/`, `register/`, `logout/` | Auth surfaces. `/` redirects to `/login`. |
 | `src/app/api/` | better-auth handler, tRPC handler, and `public/status-domain` (custom-domain → slug lookup for the proxy). |
 | `src/trpc/routers/` | The entire API. `init.ts` defines `baseProcedure` / `protectedProcedure`; `_app.ts` is the registry. |
-| `src/lib/` | Server-side domain logic and clients (prisma, auth, settings, incidents, integration-delivery, maintenance, email, discord, push, audit, logging, redis, updates, version). |
+| `src/lib/` | Server-side domain logic and clients (prisma, auth, settings, incidents, integration-delivery, maintenance, email, discord, push, audit, logging, redis, updates, version, permissions, workers). |
+| `src/lib/permissions.ts` | The whole authorization model: roles → capabilities. Enforced only by `capabilityProcedure` in `src/trpc/init.ts`. |
+| `src/app/api/health/` | Unauthenticated container healthcheck. 200/503 on the *database*; worker liveness is reported but never fails it. |
 | `src/prisma/schemas/` | `sqlite.prisma` and `postgresql.prisma` **plus one migration folder each**. |
 | `src/proxy.ts` | Next middleware: auth redirects + custom-domain rewrite. |
 | `Dockerfile` | Both images: `runner` (web) and `worker-runner` (all six Go binaries). |
@@ -35,7 +37,7 @@ configuration lives in the single-row `AppSettings` table, which the workers re-
 | `worker/internal/runner/` | The shared poll → check → persist → roll-up → incident-sync loop. |
 | `worker/internal/store/` | All SQL. Both providers, one query string each. |
 | `worker/internal/{incidents,delivery,notify,maintenance,settings,db,logging,ids,updates,version}/` | Go counterparts of the matching `src/lib/` files. |
-| `worker/internal/store/janitor.go` | Retention + rollup SQL. The one part of the Go side with no TypeScript counterpart — the dashboard never prunes or aggregates. |
+| `worker/internal/store/janitor.go` | Retention + rollup SQL, plus `RecordHeartbeat`. The part of the Go side with no TypeScript counterpart — the dashboard never prunes, aggregates or writes heartbeats. |
 | `worker/cmd/janitor` | Daily pass: roll up → prune → update check. The update check is last and non-fatal, so a GitLab outage can't cost a day of rollups. |
 | `public/sw.js` | Service worker for Web Push. Third place the push payload shape is written down, after `src/lib/push.ts` and `worker/internal/notify/push.go`. |
 
@@ -67,9 +69,23 @@ configuration lives in the single-row `AppSettings` table, which the workers re-
    Postgres (`worker/internal/db` handles placeholders, timestamps and booleans — use it, don't
    hand-roll provider branches in `store/`).
 
-4. **`protectedProcedure` is the only authorization boundary.** There is no roles/permissions concept:
-   every signed-in user has full dashboard access. `User.role` exists solely because better-auth's
-   admin plugin requires the column. Don't write code that assumes role-based gating works.
+4. **Authorization is one file plus one procedure builder.** `src/lib/permissions.ts` maps the three
+   roles (`Admin` | `Member` | `Viewer`) onto capabilities; `capabilityProcedure('x:write')` in
+   `src/trpc/init.ts` is the only thing that enforces them. Every mutation that changes shared state
+   goes through one — queries stay on `protectedProcedure`, because *reading* is not gated by role.
+
+   Three things that are easy to get wrong:
+   - **A new mutation is ungated unless you pick a capability for it.** `protectedProcedure` still
+     means "any signed-in user", so it's the thing to check in review.
+   - The role is read from the database on every call, never from the session — a session cookie
+     carries whatever the role was at sign-in, so reading it there would leave a demoted user at
+     full strength until their session expired.
+   - `normalizeRole()` maps anything unrecognised onto `Admin`, including better-auth's own default
+     (`"user"`, which is what the first `/register` account gets). That's deliberate: the
+     alternative locks the only account out of the instance it just created.
+
+   `user.updateProfile` is the one mutation that is deliberately only `protectedProcedure`: it edits
+   the caller's own account and nothing else.
 
 5. **No superjson transformer.** Serialise `Date` → ISO string inside routers, so the RSC `caller`
    and the HTTP client return identical shapes. Follow `serializeMonitor` in
@@ -202,7 +218,10 @@ builds — so run them yourself before pushing.
 2. `worker/cmd/<type>/main.go` — copy an existing one, change the three labels.
 3. Add the binary to the `for cmd in …` loop in `Dockerfile` and a `worker-<type>` service in
    **all three** of `docker-compose.build.yml`, `docker-compose.yaml` and
-   `docker-compose.coolify.yaml`.
+   `docker-compose.coolify.yaml`, plus its name to `EXPECTED_WORKERS` in `src/lib/workers.ts` —
+   a worker missing from that list is invisible on the dashboard rather than reported as down.
+   (A worker built on `internal/runner` gets its heartbeat for free; one with its own loop must
+   call `store.RecordHeartbeat` per tick, like `cmd/integrations` and `cmd/janitor` do.)
 4. Extend `monitorTypeEnum` in `src/trpc/routers/monitor.ts` and `normalizeUrl`, plus the monitor form.
    Per-type request options belong behind `httpOptionsFor()`-style blanking so they can't leak
    between types.
@@ -244,6 +263,9 @@ or writes the column.
 - `src/lib/redis.ts` and `REDIS_URL` are a leftover from the NextTemp template — Redis is running in
   compose but nothing reads or writes it.
 - `src/trpc/routers/hello.ts` is template scaffolding.
+- **Worker liveness has a one-minute floor.** `isStale` in `src/lib/workers.ts` allows three missed
+  ticks but never less than 60s, so a dead 5-second check worker takes a minute to show up as "not
+  reporting". Lowering it would make a single slow tick look like an outage.
 - **Inert configuration.** Some `AppSettings` fields are still editable in the UI but read by
   nothing: `defaultCheckInterval` (the monitor form doesn't use it as its default), `timezone`
   (timestamps render in the viewer's locale), and `apiKey` / `webhookSigningSecret` (there is no

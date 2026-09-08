@@ -12,6 +12,7 @@ import {
   CheckCircle2,
   Copy,
   CircleArrowUp,
+  Lock,
 } from 'lucide-react';
 
 import { useTRPC } from '@/trpc/client';
@@ -44,6 +45,8 @@ import {
 interface SettingsClientPageProps {
   initialSettings: AppSettingsView;
   initialUpdateStatus: UpdateStatusView;
+  /** Every mutation on this page is Admin-only; without it the page is read-only. */
+  canWrite: boolean;
 }
 
 const TIMEZONE_LABELS: Record<string, string> = {
@@ -80,6 +83,7 @@ function useSavedFlash() {
 export default function SettingsClientPage({
   initialSettings,
   initialUpdateStatus,
+  canWrite,
 }: SettingsClientPageProps) {
   const trpc = useTRPC();
   const queryClient = useQueryClient();
@@ -212,6 +216,16 @@ export default function SettingsClientPage({
         </p>
       </div>
 
+      {!canWrite && (
+        <div className="flex items-start gap-3 rounded-lg border bg-muted/40 p-4">
+          <Lock className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+          <p className="text-sm text-muted-foreground">
+            These settings are instance-wide, so only an Admin can change them. Everything below is
+            shown read-only.
+          </p>
+        </div>
+      )}
+
       <Tabs defaultValue="general" className="space-y-6">
         <TabsList className="grid w-full grid-cols-2 md:grid-cols-5 lg:w-auto">
           <TabsTrigger value="general" className="gap-2">
@@ -290,7 +304,7 @@ export default function SettingsClientPage({
                 {generalError && <p className="text-sm text-destructive">{generalError}</p>}
               </CardContent>
               <CardFooter className="border-t px-6 py-4 flex justify-between items-center">
-                <Button type="submit" className="gap-2" disabled={updateGeneral.isPending}>
+                <Button type="submit" className="gap-2" disabled={!canWrite || updateGeneral.isPending}>
                   <Save className="h-4 w-4" /> {updateGeneral.isPending ? 'Saving…' : 'Save Changes'}
                 </Button>
                 <SavedBadge show={generalSaved.saved} />
@@ -491,7 +505,7 @@ export default function SettingsClientPage({
                 </div>
               </CardContent>
               <CardFooter className="border-t px-6 py-4 flex justify-between items-center">
-                <Button type="submit" className="gap-2" disabled={updateMonitoring.isPending}>
+                <Button type="submit" className="gap-2" disabled={!canWrite || updateMonitoring.isPending}>
                   <Save className="h-4 w-4" /> {updateMonitoring.isPending ? 'Saving…' : 'Save Changes'}
                 </Button>
                 <SavedBadge show={monitoringSaved.saved} />
@@ -600,7 +614,7 @@ export default function SettingsClientPage({
               </CardContent>
               <CardFooter className="border-t px-6 py-4 flex justify-between items-center flex-wrap gap-2">
                 <div className="flex items-center gap-3">
-                  <Button type="submit" className="gap-2" disabled={updateSmtp.isPending}>
+                  <Button type="submit" className="gap-2" disabled={!canWrite || updateSmtp.isPending}>
                     <Save className="h-4 w-4" /> {updateSmtp.isPending ? 'Saving…' : 'Save Changes'}
                   </Button>
                   <SavedBadge show={smtpSaved.saved} />
@@ -610,7 +624,7 @@ export default function SettingsClientPage({
                   variant="outline"
                   className="gap-2"
                   onClick={() => sendTestEmail.mutate()}
-                  disabled={sendTestEmail.isPending}
+                  disabled={!canWrite || sendTestEmail.isPending}
                 >
                   <Mail className="h-4 w-4" /> {sendTestEmail.isPending ? 'Sending…' : 'Send Test Email'}
                 </Button>
@@ -687,7 +701,7 @@ export default function SettingsClientPage({
                 variant="destructive"
                 className="gap-2"
                 onClick={() => regenerateApiKey.mutate()}
-                disabled={regenerateApiKey.isPending}
+                disabled={!canWrite || regenerateApiKey.isPending}
               >
                 <RefreshCw className="h-4 w-4" /> Regenerate API Key
               </Button>
@@ -696,7 +710,7 @@ export default function SettingsClientPage({
                 variant="destructive"
                 className="gap-2"
                 onClick={() => regenerateWebhookSecret.mutate()}
-                disabled={regenerateWebhookSecret.isPending}
+                disabled={!canWrite || regenerateWebhookSecret.isPending}
               >
                 <RefreshCw className="h-4 w-4" /> Regenerate Webhook Secret
               </Button>
@@ -706,7 +720,7 @@ export default function SettingsClientPage({
 
         {/* TAB 5: UPDATES */}
         <TabsContent value="updates">
-          <UpdatesCard initialStatus={initialUpdateStatus} />
+          <UpdatesCard initialStatus={initialUpdateStatus} canWrite={canWrite} />
         </TabsContent>
       </Tabs>
     </div>

@@ -15,6 +15,7 @@ import type { User, UserRole } from '@/trpc/routers/user';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+import { Badge } from '@/components/ui/badge';
 import {
   Table,
   TableBody,
@@ -51,6 +52,8 @@ import {
 
 interface UsersClientPageProps {
   initialUsers: User[];
+  /** Whether this viewer may invite, edit and delete accounts (Admin only). */
+  canManageUsers: boolean;
 }
 
 // One form for both halves of the sheet. `password` is a required temporary
@@ -70,11 +73,11 @@ function userToForm(user: User): UserForm {
     name: user.name,
     email: user.email,
     password: '',
-    role: (user.role as UserRole | null) ?? 'Member',
+    role: user.role,
   };
 }
 
-export default function UsersClientPage({ initialUsers }: UsersClientPageProps) {
+export default function UsersClientPage({ initialUsers, canManageUsers }: UsersClientPageProps) {
   const trpc = useTRPC();
   const queryClient = useQueryClient();
 
@@ -190,10 +193,16 @@ export default function UsersClientPage({ initialUsers }: UsersClientPageProps) 
           </p>
         </div>
 
-        <Button className="gap-2" onClick={openCreate}>
-          <UserPlus className="h-4 w-4" />
-          Invite User
-        </Button>
+        {canManageUsers ? (
+          <Button className="gap-2" onClick={openCreate}>
+            <UserPlus className="h-4 w-4" />
+            Invite User
+          </Button>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            Only an Admin can invite, edit or remove accounts.
+          </p>
+        )}
       </div>
 
       {/* Invite/Edit Sheet */}
@@ -318,6 +327,7 @@ export default function UsersClientPage({ initialUsers }: UsersClientPageProps) 
           <TableHeader>
             <TableRow>
               <TableHead>User</TableHead>
+              <TableHead>Role</TableHead>
               <TableHead>Created At</TableHead>
               <TableHead className="w-[80px]"></TableHead>
             </TableRow>
@@ -325,7 +335,7 @@ export default function UsersClientPage({ initialUsers }: UsersClientPageProps) 
           <TableBody>
             {filteredUsers.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={3} className="h-24 text-center text-muted-foreground">
+                <TableCell colSpan={4} className="h-24 text-center text-muted-foreground">
                   No users found.
                 </TableCell>
               </TableRow>
@@ -351,6 +361,13 @@ export default function UsersClientPage({ initialUsers }: UsersClientPageProps) 
                     </div>
                   </TableCell>
 
+                  {/* Role — decides what this account may change (src/lib/permissions.ts) */}
+                  <TableCell>
+                    <Badge variant="outline" className="text-muted-foreground">
+                      {user.role}
+                    </Badge>
+                  </TableCell>
+
                   {/* Date */}
                   <TableCell className="text-sm text-muted-foreground">
                     {new Date(user.createdAt).toLocaleDateString()}
@@ -358,6 +375,7 @@ export default function UsersClientPage({ initialUsers }: UsersClientPageProps) 
 
                   {/* Actions Dropdown Menu */}
                   <TableCell>
+                    {canManageUsers && (
                     <DropdownMenu>
                       <DropdownMenuTrigger
                         render={
@@ -385,6 +403,7 @@ export default function UsersClientPage({ initialUsers }: UsersClientPageProps) 
                         </DropdownMenuGroup>
                       </DropdownMenuContent>
                     </DropdownMenu>
+                    )}
                   </TableCell>
                 </TableRow>
               ))

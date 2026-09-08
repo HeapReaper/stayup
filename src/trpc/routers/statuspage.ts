@@ -1,11 +1,14 @@
 import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
 import { Prisma } from '@prisma/client';
-import { createTRPCRouter, protectedProcedure, baseProcedure } from '../init';
+import { createTRPCRouter, protectedProcedure, baseProcedure, capabilityProcedure } from '../init';
 import { prisma } from '@/lib/prisma';
 import { logAudit } from '@/lib/audit';
 import type { IncidentImpact, IncidentStatus } from '@/lib/incidents';
 import { getVisibleMaintenanceWindows } from '@/lib/maintenance';
+
+/** Status page changes: Admin and Member. */
+const writeStatusPages = capabilityProcedure('statuspages:write');
 
 export const statusPageThemeEnum = z.enum(['light', 'dark', 'system']);
 export const historyWindowDaysEnum = z.union([z.literal(7), z.literal(30), z.literal(90)]);
@@ -368,7 +371,7 @@ export const statusPageRouter = createTRPCRouter({
       };
     }),
 
-  create: protectedProcedure.input(statusPageInput).mutation(async ({ input, ctx }) => {
+  create: writeStatusPages.input(statusPageInput).mutation(async ({ input, ctx }) => {
     try {
       const page = await prisma.$transaction(async (tx) => {
         const created = await tx.statusPage.create({
@@ -417,7 +420,7 @@ export const statusPageRouter = createTRPCRouter({
     }
   }),
 
-  update: protectedProcedure.input(statusPageInput.extend({ id: z.string() })).mutation(async ({ input, ctx }) => {
+  update: writeStatusPages.input(statusPageInput.extend({ id: z.string() })).mutation(async ({ input, ctx }) => {
     const existing = await prisma.statusPage.findUnique({ where: { id: input.id } });
 
     if (!existing) {
@@ -476,7 +479,7 @@ export const statusPageRouter = createTRPCRouter({
     }
   }),
 
-  delete: protectedProcedure.input(z.object({ id: z.string() })).mutation(async ({ input, ctx }) => {
+  delete: writeStatusPages.input(z.object({ id: z.string() })).mutation(async ({ input, ctx }) => {
     const existing = await prisma.statusPage.findUnique({ where: { id: input.id } });
 
     if (!existing) {
@@ -496,7 +499,7 @@ export const statusPageRouter = createTRPCRouter({
     return { id: input.id };
   }),
 
-  togglePublish: protectedProcedure
+  togglePublish: writeStatusPages
     .input(z.object({ id: z.string(), isPublished: z.boolean() }))
     .mutation(async ({ input }) => {
       const page = await prisma.statusPage.update({

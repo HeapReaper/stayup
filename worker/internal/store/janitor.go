@@ -213,3 +213,63 @@ func (s *Store) pruneInBatches(ctx context.Context, query string, cutoff time.Ti
 		}
 	}
 }
+
+// Heartbeat is one worker's liveness row — see RecordHeartbeat.
+type Heartbeat struct {
+	// Worker is the binary's own name ("https", "janitor", ...) and the row's
+	// primary key, so a worker has exactly one row however often it restarts.
+	Worker          string
+	IntervalSeconds int
+	StartedAt       time.Time
+	LastSeenAt      time.Time
+	Version         string
+	Revision        string
+}
+
+// RecordHeartbeat upserts this worker's liveness row. It has no TypeScript
+// counterpart — like the rollup/retention SQL above it, this is one of the
+// few places where the Go side is the only writer; the dashboard and
+// /api/health only ever read it.
+//
+// Called at the top of every tick, before the tick's real work, so a worker
+// that is running but failing (unreachable target, bad credentials) still
+// reports as alive — "is this process ticking" and "is its work succeeding"
+// are different questions, and the Logs page already answers the second.
+func (s *Store) RecordHeartbeat(ctx context.Context, in Heartbeat) error {
+	var query string
+	switch s.db.Provider {
+	case db.Postgres:
+		query = `
+			INSERT INTO worker_heartbeat (id, "lastSeenAt", "intervalSeconds", "startedAt", version, revision)
+			VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT (id) DO UPDATE SET
+				"lastSeenAt" = EXCLUDED."lastSeenAt",
+				"intervalSeconds" = EXCLUDED."intervalSeconds",
+				"startedAt" = EXCLUDED."startedAt",
+				version = EXCLUDED.version,
+				revision = EXCLUDED.revision
+		`
+	default:
+		// Every column is written on every tick, so a full row replace is
+		// equivalent to the upsert above.
+		query = `
+			INSERT OR REPLACE INTO worker_heartbeat (id, "lastSeenAt", "intervalSeconds", "startedAt", version, revision)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`
+	}
+
+	_, err := s.db.ExecContext(ctx, s.q(query),
+		in.Worker, s.db.TimeArg(in.LastSeenAt), in.IntervalSeconds, s.db.TimeArg(in.StartedAt),
+		nullIfEmpty(in.Version), nullIfEmpty(in.Revision))
+	if err != nil {
+		return fmt.Errorf("store: record heartbeat: %w", err)
+	}
+	return nil
+}
+
+func nullIfEmpty(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}

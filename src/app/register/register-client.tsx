@@ -90,7 +90,7 @@ export default function RegisterClientPage() {
                 Create Account
               </CardTitle>
               <CardDescription className="text-sm">
-                Get started with your NextTemp application
+                Get started with your StayUp application
               </CardDescription>
             </CardHeader>
 
