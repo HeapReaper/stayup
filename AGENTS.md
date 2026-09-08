@@ -22,19 +22,21 @@ configuration lives in the single-row `AppSettings` table, which the workers re-
 | `src/app/(public)`, `login/`, `register/`, `logout/` | Auth surfaces. `/` redirects to `/login`. |
 | `src/app/api/` | better-auth handler, tRPC handler, and `public/status-domain` (custom-domain → slug lookup for the proxy). |
 | `src/trpc/routers/` | The entire API. `init.ts` defines `baseProcedure` / `protectedProcedure`; `_app.ts` is the registry. |
-| `src/lib/` | Server-side domain logic and clients (prisma, auth, settings, incidents, integration-delivery, maintenance, email, discord, push, audit, logging, redis). |
+| `src/lib/` | Server-side domain logic and clients (prisma, auth, settings, incidents, integration-delivery, maintenance, email, discord, push, audit, logging, redis, updates, version). |
 | `src/prisma/schemas/` | `sqlite.prisma` and `postgresql.prisma` **plus one migration folder each**. |
 | `src/proxy.ts` | Next middleware: auth redirects + custom-domain rewrite. |
 | `Dockerfile` | Both images: `runner` (web) and `worker-runner` (all six Go binaries). |
 | `docker-compose.build.yml` | Builds from source — the contributor stack. |
 | `docker-compose.yaml` | Pulls published images — the *user* stack, imported by URL. Standalone: no build context, no `.env`, no local paths. |
+| `docker-compose.coolify.yaml` | The same user stack behind Coolify's proxy: `expose:` instead of `ports:`, port fixed at 3000, secrets from Coolify's `SERVICE_*` magic variables. |
 | `.gitlab-ci.yml` | SAST + secret detection, and the two image-build jobs. |
 | `worker/cmd/*` | One `main.go` per binary: `https`, `port`, `ping`, `dns`, `integrations`, `janitor`. |
 | `worker/internal/checkers/` | "How do I check one monitor" — one function per monitor type. |
 | `worker/internal/runner/` | The shared poll → check → persist → roll-up → incident-sync loop. |
 | `worker/internal/store/` | All SQL. Both providers, one query string each. |
-| `worker/internal/{incidents,delivery,notify,maintenance,settings,db,logging,ids}/` | Go counterparts of the matching `src/lib/` files. |
+| `worker/internal/{incidents,delivery,notify,maintenance,settings,db,logging,ids,updates,version}/` | Go counterparts of the matching `src/lib/` files. |
 | `worker/internal/store/janitor.go` | Retention + rollup SQL. The one part of the Go side with no TypeScript counterpart — the dashboard never prunes or aggregates. |
+| `worker/cmd/janitor` | Daily pass: roll up → prune → update check. The update check is last and non-fatal, so a GitLab outage can't cost a day of rollups. |
 | `public/sw.js` | Service worker for Web Push. Third place the push payload shape is written down, after `src/lib/push.ts` and `worker/internal/notify/push.go`. |
 
 ## 3. Invariants — break these and things silently diverge
@@ -49,6 +51,7 @@ configuration lives in the single-row `AppSettings` table, which the workers re-
    | `src/lib/maintenance.ts` | `worker/internal/maintenance` |
    | `src/lib/settings.ts` | `worker/internal/settings` |
    | `src/lib/prisma.ts` | `worker/internal/db` |
+   | `src/lib/updates.ts` | `worker/internal/updates` (+ `version.ts` / `internal/version`) |
    | `src/emails/*.tsx` | `worker/internal/notify/email_templates.go` |
 
    Changing notification wording, incident-lifecycle rules or delivery behaviour on one side without
@@ -84,12 +87,35 @@ configuration lives in the single-row `AppSettings` table, which the workers re-
    the monitor's *rolled-up* status is debounced by `failedAttemptsThreshold`
    (`confirmedStatus` in `worker/internal/runner/runner.go`). Don't "fix" uptime by not writing rows.
 
-9. **Two compose files, kept in step.** `docker-compose.build.yml` (build from source) and
-   `docker-compose.yaml` (published images) describe the same stack. A change to services,
-   commands, capabilities, healthchecks or environment in one belongs in the other too. The prod
-   file must stay standalone — no `build:`, no `env_file:`, no relative paths — or importing it
-   by URL breaks. Adding a worker binary means touching the `for cmd in …` loop in the
-   `Dockerfile` and adding a service to **both** compose files.
+9. **Three compose files, kept in step.** `docker-compose.build.yml` (build from source),
+   `docker-compose.yaml` (published images) and `docker-compose.coolify.yaml` (published images
+   behind Coolify's proxy) describe the same stack. A change to services, commands, capabilities,
+   healthchecks or environment in one belongs in the others too. The two deploy files must stay
+   standalone — no `build:`, no `env_file:`, no relative paths — or importing them by URL breaks.
+   Adding a worker binary means touching the `for cmd in …` loop in the `Dockerfile` and adding a
+   service to **all three** compose files.
+
+   Only three things may differ between `docker-compose.yaml` and the Coolify variant, and each is
+   forced by the proxy in front of it: `web` uses `expose:` rather than publishing a host port;
+   `PORT` is hardcoded to 3000 (Coolify's `SERVICE_FQDN_WEB_3000` embeds the port in the variable
+   *name*, so it can't be interpolated); and `BETTER_AUTH_URL`/`BETTER_AUTH_SECRET` come from
+   Coolify's `SERVICE_URL_WEB_3000`/`SERVICE_REALBASE64_64_AUTH` instead of `${VAR:-…}`/`${VAR:?}`.
+   Anything else diverging is a bug.
+
+   A `SERVICE_*` magic variable may only ever be the *whole* value of an environment variable.
+   Coolify does not substitute one inside a longer string, so `POSTGRES_PASSWORD` stays a plain
+   `${VAR:?}` in both files: it also appears in the middle of `DB_URL`, where a magic variable
+   would silently resolve to an empty password and the app would fail to authenticate (P1000)
+   against a database that came up fine. `BETTER_AUTH_URL` is hand-set for a related reason —
+   `SERVICE_URL_WEB_3000` is empty until Coolify has assigned the domain, and an empty base URL
+   makes better-auth infer `http://` from the request and reject the proxy's `https://` origin
+   with "Invalid origin".
+
+   Two deploy traps worth knowing, both reported as something else entirely: a `POSTGRES_PASSWORD`
+   containing `@ / ? # [ ] %` or a space makes every Go worker die at startup on
+   `net/url: invalid userinfo` (pgx parses `DB_URL` as a URL; Prisma is no happier), and a
+   `BETTER_AUTH_URL` that doesn't match the browser's origin exactly turns every sign-in into
+   `Invalid origin`.
 
 10. **Never prune before rolling up.** `cmd/janitor` summarizes each finished day into
     `MonitorDailyStat` *and then* deletes raw checks past their retention, in that order, because the
@@ -125,15 +151,18 @@ docker compose -f docker-compose.build.yml up --build
 # everything, from the published images (what users run)
 BETTER_AUTH_SECRET=... POSTGRES_PASSWORD=... docker compose up -d
 
-# validate before committing either compose file / the Dockerfile
+# validate before committing any compose file / the Dockerfile
 docker compose config                       # copy it to an empty dir first: a local .env would mask a missing default
 docker compose -f docker-compose.build.yml config
+docker compose -f docker-compose.coolify.yaml config   # warns about unset SERVICE_* vars outside Coolify; that's expected
 docker build --check --target runner .
 docker build --check --target worker-runner .
 ```
 
 The only tests are `worker/internal/checkers/http_test.go` (the HTTP checker's request options,
-status-code spec and certificate-expiry logic). Everything else is verified by running the affected
+status-code spec and certificate-expiry logic) and `worker/internal/updates/updates_test.go` (the
+version comparison — the table there mirrors the one in `src/lib/updates.ts`, so a change to either
+side's rules belongs in both). Everything else is verified by running the affected
 worker and/or the dashboard and watching `logs/` and the Logs page. `ping` needs `CAP_NET_RAW` (i.e.
 `sudo`) outside Docker.
 
@@ -169,7 +198,8 @@ builds — so run them yourself before pushing.
 1. `worker/internal/checkers/<type>.go` implementing `runner.PerformCheck`.
 2. `worker/cmd/<type>/main.go` — copy an existing one, change the three labels.
 3. Add the binary to the `for cmd in …` loop in `Dockerfile` and a `worker-<type>` service in
-   **both** `docker-compose.build.yml` and `docker-compose.yaml`.
+   **all three** of `docker-compose.build.yml`, `docker-compose.yaml` and
+   `docker-compose.coolify.yaml`.
 4. Extend `monitorTypeEnum` in `src/trpc/routers/monitor.ts` and `normalizeUrl`, plus the monitor form.
    Per-type request options belong behind `httpOptionsFor()`-style blanking so they can't leak
    between types.
@@ -187,8 +217,8 @@ builds — so run them yourself before pushing.
 **A release**: push to `main` (publishes `:latest` + `:<short-sha>`) or push a git tag (also
 publishes `:<tag>`). Both images are built by `.gitlab-ci.yml`; users pin via `STAYUP_VERSION`.
 Anything a new version needs beyond a schema migration — a new env var, a new service — must be
-reflected in `docker-compose.yaml`'s header comment, since that file is the deploy
-documentation for people who never clone the repo.
+reflected in the header comment of `docker-compose.yaml` *and* `docker-compose.coolify.yaml`,
+since those files are the deploy documentation for people who never clone the repo.
 
 **A schema change**: edit both `.prisma` files → `DB_PROVIDER=sqlite npx prisma migrate dev` →
 `DB_PROVIDER=postgresql npx prisma migrate dev` → update `worker/internal/store/` if a worker reads
@@ -212,6 +242,9 @@ or writes the column.
   no lease or lock, so running two replicas of the same worker double-checks every monitor.
 - Incident subscribers can subscribe ("Notify me" on the public status page) but there is no
   unsubscribe flow, and no double opt-in.
+- The update checker's release channel needs actual git tags: with no releases *and* no tags on the
+  project, a tag-pinned install records "no releases, tags or commits found" rather than a version.
+  Installs on `latest` compare commits and work regardless.
 - `package.json` is still named `my-app`.
 - `src/lib/email.ts` sets `tls.rejectUnauthorized: false` for the fallback SMTP transport.
 

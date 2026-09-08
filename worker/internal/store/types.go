@@ -144,6 +144,9 @@ type AppSettings struct {
 	DeliveryRetentionDays    int
 	VapidPublicKey           *string
 	VapidPrivateKey          *string
+	// UpdateCheckEnabled off means cmd/janitor skips its daily update check —
+	// the dashboard's "Check now" button still works. See internal/updates.
+	UpdateCheckEnabled bool
 }
 
 // DailyStat is one monitor's aggregate for one UTC day — a row of

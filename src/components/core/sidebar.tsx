@@ -4,6 +4,7 @@ import * as React from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useTheme } from 'next-themes';
+import { useQuery } from '@tanstack/react-query';
 import {
   LayoutDashboard,
   Settings,
@@ -17,6 +18,7 @@ import {
   Webhook, FileText, Monitor,
   Wrench,
   ChevronsUp,
+  CircleArrowUp,
 } from 'lucide-react';
 
 import {
@@ -39,6 +41,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Button } from '@/components/ui/button';
+import { useTRPC } from '@/trpc/client';
 import { cn } from '@/lib/utils';
 
 const navigation = [
@@ -59,6 +62,17 @@ export default function Sidebar() {
   const { setTheme } = useTheme();
   const { state } = useSidebar();
   const isCollapsed: boolean = state === 'collapsed';
+  const trpc = useTRPC();
+
+  // Only reads what the last check wrote (src/lib/updates.ts) — the check
+  // itself is the janitor's daily job, or the button on the Updates tab. So
+  // this can be stale for minutes without ever being wrong, and refetching it
+  // on every dashboard navigation would be pure noise.
+  const updateStatus = useQuery({
+    ...trpc.update.status.queryOptions(),
+    staleTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
 
   return (
     <ShadcnSidebar collapsible="icon">
@@ -108,6 +122,20 @@ export default function Sidebar() {
       </SidebarContent>
 
       <SidebarFooter className="border-t p-4 flex flex-col gap-3">
+        {updateStatus.data?.updateAvailable && (
+          <Link
+            href="/dashboard/settings"
+            title={`${updateStatus.data.latestVersion} is available`}
+            className={cn(
+              'flex items-center gap-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2 py-1.5 text-xs font-medium text-emerald-600 hover:bg-emerald-500/20 dark:text-emerald-400',
+              isCollapsed && 'justify-center px-0',
+            )}
+          >
+            <CircleArrowUp className="size-4 shrink-0" />
+            {!isCollapsed && <span className="truncate">Update available</span>}
+          </Link>
+        )}
+
         {!isCollapsed && (
           <div className="text-xs text-muted-foreground truncate">
             Ingelogd als gebruiker

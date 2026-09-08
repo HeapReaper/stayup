@@ -1,20 +1,29 @@
 # StayUp — the stack you deploy. Pulls pre-built images from the GitLab
 # container registry, so nothing is built locally and this file works on its
 # own: no repo checkout, no build context, no .env file next to it. Import it
-# by URL in Portainer / Coolify / Dokploy, or run it directly:
+# by URL in Portainer / Dokploy, or run it directly:
 #
 #   curl -O https://gitlab.com/HeapReaper/stayup/-/raw/main/docker-compose.yaml
 #   BETTER_AUTH_SECRET=... POSTGRES_PASSWORD=... docker compose up -d
 #
 # Contributors building from source want docker-compose.build.yml instead
-# (`docker compose -f docker-compose.build.yml up --build`).
+# (`docker compose -f docker-compose.build.yml up --build`). Coolify users want
+# docker-compose.coolify.yaml, which drops the published host port in favour of
+# Coolify's own proxy and generates both secrets itself.
 #
 # Two variables have no default on purpose — the stack refuses to start
 # without them rather than booting with a guessable secret:
 #
 #   BETTER_AUTH_SECRET   long random string; signs session cookies.
 #                        Generate with: openssl rand -base64 32
-#   POSTGRES_PASSWORD    password for the bundled Postgres container.
+#   POSTGRES_PASSWORD    password for the bundled Postgres container. Letters
+#                        and digits only (`openssl rand -hex 24`): it is
+#                        substituted into DB_URL, and a URL's userinfo field
+#                        can't carry @ / ? # [ ] % or spaces unescaped — the
+#                        Go workers reject the connection string outright
+#                        ("invalid userinfo") and restart-loop. Postgres reads
+#                        it only when it creates its data directory, so
+#                        changing it later does nothing until the volume goes.
 #
 # Everything else is optional (defaults in brackets):
 #
@@ -23,9 +32,14 @@
 #                        [registry.gitlab.com/heapreaper/stayup]
 #   PORT                 host + container port for the web UI [3000]
 #   BETTER_AUTH_URL      public origin, e.g. https://status.example.com
-#                        [http://localhost:$PORT]. Set this in production:
-#                        it's also how the app recognises its own hostname
-#                        when serving status pages on custom domains.
+#                        [http://localhost:$PORT]. Set this in production, to
+#                        the exact origin the browser uses — scheme included,
+#                        no trailing slash. better-auth validates every
+#                        sign-in against it and answers "Invalid origin" on a
+#                        mismatch, and behind a TLS-terminating proxy it can't
+#                        infer the https:// by itself. It's also how the app
+#                        recognises its own hostname when serving status pages
+#                        on custom domains.
 #   LOG_LEVEL            error | warning | info | debug [info]
 #   SMTP_HOST/_PORT/_USER/_PASS/_FROM   fallback mail transport; can also be
 #                        configured (and overridden) in Dashboard → Settings.

@@ -1,7 +1,10 @@
 // Command janitor is the housekeeping worker: it rolls finished days of raw
 // monitor checks up into monitor_daily_stat and then deletes data past its
 // retention window (AppSettings.checkRetentionDays / deliveryRetentionDays,
-// both on the Settings page).
+// both on the Settings page). Since it's already the one worker running on a
+// daily rhythm, it also performs the daily update check (internal/updates) —
+// the only outbound request StayUp makes that isn't a monitor check or a
+// notification, and switchable off on the Settings page's Updates tab.
 //
 // It has no TypeScript ancestor — nothing ever pruned anything before, so a
 // 15-second monitor quietly wrote ~5.8k rows a day forever, and every uptime
@@ -28,6 +31,8 @@ import (
 	"stayup/worker/internal/logging"
 	"stayup/worker/internal/settings"
 	"stayup/worker/internal/store"
+	"stayup/worker/internal/updates"
+	"stayup/worker/internal/version"
 )
 
 const (
@@ -139,6 +144,27 @@ func pass(ctx context.Context, s *store.Store) {
 	if err := prune(ctx, s, cfg); err != nil {
 		logging.Error("[janitor] Failed to prune old rows", err)
 	}
+
+	// Deliberately last, and deliberately not fatal to the pass: housekeeping
+	// is this worker's job, and a GitLab outage must not cost a day of
+	// rollups or leave data past its retention.
+	if cfg.UpdateCheckEnabled {
+		checkForUpdates(ctx, s)
+	}
+}
+
+// checkForUpdates records whether a newer StayUp has been published. The
+// error is already persisted by updates.Check (the Updates tab reads it) —
+// logging it here is what makes it visible in Dashboard -> Logs too.
+func checkForUpdates(ctx context.Context, s *store.Store) {
+	result, err := updates.Check(ctx, s)
+	if err != nil {
+		logging.Error("[janitor] Update check failed", err)
+		return
+	}
+	if result.Available {
+		logging.Info(fmt.Sprintf("[janitor] Update available: %s (running %s)", result.LatestVersion, version.Current()))
+	}
 }
 
 func main() {
@@ -156,7 +182,7 @@ func main() {
 
 	s := store.New(conn)
 
-	logging.Info("[janitor] Started — one pass now, then once per UTC day")
+	logging.Info(fmt.Sprintf("[janitor] Started (%s) — one pass now, then once per UTC day", version.Current()))
 
 	// A pass already in flight when the shutdown signal arrives runs to
 	// completion — same reasoning as internal/runner.Run.

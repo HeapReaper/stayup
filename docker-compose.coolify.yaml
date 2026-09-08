@@ -1,0 +1,209 @@
+# StayUp — the Coolify variant of docker-compose.yaml.
+#
+# Same stack, same images, same services; three differences, all of them
+# consequences of Coolify putting its own Traefik/Caddy in front of the
+# containers:
+#
+#   1. No `ports:` on `web`. A published host port bypasses the proxy, so it
+#      would serve the dashboard over plain HTTP on :3000 next to the
+#      TLS-terminated domain — and collide with anything else on that port.
+#      `expose:` documents the port for the proxy instead of publishing it.
+#   2. `PORT` is fixed at 3000. Coolify's routing variable embeds the internal
+#      port in its *name* (SERVICE_FQDN_WEB_3000), which no amount of
+#      interpolation can make configurable. The public port is the proxy's
+#      443 anyway, so there is nothing left for a PORT knob to do.
+#   3. BETTER_AUTH_SECRET generates itself. Coolify's SERVICE_REALBASE64_64_*
+#      variable is created once at first deploy and then stored with the
+#      resource.
+#
+# A Coolify SERVICE_* magic variable only substitutes where it is the *whole*
+# value of an environment variable, never inside a longer string — which is
+# why POSTGRES_PASSWORD (it also appears in the middle of DB_URL) and
+# BETTER_AUTH_URL (it must match the browser's origin exactly, scheme
+# included, or better-auth answers "Invalid origin") are both plain variables
+# you set yourself.
+#
+# Deploying it:
+#
+#   New Resource → Public Repository → https://gitlab.com/HeapReaper/stayup
+#   Build Pack: Docker Compose
+#   Docker Compose Location: /docker-compose.coolify.yaml
+#
+# (Or "Docker Compose Empty" and paste this file, if you'd rather edit it in
+# the UI than track the repo.)
+#
+# Two variables to set under Environment Variables before the first deploy;
+# Coolify refuses to deploy until both are there:
+#
+#   POSTGRES_PASSWORD    Letters and digits only — `openssl rand -hex 24` is
+#                        ideal. It ends up inside DB_URL, and a URL's userinfo
+#                        field can't carry @ / ? # [ ] % or spaces unescaped:
+#                        the workers then die on "invalid userinfo" before
+#                        they ever reach the database. Postgres also only
+#                        reads this when it *creates* its data directory, so
+#                        changing it later does nothing until the volume is
+#                        gone — pick it once.
+#   BETTER_AUTH_URL      The exact public origin you open in the browser,
+#                        e.g. https://status.example.com — scheme included, no
+#                        trailing slash, no port. better-auth compares the
+#                        browser's Origin header against it and rejects a
+#                        mismatch with "Invalid origin"; behind Coolify's
+#                        TLS-terminating proxy it can't infer the https://
+#                        itself, since the container only speaks plain HTTP.
+#
+# On first deploy Coolify generates a domain for `web` on your wildcard domain
+# and routes it to port 3000; set your own hostname on the `web` service under
+# Domains instead. Either way, BETTER_AUTH_URL has to say the same thing.
+#
+# Status pages on custom domains: add each one to the *same* `web` service's
+# Domains field (Coolify accepts several, comma-separated). src/proxy.ts
+# recognises them from the Host header and rewrites to /status/<slug>; no
+# extra service, no second container.
+#
+# Everything else is optional (defaults in brackets):
+#
+#   STAYUP_VERSION       image tag to run [latest] — pin to a release tag
+#   STAYUP_REGISTRY      registry/namespace holding the images
+#                        [registry.gitlab.com/heapreaper/stayup]
+#   LOG_LEVEL            error | warning | info | debug [info]
+#   SMTP_HOST/_PORT/_USER/_PASS/_FROM   fallback mail transport; can also be
+#                        configured (and overridden) in Dashboard → Settings.
+#
+# First run: open the app and register — that first account is the only one
+# the public sign-up form ever creates. Everyone after that is invited from
+# Dashboard → Users.
+#
+# To upgrade: Redeploy (on `latest`), or point STAYUP_VERSION at a newer tag
+# and redeploy. `web` runs `prisma migrate deploy` on every start, so schema
+# changes apply themselves, and the workers wait for it to be healthy before
+# starting.
+#
+# NOTE: the bundled `postgres` service is a plain compose service, not a
+# Coolify *managed database* — Coolify's backup scheduler does not cover it.
+# Either schedule your own pg_dump, or drop this service, create a managed
+# Postgres in Coolify and point DB_URL at it.
+
+x-app-env: &app-env
+  DB_PROVIDER: postgresql
+  # Not a SERVICE_PASSWORD_* magic variable: Coolify substitutes those where
+  # they are the entire value of an environment variable, not inside a longer
+  # string like this connection URL — which would leave the app authenticating
+  # with an empty password against a perfectly healthy database. Keep the
+  # password alphanumeric; see the header.
+  DB_URL: postgresql://stayup:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (letters and digits only)}@postgres:5432/stayup
+  # 64 random bytes, base64. Signs session cookies; rotating it logs everyone
+  # out, which is why it lives in Coolify's resource config and not here.
+  BETTER_AUTH_SECRET: ${SERVICE_REALBASE64_64_AUTH}
+  # Must match the origin the browser actually uses, scheme and all: it is
+  # what better-auth validates every sign-in and sign-up request against.
+  # Deliberately not derived from SERVICE_URL_WEB_3000 — that variable is
+  # empty until Coolify has assigned the domain, and an empty base URL makes
+  # better-auth guess http:// from the request, which then mismatches the
+  # https:// origin the proxy serves and fails with "Invalid origin".
+  BETTER_AUTH_URL: ${BETTER_AUTH_URL:?set BETTER_AUTH_URL to the public origin, e.g. https://status.example.com}
+  PORT: 3000
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USER: ${SMTP_USER:-}
+  SMTP_PASS: ${SMTP_PASS:-}
+  SMTP_FROM: ${SMTP_FROM:-StayUp <noreply@example.com>}
+
+# Every worker is the same image with a different command, and none of them
+# may start against a database that hasn't been migrated yet — hence waiting
+# for `web` to be *healthy*, not merely started (only `web` carries Prisma).
+x-worker: &worker
+  image: ${STAYUP_REGISTRY:-registry.gitlab.com/heapreaper/stayup}/worker:${STAYUP_VERSION:-latest}
+  restart: unless-stopped
+  environment: *app-env
+  volumes:
+  - logs:/app/logs
+  depends_on:
+    postgres:
+      condition: service_healthy
+    web:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: stayup
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: stayup
+    volumes:
+    - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stayup"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web:
+    image: ${STAYUP_REGISTRY:-registry.gitlab.com/heapreaper/stayup}/web:${STAYUP_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      # Declaring this is what makes Coolify assign a domain to this service
+      # and point the proxy at container port 3000. Left empty on purpose:
+      # Coolify fills it in. It drives routing only — BETTER_AUTH_URL above is
+      # set by hand, because the app needs it before this one has a value.
+      SERVICE_FQDN_WEB_3000: ""
+    # Not `ports:` — see the header. The proxy reaches this over the project
+    # network; nothing binds on the host.
+    expose:
+    - "3000"
+    volumes:
+    - logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["sh", "-c", "npx prisma migrate deploy && npm start"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/login >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # HTTP(s) monitors — GETs each URL.
+  worker-https:
+    <<: *worker
+    command: ["/usr/local/bin/https"]
+
+  # Port monitors — raw TCP connect to host:port.
+  worker-port:
+    <<: *worker
+    command: ["/usr/local/bin/port"]
+
+  # Ping monitors — native ICMP echo requests. NET_RAW is in Docker's default
+  # capability set already; it's listed explicitly for hardened hosts and
+  # runtimes that drop it, where ping checks would otherwise fail outright.
+  worker-ping:
+    <<: *worker
+    cap_add:
+    - NET_RAW
+    command: ["/usr/local/bin/ping"]
+
+  # DNS monitors — resolves each hostname's A record(s).
+  worker-dns:
+    <<: *worker
+    command: ["/usr/local/bin/dns"]
+
+  # Not a monitor checker: delivers queued notifications (Discord, Slack,
+  # Webhook, Telegram, Email, PagerDuty, Push) and drives escalation policies.
+  worker-integrations:
+    <<: *worker
+    command: ["/usr/local/bin/integrations"]
+
+  # Housekeeping: rolls each finished day of checks up into a daily summary,
+  # then deletes raw checks and finished notifications past their retention
+  # (Dashboard → Settings → Monitoring). One pass at startup, then one per day.
+  worker-janitor:
+    <<: *worker
+    command: ["/usr/local/bin/janitor"]
+
+volumes:
+  postgres-data:
+  logs:

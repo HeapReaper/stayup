@@ -68,6 +68,13 @@ LABEL org.opencontainers.image.title="StayUp web" \
       org.opencontainers.image.version="$BUILD_VERSION" \
       org.opencontainers.image.revision="$BUILD_REVISION"
 
+# The same two values as env vars, not only labels: labels are metadata *about*
+# the image that the process inside it can't read, and the update checker
+# (src/lib/updates.ts) needs to know which version it is in order to compare
+# itself against the newest published one.
+ENV STAYUP_BUILD_VERSION=$BUILD_VERSION
+ENV STAYUP_BUILD_REVISION=$BUILD_REVISION
+
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
@@ -126,6 +133,12 @@ LABEL org.opencontainers.image.title="StayUp worker" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="$BUILD_VERSION" \
       org.opencontainers.image.revision="$BUILD_REVISION"
+
+# Read by worker/internal/version — cmd/janitor runs the daily update check
+# and has to know which version is asking. Same values, same reasoning as the
+# web image above.
+ENV STAYUP_BUILD_VERSION=$BUILD_VERSION
+ENV STAYUP_BUILD_REVISION=$BUILD_REVISION
 
 # Overridden by the compose files' `command:` for every worker-* service;
 # https is just a sane default if this target is ever run standalone.

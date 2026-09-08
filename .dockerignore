@@ -23,6 +23,7 @@ database.db
 Dockerfile
 docker-compose.yaml
 docker-compose.build.yml
+docker-compose.coolify.yaml
 .dockerignore
 
 README.md

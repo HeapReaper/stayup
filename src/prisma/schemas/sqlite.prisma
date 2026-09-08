@@ -561,6 +561,23 @@ model AppSettings {
   // signs outgoing pushes and never leaves the server.
   vapidPublicKey           String?
   vapidPrivateKey          String?
+  // --- Update checks (src/lib/updates.ts / worker/internal/updates) ---
+  // Off = nothing ever calls out on its own; the "Check now" button in
+  // Dashboard -> Settings -> Updates still works. This is the only outbound
+  // request StayUp makes that isn't a monitor check or a notification.
+  updateCheckEnabled       Boolean   @default(true)
+  // Newest version the last check saw: a release tag ("v1.4.0") on installs
+  // pinned to a tag, or the newest default-branch commit's short SHA on
+  // installs tracking `latest`. Whether it's *newer* than what's running is
+  // decided on read against this process's own build version, so an upgrade
+  // clears the banner without waiting for the next check.
+  latestVersion            String?
+  latestVersionUrl         String?
+  latestVersionPublishedAt DateTime?
+  lastUpdateCheckAt        DateTime?
+  // Why the last check failed, or null if it succeeded — so the Updates tab
+  // can say so instead of silently showing a stale latestVersion.
+  lastUpdateCheckError     String?
   updatedAt                DateTime @updatedAt
 
   @@map("app_settings")

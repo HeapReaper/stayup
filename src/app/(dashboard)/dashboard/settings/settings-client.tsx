@@ -11,10 +11,13 @@ import {
   RefreshCw,
   CheckCircle2,
   Copy,
+  CircleArrowUp,
 } from 'lucide-react';
 
 import { useTRPC } from '@/trpc/client';
+import UpdatesCard from '@/app/(dashboard)/dashboard/settings/updates-card';
 import type { AppSettingsView } from '@/trpc/routers/settings';
+import type { UpdateStatusView } from '@/trpc/routers/update';
 import type { MonitorInterval } from '@/trpc/routers/monitor';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -40,6 +43,7 @@ import {
 
 interface SettingsClientPageProps {
   initialSettings: AppSettingsView;
+  initialUpdateStatus: UpdateStatusView;
 }
 
 const TIMEZONE_LABELS: Record<string, string> = {
@@ -73,7 +77,10 @@ function useSavedFlash() {
   return { saved, flash };
 }
 
-export default function SettingsClientPage({ initialSettings }: SettingsClientPageProps) {
+export default function SettingsClientPage({
+  initialSettings,
+  initialUpdateStatus,
+}: SettingsClientPageProps) {
   const trpc = useTRPC();
   const queryClient = useQueryClient();
 
@@ -206,7 +213,7 @@ export default function SettingsClientPage({ initialSettings }: SettingsClientPa
       </div>
 
       <Tabs defaultValue="general" className="space-y-6">
-        <TabsList className="grid w-full grid-cols-2 md:grid-cols-4 lg:w-auto">
+        <TabsList className="grid w-full grid-cols-2 md:grid-cols-5 lg:w-auto">
           <TabsTrigger value="general" className="gap-2">
             <Globe className="h-4 w-4" /> General
           </TabsTrigger>
@@ -218,6 +225,9 @@ export default function SettingsClientPage({ initialSettings }: SettingsClientPa
           </TabsTrigger>
           <TabsTrigger value="api" className="gap-2">
             <Key className="h-4 w-4" /> API & Tokens
+          </TabsTrigger>
+          <TabsTrigger value="updates" className="gap-2">
+            <CircleArrowUp className="h-4 w-4" /> Updates
           </TabsTrigger>
         </TabsList>
 
@@ -692,6 +702,11 @@ export default function SettingsClientPage({ initialSettings }: SettingsClientPa
               </Button>
             </CardFooter>
           </Card>
+        </TabsContent>
+
+        {/* TAB 5: UPDATES */}
+        <TabsContent value="updates">
+          <UpdatesCard initialStatus={initialUpdateStatus} />
         </TabsContent>
       </Tabs>
     </div>

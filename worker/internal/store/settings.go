@@ -14,17 +14,19 @@ import (
 func (s *Store) GetSettings(ctx context.Context) (*AppSettings, error) {
 	var settings AppSettings
 	var supportEmail, vapidPub, vapidPriv sql.NullString
-	var sslCheckEnabled, certExpiryWarningEnabled db.Bool
+	var sslCheckEnabled, certExpiryWarningEnabled, updateCheckEnabled db.Bool
 
 	err := s.queryRow(ctx, `
 		SELECT id, "supportEmail", "httpTimeoutSeconds", "failedAttemptsThreshold", "latencyThresholdMs",
 		       "sslCheckEnabled", "certExpiryWarningEnabled", "certExpiryWarningDays",
-		       "checkRetentionDays", "deliveryRetentionDays", "vapidPublicKey", "vapidPrivateKey"
+		       "checkRetentionDays", "deliveryRetentionDays", "vapidPublicKey", "vapidPrivateKey",
+		       "updateCheckEnabled"
 		FROM app_settings
 		WHERE id = 'singleton'
 	`).Scan(&settings.ID, &supportEmail, &settings.HTTPTimeoutSecs, &settings.FailedAttemptsThreshold, &settings.LatencyThreshold,
 		&sslCheckEnabled, &certExpiryWarningEnabled, &settings.CertExpiryWarningDays,
-		&settings.CheckRetentionDays, &settings.DeliveryRetentionDays, &vapidPub, &vapidPriv)
+		&settings.CheckRetentionDays, &settings.DeliveryRetentionDays, &vapidPub, &vapidPriv,
+		&updateCheckEnabled)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -35,6 +37,7 @@ func (s *Store) GetSettings(ctx context.Context) (*AppSettings, error) {
 
 	settings.SSLCheckEnabled = bool(sslCheckEnabled)
 	settings.CertExpiryWarningEnabled = bool(certExpiryWarningEnabled)
+	settings.UpdateCheckEnabled = bool(updateCheckEnabled)
 
 	if supportEmail.Valid {
 		settings.SupportEmail = &supportEmail.String
@@ -96,6 +99,48 @@ func (s *Store) BackfillVapidKeys(ctx context.Context, publicKey, privateKey str
 	`), publicKey, privateKey, s.db.TimeArg(now))
 	if err != nil {
 		return fmt.Errorf("store: backfill vapid keys: %w", err)
+	}
+	return nil
+}
+
+// UpdateCheck is one successful update check's findings, as written by
+// SaveUpdateCheck.
+type UpdateCheck struct {
+	LatestVersion string
+	URL           *string
+	PublishedAt   *time.Time
+	CheckedAt     time.Time
+}
+
+// SaveUpdateCheck records what the newest published version is and clears any
+// previous failure — mirrors the success branch of checkForUpdates() in
+// src/lib/updates.ts. `updatedAt` is bumped because Prisma's @updatedAt does
+// the same on the TypeScript side, and the two must not diverge.
+func (s *Store) SaveUpdateCheck(ctx context.Context, in UpdateCheck) error {
+	_, err := s.db.ExecContext(ctx, s.q(`
+		UPDATE app_settings
+		SET "latestVersion" = ?, "latestVersionUrl" = ?, "latestVersionPublishedAt" = ?,
+		    "lastUpdateCheckAt" = ?, "lastUpdateCheckError" = NULL, "updatedAt" = ?
+		WHERE id = 'singleton'
+	`), in.LatestVersion, in.URL, s.db.NullTimeArg(in.PublishedAt), s.db.TimeArg(in.CheckedAt), s.db.TimeArg(in.CheckedAt))
+	if err != nil {
+		return fmt.Errorf("store: save update check: %w", err)
+	}
+	return nil
+}
+
+// SaveUpdateCheckError records that a check ran and failed, deliberately
+// leaving the last known latestVersion in place — mirrors the catch branch of
+// checkForUpdates(). Without the timestamp+reason pair the Updates tab would
+// present stale data as if it were current.
+func (s *Store) SaveUpdateCheckError(ctx context.Context, message string, checkedAt time.Time) error {
+	_, err := s.db.ExecContext(ctx, s.q(`
+		UPDATE app_settings
+		SET "lastUpdateCheckAt" = ?, "lastUpdateCheckError" = ?, "updatedAt" = ?
+		WHERE id = 'singleton'
+	`), s.db.TimeArg(checkedAt), message, s.db.TimeArg(checkedAt))
+	if err != nil {
+		return fmt.Errorf("store: save update check error: %w", err)
 	}
 	return nil
 }

@@ -37,6 +37,10 @@ type Settings struct {
 	DeliveryRetentionDays int
 	VapidPublicKey        string
 	VapidPrivateKey       string
+	// UpdateCheckEnabled off means cmd/janitor's daily pass skips the update
+	// check, leaving the dashboard's "Check now" button as the only thing
+	// that reaches out (internal/updates).
+	UpdateCheckEnabled bool
 }
 
 // atLeast returns value when it's >= min, and fallback otherwise.
@@ -111,6 +115,7 @@ func Get(ctx context.Context, s *store.Store) (Settings, error) {
 		CertExpiryWarningDays:    atLeast(row.CertExpiryWarningDays, 1, 14),
 		CheckRetentionDays:       atLeast(row.CheckRetentionDays, 1, 90),
 		DeliveryRetentionDays:    atLeast(row.DeliveryRetentionDays, 1, 30),
+		UpdateCheckEnabled:       row.UpdateCheckEnabled,
 		VapidPublicKey:           *row.VapidPublicKey,
 		VapidPrivateKey:          *row.VapidPrivateKey,
 	}, nil

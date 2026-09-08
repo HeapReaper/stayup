@@ -62,13 +62,14 @@ go vet ./...
 go test ./...
 ```
 
-If you changed the Dockerfile or either compose file:
+If you changed the Dockerfile or any compose file:
 
 ```bash
 docker build --check --target runner .
 docker build --check --target worker-runner .
 docker compose -f docker-compose.build.yml config > /dev/null
 docker compose config > /dev/null   # copy docker-compose.yaml to an empty dir first, so a local .env can't mask a missing default
+docker compose -f docker-compose.coolify.yaml config > /dev/null   # unset SERVICE_* warnings are expected outside Coolify
 ```
 
 **A note on Biome:** the repository does not currently pass `npm run lint` cleanly — there's a large
@@ -143,10 +144,12 @@ dashboard's manual actions in TypeScript, the automatic ones in Go. Those pairs 
 break this project**: a manually created incident and an automatically detected one must produce the
 same rows, the same timeline and the same notifications.
 
-The same goes for the two compose files: `docker-compose.build.yml` (builds from source) and
-`docker-compose.yaml` (pulls published images, and is what `docker compose up` uses by default)
-describe the same stack, and the deploy one must stay standalone — no `build:`, no `env_file:`, no relative paths — because people import it
-straight from a URL.
+The same goes for the three compose files: `docker-compose.build.yml` (builds from source),
+`docker-compose.yaml` (pulls published images, and is what `docker compose up` uses by default) and
+`docker-compose.coolify.yaml` (the same, adapted to Coolify's proxy) describe the same stack, and
+the two deploy ones must stay standalone — no `build:`, no `env_file:`, no relative paths — because
+people import them straight from a URL. AGENTS.md invariant 9 lists the only differences the
+Coolify variant is allowed to have.
 
 Timestamps: always write UTC (`db.TimeArg` handles it). Prisma maps `DateTime` to a timezone-less
 column on both providers and always writes UTC into it, so a worker running in another timezone would
