@@ -35,8 +35,10 @@ export default async function DashboardPage() {
 
   const user = session.user;
 
+  // The layout above owns both the max-width and the <main> element now, so
+  // this page just contributes content.
   return (
-    <main className="flex-1 max-w-7xl w-full mx-auto">
+    <div className="flex-1">
       <Card className="mb-8 shadow-sm">
         <CardContent className="p-8 flex flex-col md:flex-row md:items-center justify-between gap-6">
           <div className="flex items-center gap-5">
@@ -143,6 +145,6 @@ export default async function DashboardPage() {
           </CardContent>
         </Card>
       </div>
-    </main>
+    </div>
   );
 }

@@ -17,8 +17,17 @@ export default function DashboardLayout({
             <h1 className="text-sm font-medium text-muted-foreground">Dashboard</h1>
           </header>
 
+          {/* Every dashboard page's content is capped here rather than in the
+              pages themselves: tables and charts stretched across an
+              ultrawide monitor are unreadable, and one container means a new
+              page can't forget to do it. `max-w-7xl` matches what the
+              dashboard home page constrained itself to before this moved up.
+              The padding stays on <main> so the background still fills the
+              viewport. */}
           <main className="flex-1 p-6 bg-muted/20">
-            {children}
+            <div className="mx-auto w-full max-w-7xl">
+              {children}
+            </div>
           </main>
         </div>
       </SidebarProvider>
