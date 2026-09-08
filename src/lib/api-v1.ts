@@ -21,6 +21,7 @@ import { NextResponse } from 'next/server';
 import { TRPCError } from '@trpc/server';
 import { ZodError } from 'zod';
 import { getSettings } from '@/lib/settings';
+import { parseStoredMetrics } from '@/lib/server-metrics';
 import { logger } from '@/lib/logging';
 import type { MonitorActor } from '@/trpc/routers/monitor';
 
@@ -192,6 +193,11 @@ export function serializeApiMonitor(monitor: {
   autoIncidents: boolean;
   heartbeatToken: string | null;
   heartbeatGraceSeconds: number | null;
+  cpuThresholdPercent: number | null;
+  memoryThresholdPercent: number | null;
+  diskThresholdPercent: number | null;
+  lastServerMetrics: string | null;
+  confirmationRegions: number | null;
   parentId: string | null;
   createdAt: Date;
   updatedAt: Date;
@@ -220,6 +226,13 @@ export function serializeApiMonitor(monitor: {
     // what goes on the end of the cron line it is about to write.
     heartbeatToken: monitor.heartbeatToken,
     heartbeatGraceSeconds: monitor.heartbeatGraceSeconds,
+    cpuThresholdPercent: monitor.cpuThresholdPercent,
+    memoryThresholdPercent: monitor.memoryThresholdPercent,
+    diskThresholdPercent: monitor.diskThresholdPercent,
+    // The agent's latest reading, parsed — a wallboard polling this endpoint
+    // wants the numbers, not the JSON text they happen to be stored as.
+    serverMetrics: parseStoredMetrics(monitor.lastServerMetrics),
+    confirmationRegions: monitor.confirmationRegions,
     parentId: monitor.parentId,
     parentName: monitor.parent?.name ?? null,
     escalationPolicyId: monitor.escalationPolicy?.id ?? null,

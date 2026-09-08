@@ -9,11 +9,15 @@ import (
 )
 
 // CreateCheck mirrors `prisma.monitorCheck.create(...)` in checkOne().
-func (s *Store) CreateCheck(ctx context.Context, monitorID, status string, statusCode, responseTime *int, message *string, checkedAt time.Time) error {
+//
+// `region` is where the check was performed from, and is empty (stored NULL)
+// for the two monitor types nothing performs a check on — a heartbeat ping and
+// an agent report arrive from the target itself rather than from a region.
+func (s *Store) CreateCheck(ctx context.Context, monitorID, status string, statusCode, responseTime *int, message *string, region string, checkedAt time.Time) error {
 	_, err := s.db.ExecContext(ctx, s.q(`
-		INSERT INTO monitor_check (id, "monitorId", status, "statusCode", "responseTime", message, "checkedAt")
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`), ids.New(), monitorID, status, statusCode, responseTime, message, s.db.TimeArg(checkedAt))
+		INSERT INTO monitor_check (id, "monitorId", status, "statusCode", "responseTime", message, region, "checkedAt")
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`), ids.New(), monitorID, status, statusCode, responseTime, message, nullIfEmpty(region), s.db.TimeArg(checkedAt))
 	if err != nil {
 		return fmt.Errorf("store: create monitor check: %w", err)
 	}

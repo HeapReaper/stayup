@@ -6,6 +6,8 @@ import { prisma } from '@/lib/prisma';
 import { logAudit } from '@/lib/audit';
 import { ASSERTION_TYPES, type AssertionType, validateJsonPath, validateRegex } from '@/lib/assertions';
 import { generateHeartbeatToken, heartbeatPingUrl } from '@/lib/heartbeat';
+import { agentReportUrl } from '@/lib/urls';
+import { parseStoredMetrics, type StoredServerMetrics } from '@/lib/server-metrics';
 import { wouldCreateDependencyCycle } from '@/lib/monitor-dependencies';
 // Re-exported below so existing importers of this router keep working; the
 // definitions live in a Prisma-free module because client components import
@@ -13,7 +15,10 @@ import { wouldCreateDependencyCycle } from '@/lib/monitor-dependencies';
 import {
   DEFAULT_HEARTBEAT_GRACE_SECONDS,
   DEFAULT_PORTS,
+  MAX_CONFIRMATION_REGIONS,
   PROBE_TYPES,
+  PUSH_TYPES,
+  isActiveMonitorType,
   dnsRecordTypeEnum,
   monitorIntervalEnum,
   monitorMethodEnum,
@@ -29,7 +34,9 @@ import {
 export {
   DEFAULT_HEARTBEAT_GRACE_SECONDS,
   DEFAULT_PORTS,
+  MAX_CONFIRMATION_REGIONS,
   PROBE_TYPES,
+  PUSH_TYPES,
   dnsRecordTypeEnum,
   monitorIntervalEnum,
   monitorMethodEnum,
@@ -103,11 +110,13 @@ export type Monitor = Omit<
    */
   parentDown: boolean;
   /**
-   * The URL a Heartbeat monitor's job pings. Null for every other type, and
-   * for a Heartbeat monitor that somehow has no token yet. Carries the token,
-   * so it never leaves an authenticated procedure.
+   * The URL this monitor's sender reports to — the ping URL for a Heartbeat
+   * monitor, the agent URL for a Server one, and null for every type StayUp
+   * dials. Carries the token, so it never leaves an authenticated procedure.
    */
   heartbeatUrl: string | null;
+  /** The agent's most recent reading, for a Server monitor. Null otherwise. */
+  serverMetrics: StoredServerMetrics | null;
 };
 
 function serializeMonitor(monitor: RawMonitor): Monitor {
@@ -132,7 +141,12 @@ function serializeMonitor(monitor: RawMonitor): Monitor {
     escalationPolicyName: monitor.escalationPolicy?.name ?? null,
     parentName: monitor.parent?.name ?? null,
     parentDown: monitor.parent?.status === 'Down',
-    heartbeatUrl: monitor.heartbeatToken ? heartbeatPingUrl(monitor.heartbeatToken) : null,
+    heartbeatUrl: monitor.heartbeatToken
+      ? monitor.type === 'Server'
+        ? agentReportUrl(monitor.heartbeatToken)
+        : heartbeatPingUrl(monitor.heartbeatToken)
+      : null,
+    serverMetrics: parseStoredMetrics(monitor.lastServerMetrics),
   };
 }
 
@@ -142,10 +156,10 @@ function serializeMonitor(monitor: RawMonitor): Monitor {
 // bare host, DSN or domain name as-is.
 function normalizeUrl(type: MonitorType, url: string) {
   const trimmed = url.trim();
-  // A Heartbeat monitor has no target — it is the target. Its address is the
-  // ping URL derived from heartbeatToken, so the column stays empty rather
-  // than holding a URL that would go stale the moment BETTER_AUTH_URL changes.
-  if (type === 'Heartbeat') return '';
+  // A push monitor has no target — it is the target. Its address is the URL
+  // derived from heartbeatToken, so the column stays empty rather than holding
+  // one that would go stale the moment BETTER_AUTH_URL changes.
+  if (!isActiveMonitorType(type)) return '';
   if (type === 'HTTP' && !/^https?:\/\//i.test(trimmed)) {
     return `https://${trimmed}`;
   }
@@ -271,9 +285,19 @@ const monitorBaseInput = z.object({
   // thirty for everything behind it. Null/'' clears the dependency.
   parentId: z.string().nullable().optional(),
 
-  // Heartbeat-only: how late the ping may be, on top of the interval, before
-  // the monitor is called Down. Null means the instance default.
+  // Push types only: how late the report may be, on top of the interval,
+  // before the monitor is called Down. Null means the instance default.
   heartbeatGraceSeconds: z.number().int().min(0).max(86_400).nullable().optional(),
+
+  // Server-only utilisation limits, in percent. Null means that resource is
+  // measured and graphed but never alerted on.
+  cpuThresholdPercent: z.number().int().min(1).max(100).nullable().optional(),
+  memoryThresholdPercent: z.number().int().min(1).max(100).nullable().optional(),
+  diskThresholdPercent: z.number().int().min(1).max(100).nullable().optional(),
+
+  // How many regions must agree before a failure is reported. Null or 1 is the
+  // single-region behaviour: the first region to see a failure reports it.
+  confirmationRegions: z.number().int().min(1).max(MAX_CONFIRMATION_REGIONS).nullable().optional(),
 });
 
 /** True when this monitor actually asserts something about the response body. */
@@ -284,9 +308,9 @@ function hasBodyAssertion(data: z.infer<typeof monitorBaseInput>): boolean {
 
 const withPortRequiredForPortType = <T extends typeof monitorBaseInput>(schema: T) =>
   schema
-    // Every type except Heartbeat is something StayUp dials, and a checker
+    // Every type but the push ones is something StayUp dials, and a checker
     // with no address fails every check with a message nobody can act on.
-    .refine((data) => data.type === 'Heartbeat' || data.url.trim().length > 0, {
+    .refine((data) => !isActiveMonitorType(data.type) || data.url.trim().length > 0, {
       message: 'URL or host is required',
       path: ['url'],
     })
@@ -406,13 +430,36 @@ function dnsOptionsFor(input: z.infer<typeof monitorBaseInput>) {
  * clears it, which is what makes the old URL stop answering.
  */
 function heartbeatFieldsFor(input: z.infer<typeof monitorBaseInput>, existingToken: string | null) {
-  if (input.type !== 'Heartbeat') {
+  if (!PUSH_TYPES.includes(input.type)) {
     return { heartbeatToken: null, heartbeatGraceSeconds: null };
   }
 
   return {
     heartbeatToken: existingToken ?? generateHeartbeatToken(),
     heartbeatGraceSeconds: input.heartbeatGraceSeconds ?? DEFAULT_HEARTBEAT_GRACE_SECONDS,
+  };
+}
+
+/**
+ * The Server-only columns, blanked for every other type — the same reasoning
+ * as httpOptionsFor: a monitor switched away from Server must not keep a disk
+ * threshold that silently reactivates if it is switched back, and its stored
+ * reading describes a machine it is no longer watching.
+ */
+function serverOptionsFor(input: z.infer<typeof monitorBaseInput>) {
+  if (input.type !== 'Server') {
+    return {
+      cpuThresholdPercent: null,
+      memoryThresholdPercent: null,
+      diskThresholdPercent: null,
+      lastServerMetrics: null,
+    };
+  }
+
+  return {
+    cpuThresholdPercent: input.cpuThresholdPercent ?? null,
+    memoryThresholdPercent: input.memoryThresholdPercent ?? null,
+    diskThresholdPercent: input.diskThresholdPercent ?? null,
   };
 }
 
@@ -533,7 +580,9 @@ export async function createMonitor(
         createdById: actor.id,
         credential: credentialFor(input, null),
         sloTarget: input.sloTarget ?? null,
+        confirmationRegions: input.confirmationRegions ?? null,
         ...heartbeatFieldsFor(input, null),
+        ...serverOptionsFor(input),
         ...overridesFor(input),
         ...httpOptionsFor(input),
         ...dnsOptionsFor(input),
@@ -583,7 +632,9 @@ export async function updateMonitor(
         autoIncidents: input.autoIncidents,
         credential: credentialFor(input, existing.credential),
         sloTarget: input.sloTarget ?? null,
+        confirmationRegions: input.confirmationRegions ?? null,
         ...heartbeatFieldsFor(input, existing.heartbeatToken),
+        ...serverOptionsFor(input),
         ...overridesFor(input),
         ...httpOptionsFor(input),
         ...dnsOptionsFor(input),
@@ -700,6 +751,10 @@ export function monitorToInput(monitor: PrismaMonitor & { tags: { tag: { name: s
     latencyThresholdMs: monitor.latencyThresholdMs,
     autoIncidents: monitor.autoIncidents,
     heartbeatGraceSeconds: monitor.heartbeatGraceSeconds,
+    cpuThresholdPercent: monitor.cpuThresholdPercent,
+    memoryThresholdPercent: monitor.memoryThresholdPercent,
+    diskThresholdPercent: monitor.diskThresholdPercent,
+    confirmationRegions: monitor.confirmationRegions,
   };
 }
 
@@ -758,8 +813,8 @@ export const monitorRouter = createTRPCRouter({
       if (!existing) {
         throw new TRPCError({ code: 'NOT_FOUND', message: 'Monitor not found' });
       }
-      if (existing.type !== 'Heartbeat') {
-        throw new TRPCError({ code: 'BAD_REQUEST', message: 'Only heartbeat monitors have a ping URL' });
+      if (!PUSH_TYPES.includes(existing.type as MonitorType)) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'Only heartbeat and server monitors have a push URL' });
       }
 
       await prisma.monitor.update({

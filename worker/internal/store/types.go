@@ -15,9 +15,14 @@ type Monitor struct {
 	Port     *int
 	// Paused monitors are filtered out by ListByType — a worker never sees
 	// one, so nothing downstream has to check this.
-	Enabled            bool
-	LastCheckedAt      *time.Time
-	EscalationPolicyID *string
+	Enabled       bool
+	LastCheckedAt *time.Time
+	// When *this worker's region* last finished a check, out of monitor_lease.
+	// Due-ness is judged on this rather than LastCheckedAt, which is the newest
+	// check from anywhere: sharing one column across regions would mean
+	// whichever region ticked first was the only one that ever checked.
+	RegionLastCheckedAt *time.Time
+	EscalationPolicyID  *string
 
 	// ParentID is the monitor this one sits behind, or nil. While an ancestor
 	// is Down, this monitor's failing checks open no incident — see
@@ -29,6 +34,11 @@ type Monitor struct {
 	// defaultGraceSeconds there. The token itself is never read by a worker —
 	// only the Next.js ping endpoint looks it up.
 	HeartbeatGraceSeconds *int
+
+	// How many regions must independently agree this monitor is failing before
+	// the failure is reported. Nil or 1 is the single-region behaviour every
+	// monitor had before: the first region to see a failure reports it.
+	ConfirmationRegions *int
 
 	// HTTP-only request options; zero values for every other monitor type.
 	// See the `monitor` model in src/prisma/schemas/*.prisma for what each
@@ -76,13 +86,18 @@ type Monitor struct {
 	AutoIncidents bool
 }
 
-// IsDue reports whether this monitor's check interval has elapsed since its
-// last check — mirrors isDue() in src/lib/monitor-worker.ts.
+// IsDue reports whether this monitor's check interval has elapsed since the
+// last check *from this region*.
+//
+// A monitor with no lease row for the region has never been checked there, so
+// it is due — which is what makes the first tick after a new region comes up
+// (or after the lease table was added) claim everything once and then settle
+// into the normal cadence.
 func (m Monitor) IsDue(now time.Time) bool {
-	if m.LastCheckedAt == nil {
+	if m.RegionLastCheckedAt == nil {
 		return true
 	}
-	return now.Sub(*m.LastCheckedAt) >= intervalDuration(m.Interval)
+	return now.Sub(*m.RegionLastCheckedAt) >= intervalDuration(m.Interval)
 }
 
 // IntervalDuration is this monitor's configured check interval. Exported for

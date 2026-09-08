@@ -30,6 +30,7 @@ import (
 	"stayup/worker/internal/db"
 	"stayup/worker/internal/logging"
 	"stayup/worker/internal/procstat"
+	"stayup/worker/internal/region"
 	"stayup/worker/internal/settings"
 	"stayup/worker/internal/store"
 	"stayup/worker/internal/updates"
@@ -178,6 +179,7 @@ func pass(ctx context.Context, s *store.Store) {
 func heartbeat(ctx context.Context, s *store.Store, startedAt time.Time) {
 	if err := s.RecordHeartbeat(ctx, store.Heartbeat{
 		Worker:          "janitor",
+		Region:          region.Current(),
 		IntervalSeconds: int(tickInterval.Seconds()),
 		StartedAt:       startedAt,
 		LastSeenAt:      time.Now(),

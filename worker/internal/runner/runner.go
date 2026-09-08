@@ -18,6 +18,7 @@ import (
 	"stayup/worker/internal/incidents"
 	"stayup/worker/internal/logging"
 	"stayup/worker/internal/procstat"
+	"stayup/worker/internal/region"
 	"stayup/worker/internal/settings"
 	"stayup/worker/internal/store"
 	"stayup/worker/internal/version"
@@ -27,6 +28,23 @@ import (
 const uptimeWindow = 30 * 24 * time.Hour
 
 const defaultTickInterval = 5 * time.Second
+
+// How long a claimed monitor stays claimed. Long enough that no ordinary
+// check outruns it (the per-monitor HTTP timeout tops out at 300s), short
+// enough that a worker killed mid-check frees it within a couple of
+// intervals rather than stranding it until someone notices.
+const leaseDuration = 10 * time.Minute
+
+// How stale a region's last verdict may be and still count towards consensus.
+// Three intervals with a two-minute floor, the same shape as the dashboard's
+// worker-staleness rule: a region that has gone quiet stops voting instead of
+// holding whatever it happened to see when it died.
+func opinionWindow(interval time.Duration) time.Duration {
+	if window := interval * 3; window > 2*time.Minute {
+		return window
+	}
+	return 2 * time.Minute
+}
 
 // PerformCheck performs a single check. Should not return an error for an
 // expected failure (target down, timed out, refused, ...) — represent that as
@@ -82,11 +100,11 @@ func Run(ctx context.Context, s *store.Store, opts Options) {
 
 // listMonitors reads this worker's due-monitor candidates, for whichever of
 // the two type shapes it was configured with.
-func (o Options) listMonitors(ctx context.Context, s *store.Store) ([]store.Monitor, error) {
+func (o Options) listMonitors(ctx context.Context, s *store.Store, region string) ([]store.Monitor, error) {
 	if len(o.MonitorTypes) > 0 {
-		return s.ListByTypes(ctx, o.MonitorTypes)
+		return s.ListByTypes(ctx, region, o.MonitorTypes)
 	}
-	return s.ListByType(ctx, o.MonitorType)
+	return s.ListByType(ctx, region, o.MonitorType)
 }
 
 func tick(ctx context.Context, s *store.Store, opts Options, startedAt time.Time, interval time.Duration) {
@@ -96,6 +114,7 @@ func tick(ctx context.Context, s *store.Store, opts Options, startedAt time.Time
 	if err := s.RecordHeartbeat(ctx, store.Heartbeat{
 		// The row is keyed on the binary's name, not the log label.
 		Worker:          strings.TrimSuffix(opts.WorkerLabel, "-worker"),
+		Region:          region.Current(),
 		IntervalSeconds: int(interval.Seconds()),
 		StartedAt:       startedAt,
 		LastSeenAt:      time.Now(),
@@ -106,7 +125,9 @@ func tick(ctx context.Context, s *store.Store, opts Options, startedAt time.Time
 		logging.Error(fmt.Sprintf("[%s] Failed to record heartbeat", opts.WorkerLabel), err)
 	}
 
-	monitors, err := opts.listMonitors(ctx, s)
+	here := region.Current()
+
+	monitors, err := opts.listMonitors(ctx, s, here)
 	if err != nil {
 		logging.Error(fmt.Sprintf("[%s] Tick failed", opts.WorkerLabel), err)
 		return
@@ -136,7 +157,21 @@ func tick(ctx context.Context, s *store.Store, opts Options, startedAt time.Time
 		wg.Add(1)
 		go func(m store.Monitor) {
 			defer wg.Done()
-			if err := checkOne(ctx, s, opts, cfg, m); err != nil {
+
+			// Claim before checking. Two replicas of this worker will both see
+			// the monitor as due — the lease is what stops them both checking
+			// it, doubling the load on the target and writing two rows for one
+			// interval. Losing the race is the normal, quiet outcome.
+			claimed, err := s.ClaimMonitor(ctx, m.ID, here, region.InstanceID(), time.Now(), time.Now().Add(leaseDuration))
+			if err != nil {
+				logging.Error(fmt.Sprintf("[%s] Failed to claim monitor %q", opts.WorkerLabel, m.Name), err)
+				return
+			}
+			if !claimed {
+				return
+			}
+
+			if err := checkOne(ctx, s, opts, cfg, m, here); err != nil {
 				logging.Error(fmt.Sprintf("[%s] Failed to check monitor %q", opts.WorkerLabel, m.Name), err)
 			}
 		}(m)
@@ -144,7 +179,7 @@ func tick(ctx context.Context, s *store.Store, opts Options, startedAt time.Time
 	wg.Wait()
 }
 
-func checkOne(ctx context.Context, s *store.Store, opts Options, cfg settings.Settings, monitor store.Monitor) error {
+func checkOne(ctx context.Context, s *store.Store, opts Options, cfg settings.Settings, monitor store.Monitor, here string) error {
 	// Per-monitor overrides land here, once, so every checker and every
 	// threshold below reads one already-resolved Settings value.
 	cfg = settings.ForMonitor(cfg, monitor)
@@ -153,7 +188,7 @@ func checkOne(ctx context.Context, s *store.Store, opts Options, cfg settings.Se
 	checkedAt := time.Now()
 
 	responseTime := result.ResponseTime
-	if err := s.CreateCheck(ctx, monitor.ID, result.Status, result.StatusCode, &responseTime, result.Message, checkedAt); err != nil {
+	if err := s.CreateCheck(ctx, monitor.ID, result.Status, result.StatusCode, &responseTime, result.Message, here, checkedAt); err != nil {
 		return err
 	}
 
@@ -171,7 +206,20 @@ func checkOne(ctx context.Context, s *store.Store, opts Options, cfg settings.Se
 	// identical to a real failure from a single check. Roll up the *confirmed*
 	// status instead, so a blip no longer flips the monitor to Down and pages
 	// everyone.
-	reported, err := confirmedStatus(ctx, s, cfg, monitor, result.Status)
+	local, err := confirmedStatus(ctx, s, cfg, monitor, result.Status)
+	if err != nil {
+		return err
+	}
+
+	// Release before asking for consensus, so this region's own verdict is one
+	// of the votes counted rather than a result the query can't see yet. It
+	// also drops the lock the moment the check is done, instead of holding it
+	// for the rest of the lease.
+	if err := s.ReleaseLease(ctx, monitor.ID, here, local, checkedAt); err != nil {
+		return err
+	}
+
+	reported, consensus, err := agreedStatus(ctx, s, monitor, local, checkedAt)
 	if err != nil {
 		return err
 	}
@@ -181,9 +229,15 @@ func checkOne(ctx context.Context, s *store.Store, opts Options, cfg settings.Se
 	}
 
 	logResult(opts.WorkerLabel, monitor, result)
-	if reported != result.Status {
+	if local != result.Status {
 		logging.Info(fmt.Sprintf("[%s] %s: %s check not yet confirmed (fewer than %d failures in a row) — holding status at %s",
-			opts.WorkerLabel, monitor.Name, strings.ToLower(result.Status), cfg.FailedAttemptsThreshold, reported))
+			opts.WorkerLabel, monitor.Name, strings.ToLower(result.Status), cfg.FailedAttemptsThreshold, local))
+		return nil
+	}
+	if reported != local {
+		logging.Info(fmt.Sprintf("[%s] %s looks %s from %s, but only %d of %d reporting region(s) agree (%d required) — holding status at %s",
+			opts.WorkerLabel, monitor.Name, strings.ToLower(local), here,
+			consensus.Failing, consensus.Reporting, consensus.Required, reported))
 		return nil
 	}
 
@@ -270,6 +324,68 @@ func confirmedStatus(ctx context.Context, s *store.Store, cfg settings.Settings,
 		return "Up", nil
 	}
 	return status, nil
+}
+
+// consensus is what the region vote decided, for the log line that explains a
+// failure that was seen but not reported.
+type consensus struct {
+	Reporting int
+	Failing   int
+	Required  int
+}
+
+// agreedStatus applies Monitor.confirmationRegions: a failure one region can
+// see is only reported once that many regions see it too.
+//
+// This is the check that failedAttemptsThreshold cannot do. That one debounces
+// a monitor over *time*, so it catches a dropped packet but not a bad transit
+// route — and a broken path between one probe and the target looks exactly
+// like an outage from that probe, however long you wait. Asking a second
+// region is the only thing that tells them apart, and it is the single biggest
+// source of false pages in uptime monitoring.
+//
+// Two deliberate softenings, both erring towards alerting, because the failure
+// mode of getting this wrong is silence:
+//
+//   - The requirement is capped at the number of regions actually reporting.
+//     Configure three, run two, and you get two — rather than a monitor that
+//     can never alert because the third region was never deployed.
+//   - Recovery is never gated. One region seeing the monitor back up reports
+//     it up, so a monitor cannot get stuck Down because the region that saw
+//     the outage has since stopped reporting.
+func agreedStatus(ctx context.Context, s *store.Store, monitor store.Monitor, local string, now time.Time) (string, consensus, error) {
+	required := 1
+	if monitor.ConfirmationRegions != nil && *monitor.ConfirmationRegions > 1 {
+		required = *monitor.ConfirmationRegions
+	}
+	if local == "Up" || required == 1 {
+		return local, consensus{}, nil
+	}
+
+	reporting, failing, err := s.RegionOpinions(ctx, monitor.ID, now.Add(-opinionWindow(monitor.IntervalDuration())))
+	if err != nil {
+		return "", consensus{}, err
+	}
+
+	status, agreed := decideConsensus(local, required, reporting, failing)
+	return status, agreed, nil
+}
+
+// decideConsensus is the vote itself, split out from the query so the rule can
+// be tested without a database — it is the part with the edge cases.
+func decideConsensus(local string, required, reporting, failing int) (string, consensus) {
+	// Cap at what is actually deployed. Configure three, run two, and you get
+	// two — rather than a monitor that can never alert because the third region
+	// was never brought up.
+	if reporting > 0 && required > reporting {
+		required = reporting
+	}
+
+	agreed := consensus{Reporting: reporting, Failing: failing, Required: required}
+	if failing >= required {
+		return local, agreed
+	}
+	return "Up", agreed
 }
 
 func logResult(workerLabel string, monitor store.Monitor, result store.CheckResult) {

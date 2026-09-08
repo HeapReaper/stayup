@@ -101,6 +101,7 @@ async function handle(request: Request, segments: string[]) {
     status: rest[0] === 'fail' ? 'Down' : 'Up',
     message: await readMessage(request),
     responseTime: readResponseTime(request),
+    failureSummary: 'reported a failed run',
   });
 
   return NextResponse.json({ ok: true });

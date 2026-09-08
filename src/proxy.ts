@@ -36,6 +36,13 @@ async function resolveStatusPageSlug(hostname: string): Promise<string | null> {
   }
 }
 
+/**
+ * Paths that belong to the app itself and never to a status page, however the
+ * request arrived. Everything under /api is already excluded above; this is
+ * the page half.
+ */
+const AUTH_PATHS = ["/login", "/register", "/logout"];
+
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const hostname = request.headers.get("host")?.split(":")[0]?.toLowerCase() ?? "";
@@ -53,6 +60,20 @@ export async function proxy(request: NextRequest) {
     !pathname.startsWith("/api") &&
     !pathname.startsWith("/_next")
   ) {
+    // Sign-in never happens on a custom domain. A private status page there
+    // used to redirect to /login on its own hostname, where this same rewrite
+    // turned it into /status/<slug>/login and 404'd — a loop with no way out.
+    //
+    // Send it to the app's own origin instead, which is where the session
+    // cookie lives and the only place better-auth (and any OIDC redirect URI
+    // registered with an identity provider) is configured for.
+    if (AUTH_PATHS.some((path) => pathname === path || pathname.startsWith(`${path}/`))) {
+      const appOrigin = process.env.BETTER_AUTH_URL;
+      if (appOrigin) {
+        return NextResponse.redirect(new URL(pathname + request.nextUrl.search, appOrigin));
+      }
+    }
+
     const slug = await resolveStatusPageSlug(hostname);
     if (slug) {
       // The rest of the path is carried across, so the page's sub-routes —

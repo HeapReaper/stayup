@@ -1,8 +1,8 @@
-// Command heartbeat is the worker for Heartbeat (push) monitors — the dead
+// Command heartbeat is the worker for the two push monitor types — the dead
 // man's switch. It is the only worker that checks monitors by *not* being
-// called: the job on the other end pings /api/heartbeat/<token> when it
-// finishes (recorded by the Next.js app, src/lib/heartbeat.ts), and this
-// binary notices when that ping stops arriving.
+// called: the thing on the other end reports in (a cron job to
+// /api/heartbeat/<token>, a server agent to /api/agent/<token>, both recorded
+// by the Next.js app), and this binary notices when that stops arriving.
 //
 // That inversion is why it doesn't build on internal/runner. The runner's
 // whole shape is "poll for due monitors, perform a check, persist the
@@ -28,6 +28,7 @@ import (
 	"stayup/worker/internal/incidents"
 	"stayup/worker/internal/logging"
 	"stayup/worker/internal/procstat"
+	"stayup/worker/internal/region"
 	"stayup/worker/internal/store"
 	"stayup/worker/internal/version"
 )
@@ -70,20 +71,32 @@ func sweep(ctx context.Context, s *store.Store) {
 			continue
 		}
 		if err := recordMissed(ctx, s, monitor, now, deadline); err != nil {
-			logging.Error(fmt.Sprintf("[heartbeat-worker] Failed to record missed heartbeat for %q", monitor.Name), err)
+			logging.Error(fmt.Sprintf("[heartbeat-worker] Failed to record missed %s for %q", noun(monitor.Type), monitor.Name), err)
 		}
 	}
 }
 
+// noun is what stopped arriving, so the check message and the incident read
+// naturally for both push types rather than telling an operator their server
+// "missed a heartbeat".
+func noun(monitorType string) string {
+	if monitorType == "Server" {
+		return "agent report"
+	}
+	return "heartbeat"
+}
+
 func recordMissed(ctx context.Context, s *store.Store, monitor store.HeartbeatMonitor, now, deadline time.Time) error {
 	late := now.Sub(deadline).Round(time.Second)
-	message := fmt.Sprintf("No heartbeat received — %s past the deadline", late)
+	message := fmt.Sprintf("No %s received — %s past the deadline", noun(monitor.Type), late)
 	zero := 0
 
 	// The raw row first, and unconditionally: check history records what
 	// actually happened (invariant 8 in AGENTS.md), and "nothing happened" is
 	// the whole signal for this monitor type.
-	if err := s.CreateCheck(ctx, monitor.ID, "Down", nil, &zero, &message, now); err != nil {
+	// No region: nothing performed this check. A heartbeat monitor fails by
+	// nobody calling in, which happens everywhere and nowhere.
+	if err := s.CreateCheck(ctx, monitor.ID, "Down", nil, &zero, &message, "", now); err != nil {
 		return err
 	}
 
@@ -133,13 +146,13 @@ func syncIncident(ctx context.Context, s *store.Store, monitor store.HeartbeatMo
 		return
 	}
 	if suppressed {
-		logging.Info(fmt.Sprintf("[heartbeat-worker] %s missed its heartbeat but %s — skipping incident", monitor.Name, reason))
+		logging.Info(fmt.Sprintf("[heartbeat-worker] %s missed its %s but %s — skipping incident", monitor.Name, noun(monitor.Type), reason))
 		return
 	}
 
 	message := fmt.Sprintf(
-		"Automatically detected: %s has not checked in. Its last heartbeat is %s past the deadline (expected every %s).",
-		monitor.Name, late, monitor.Interval)
+		"Automatically detected: %s has not checked in. Its last %s is %s past the deadline (expected every %s).",
+		monitor.Name, noun(monitor.Type), late, monitor.Interval)
 
 	incident, err := incidents.EnsureIncidentForMonitor(ctx, s, incidents.MonitorRef{ID: monitor.ID, Name: monitor.Name}, "Down", message)
 	if err != nil {
@@ -155,6 +168,7 @@ func tick(ctx context.Context, s *store.Store, startedAt time.Time) {
 	// question from "is anything checking in".
 	if err := s.RecordHeartbeat(ctx, store.Heartbeat{
 		Worker:          "heartbeat",
+		Region:          region.Current(),
 		IntervalSeconds: int(tickInterval.Seconds()),
 		StartedAt:       startedAt,
 		LastSeenAt:      time.Now(),

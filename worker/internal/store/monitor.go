@@ -14,15 +14,15 @@ import (
 // in src/lib/monitor-worker.ts's tick(). Paused monitors (enabled = false) are
 // filtered out here rather than in the runner, so no worker ever has to think
 // about them — a pause takes effect on the next tick, at most a few seconds.
-func (s *Store) ListByType(ctx context.Context, monitorType string) ([]Monitor, error) {
-	return s.listMonitors(ctx, `WHERE type = ? AND enabled = ?`, monitorType, s.db.BoolArg(true))
+func (s *Store) ListByType(ctx context.Context, region, monitorType string) ([]Monitor, error) {
+	return s.listMonitors(ctx, region, `WHERE m.type = ? AND m.enabled = ?`, monitorType, s.db.BoolArg(true))
 }
 
 // ListByTypes is ListByType for a worker that owns more than one monitor type
 // — cmd/probes handles the whole family of connection-level checks (Postgres,
 // MySQL, Redis, SMTP, IMAP, gRPC, WebSocket, Domain) from one binary rather
 // than shipping eight near-identical containers.
-func (s *Store) ListByTypes(ctx context.Context, monitorTypes []string) ([]Monitor, error) {
+func (s *Store) ListByTypes(ctx context.Context, region string, monitorTypes []string) ([]Monitor, error) {
 	if len(monitorTypes) == 0 {
 		return nil, nil
 	}
@@ -34,17 +34,27 @@ func (s *Store) ListByTypes(ctx context.Context, monitorTypes []string) ([]Monit
 	}
 	args = append(args, s.db.BoolArg(true))
 
-	return s.listMonitors(ctx, fmt.Sprintf(`WHERE type IN (%s) AND enabled = ?`, placeholders), args...)
+	return s.listMonitors(ctx, region, fmt.Sprintf(`WHERE m.type IN (%s) AND m.enabled = ?`, placeholders), args...)
 }
 
-func (s *Store) listMonitors(ctx context.Context, where string, args ...any) ([]Monitor, error) {
+// listMonitors LEFT JOINs this region's lease so due-ness can be judged
+// per region in the same query — the join is the whole reason ListByType now
+// takes one. A monitor with no lease row yet reads as never checked here,
+// which is exactly right: it hasn't been.
+func (s *Store) listMonitors(ctx context.Context, region, where string, args ...any) ([]Monitor, error) {
+	// The region goes in front of the caller's arguments because it is bound
+	// in the JOIN, which precedes the WHERE clause.
+	args = append([]any{region}, args...)
+
 	rows, err := s.db.QueryContext(ctx, s.q(`
-		SELECT id, name, url, type, status, interval, port, enabled, "lastCheckedAt", "escalationPolicyId",
-		       method, "requestHeaders", "requestBody", "followRedirects", "expectedStatusCodes", keyword, "keywordInverted",
-		       "assertionType", "jsonPath", "dnsRecordType", "dnsExpectedValue", credential, "flappingSince",
-		       "httpTimeoutSeconds", "failedAttemptsThreshold", "latencyThresholdMs", "autoIncidents",
-		       "parentId", "heartbeatGraceSeconds"
-		FROM monitor
+		SELECT m.id, m.name, m.url, m.type, m.status, m.interval, m.port, m.enabled, m."lastCheckedAt", m."escalationPolicyId",
+		       m.method, m."requestHeaders", m."requestBody", m."followRedirects", m."expectedStatusCodes", m.keyword, m."keywordInverted",
+		       m."assertionType", m."jsonPath", m."dnsRecordType", m."dnsExpectedValue", m.credential, m."flappingSince",
+		       m."httpTimeoutSeconds", m."failedAttemptsThreshold", m."latencyThresholdMs", m."autoIncidents",
+		       m."parentId", m."heartbeatGraceSeconds", m."confirmationRegions",
+		       l."lastCheckedAt"
+		FROM monitor m
+		LEFT JOIN monitor_lease l ON l."monitorId" = m.id AND l.region = ?
 		`+where), args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: list monitors by type: %w", err)
@@ -56,17 +66,18 @@ func (s *Store) listMonitors(ctx context.Context, where string, args ...any) ([]
 		var m Monitor
 		var port sql.NullInt64
 		var enabled, followRedirects, keywordInverted, autoIncidents db.Bool
-		var lastCheckedAt, flappingSince sql.NullTime
+		var lastCheckedAt, flappingSince, regionLastCheckedAt sql.NullTime
 		var escalationPolicyID, requestHeaders, requestBody, expectedStatusCodes, keyword sql.NullString
 		var jsonPath, dnsExpectedValue, credential, parentID sql.NullString
-		var httpTimeout, failedAttempts, latencyThreshold, heartbeatGrace sql.NullInt64
+		var httpTimeout, failedAttempts, latencyThreshold, heartbeatGrace, confirmationRegions sql.NullInt64
 
 		if err := rows.Scan(
 			&m.ID, &m.Name, &m.URL, &m.Type, &m.Status, &m.Interval, &port, &enabled, &lastCheckedAt, &escalationPolicyID,
 			&m.Method, &requestHeaders, &requestBody, &followRedirects, &expectedStatusCodes, &keyword, &keywordInverted,
 			&m.AssertionType, &jsonPath, &m.DNSRecordType, &dnsExpectedValue, &credential, &flappingSince,
 			&httpTimeout, &failedAttempts, &latencyThreshold, &autoIncidents,
-			&parentID, &heartbeatGrace,
+			&parentID, &heartbeatGrace, &confirmationRegions,
+			&regionLastCheckedAt,
 		); err != nil {
 			return nil, fmt.Errorf("store: scan monitor: %w", err)
 		}
@@ -102,6 +113,11 @@ func (s *Store) listMonitors(ctx context.Context, where string, args ...any) ([]
 		m.LatencyThresholdMs = nullInt(latencyThreshold)
 		m.ParentID = nullString(parentID)
 		m.HeartbeatGraceSeconds = nullInt(heartbeatGrace)
+		m.ConfirmationRegions = nullInt(confirmationRegions)
+		if regionLastCheckedAt.Valid {
+			t := regionLastCheckedAt.Time
+			m.RegionLastCheckedAt = &t
+		}
 		monitors = append(monitors, m)
 	}
 	return monitors, rows.Err()

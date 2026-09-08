@@ -122,7 +122,7 @@ model Monitor {
   id            String              @id @default(cuid())
   name          String
   url           String
-  type          String              @default("HTTP") // HTTP | Ping | Port | DNS | Heartbeat | …
+  type          String              @default("HTTP") // HTTP | Ping | Port | DNS | Heartbeat | Server | …
   status        String              @default("Up") // Up | Down | Degraded
   interval      String              @default("60s") // 15s | 30s | 60s | 5m
   port          Int?
@@ -226,7 +226,13 @@ model Monitor {
   //
   // The token is the whole credential (it is in a URL a cron line pastes), so
   // it is generated with 24 random bytes and regeneratable from the monitor
-  // form. Null for every other monitor type.
+  // form. Null for every monitor type that StayUp dials.
+  //
+  // Shared with Server monitors, which are the same idea one layer down: an
+  // agent on the machine POSTs to /api/agent/<token> instead of a cron line
+  // curling /api/heartbeat/<token>. One column because it is one credential
+  // with one lifecycle — issued when the monitor becomes a push type, cleared
+  // when it stops being one, rotated from the same button.
   heartbeatToken  String?  @unique
   // How long after `interval` has elapsed the ping may still arrive before
   // the monitor is called Down. Null means the default (see
@@ -245,6 +251,26 @@ model Monitor {
   parentId      String?
   parent        Monitor?            @relation("MonitorDependency", fields: [parentId], references: [id], onDelete: SetNull)
   children      Monitor[]           @relation("MonitorDependency")
+  // --- Server monitors (worker/cmd/agent) ---
+  // Utilisation percentages above which the agent's report is Degraded rather
+  // than Up. Null means that resource isn't held to a threshold — an agent
+  // with no thresholds at all is a liveness check that also draws graphs.
+  // A full disk is the classic outage no HTTP check ever sees.
+  cpuThresholdPercent    Int?
+  memoryThresholdPercent Int?
+  diskThresholdPercent   Int?
+  // The most recent report, as JSON, for the dashboard to render. Deliberately
+  // a snapshot rather than a time series: per-resource history is a metrics
+  // store's job (and would be the one thing in StayUp needing a columnar
+  // database), while "is it full right now" is what pages someone.
+  lastServerMetrics      String?
+  // --- Multi-region checking ---
+  // How many regions must independently agree a monitor is failing before it
+  // is reported as failing. Null or 1 keeps the single-region behaviour every
+  // monitor had before: the first region to see a failure reports it. Above 1,
+  // one region's bad transit route stops being an outage — which is the single
+  // biggest source of false pages in uptime monitoring.
+  confirmationRegions    Int?
   createdById   String?
   createdBy     User?               @relation(fields: [createdById], references: [id], onDelete: SetNull)
   // Optional paging chain — if set, an open incident on this monitor is paged
@@ -262,6 +288,7 @@ model Monitor {
   maintenanceWindows  MaintenanceWindowMonitor[]
   tags                MonitorTag[]
   notificationRules   NotificationRule[]
+  leases              MonitorLease[]
 
   @@index([createdById])
   @@index([escalationPolicyId])
@@ -280,10 +307,52 @@ model MonitorCheck {
   statusCode   Int?
   responseTime Int? // ms
   message      String?
+  // Which region performed this check. Null for every row written before
+  // regions existed, and for the ones the Next.js app writes itself (a
+  // heartbeat ping, an agent report) — those arrive from the target rather
+  // than being performed from anywhere.
+  region       String?
   checkedAt    DateTime @default(now())
 
   @@index([monitorId, checkedAt])
   @@map("monitor_check")
+}
+
+// One row per (monitor, region): the lease a check worker holds while it is
+// checking that monitor, and the per-region check history the scheduler needs.
+//
+// Two problems, one table. The first is that `runner.tick` used to select
+// every due monitor with no lock at all, so two replicas of the same worker
+// checked everything twice — harmless-looking, but it doubles the load on the
+// target and writes two rows per interval. The second is regions: due-ness
+// cannot live on `monitor.lastCheckedAt` any more, because a check from
+// Frankfurt would otherwise make the monitor look "not due" to the worker in
+// Virginia, and only one region would ever check anything.
+//
+// `monitor.lastCheckedAt` stays what it always was — the newest check from
+// anywhere, which is what the dashboard shows.
+model MonitorLease {
+  monitorId String
+  monitor   Monitor @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  // STAYUP_REGION on the worker, or "default" when unset — which is what a
+  // single-region install (every install today) carries.
+  region    String
+  // Which worker process holds the lease, and until when. A lease is taken for
+  // a bounded time rather than released by a defer, so a worker that is killed
+  // mid-check frees the monitor on its own once the lease expires instead of
+  // stranding it forever.
+  lockedBy    String?
+  lockedUntil DateTime?
+  // When this region last completed a check, and what it saw. The status is
+  // what the consensus rule counts: Monitor.confirmationRegions asks how many
+  // regions currently see a failure, and this column is the answer per region.
+  lastCheckedAt DateTime?
+  lastStatus    String? // Up | Down | Degraded
+  updatedAt     DateTime @updatedAt
+
+  @@id([monitorId, region])
+  @@index([region, lastCheckedAt])
+  @@map("monitor_lease")
 }
 
 // One row per monitor per UTC day: that day's MonitorCheck rows, aggregated
@@ -843,10 +912,20 @@ model MonitorTag {
 // worker isn't running" — indistinguishable otherwise, since a monitor with
 // no checks yet looks exactly like a monitor whose worker died.
 model WorkerHeartbeat {
-  // The binary's own name ("https" | "port" | "ping" | "dns" |
-  // "integrations" | "janitor"), so there is exactly one row per worker and a
-  // tick is an upsert rather than an ever-growing log.
+  // The binary's own name ("https" | "port" | "ping" | "dns" | "probes" |
+  // "heartbeat" | "integrations" | "janitor"), so there is exactly one row per
+  // worker and a tick is an upsert rather than an ever-growing log.
+  //
+  // Once a worker can run in more than one region the name alone stops being
+  // unique, so outside the default region the id is "<worker>@<region>" — two
+  // `https` workers in Frankfurt and Virginia are two processes to report on,
+  // not one row they fight over. The parts are also stored separately below,
+  // because the dashboard groups by worker and labels by region.
   id              String   @id
+  // The bare binary name and the region it ran in. Null on rows written by an
+  // image from before regions existed; readers fall back to parsing `id`.
+  worker          String?
+  region          String?
   lastSeenAt      DateTime
   // This worker's tick cadence, so a reader can judge staleness without
   // hardcoding each binary's schedule — the check workers tick every 5

@@ -33,11 +33,13 @@ no agent to install on the monitored machines — one `docker compose up` and yo
 
 | | |
 |---|---|
-| **Monitors** | HTTP(s), Ping (ICMP), Port (raw TCP), DNS, PostgreSQL, MySQL, Redis, SMTP, IMAP, gRPC, WebSocket, Domain-expiry and Heartbeat checks, at 15s/30s/60s/5m/1h/12h/24h intervals. Pause a monitor without losing its history, tag it, and see uptime % over a rolling 30-day window, response-time history and a full ping log. Timeout, latency threshold and failures-before-alerting are per-monitor overrides of the instance defaults — a nightly batch API and a health endpoint are never usefully held to the same numbers. Automatic incident creation is a per-monitor switch too: turn it off and the monitor is still checked and charted but never opens an incident, so it never alerts — the noisy dependency you want on a graph and not on your phone. |
+| **Monitors** | HTTP(s), Ping (ICMP), Port (raw TCP), DNS, PostgreSQL, MySQL, Redis, SMTP, IMAP, gRPC, WebSocket, Domain-expiry, Heartbeat and Server-agent checks, at 15s/30s/60s/5m/1h/12h/24h intervals. Pause a monitor without losing its history, tag it, and see uptime % over a rolling 30-day window, response-time history and a full ping log. Timeout, latency threshold and failures-before-alerting are per-monitor overrides of the instance defaults — a nightly batch API and a health endpoint are never usefully held to the same numbers. Automatic incident creation is a per-monitor switch too: turn it off and the monitor is still checked and charted but never opens an incident, so it never alerts — the noisy dependency you want on a graph and not on your phone. |
 | **HTTP checks** | Beyond "did it answer": request method, headers and body, redirect policy, which status codes count as up (`200,201`, `200-204,301`), and a content assertion on the response body — a substring, an RE2 regex, or a JSON path (`$.db.connected` equals `true`). Any of the three can be inverted. |
 | **DNS records** | A DNS monitor picks its record type — `A`, `AAAA`, `CNAME`, `MX`, `NS`, `TXT` or `SRV` — and optionally the value it must contain (matched case-insensitively anywhere in the answer; blank just asserts the record still resolves). The records worth watching on their own are the ones whose loss is invisible to an HTTP check: an `MX` that stops resolving takes mail down while the website stays green, and a `TXT` holding SPF or DKIM can be clobbered by a well-meaning DNS edit and only surface when mail starts bouncing. |
 | **Connection checks** | Each speaks just enough of its protocol to prove the service is really answering, not merely listening: PostgreSQL runs `SELECT 1`, MySQL reads the server handshake (or logs in and runs `SELECT 1`, given a `mysql://` connection string), Redis sends `PING`, SMTP does greeting/EHLO/NOOP/QUIT, IMAP reads the `* OK` greeting, gRPC calls `grpc.health.v1.Health/Check` (h2c or TLS), and WebSocket completes the RFC 6455 upgrade — the proxy that answers HTTP but never upgrades fails here and passes every other check. |
 | **Heartbeat monitors** | The one type StayUp never dials: a cron job, a nightly backup or an import script calls `/api/heartbeat/<token>` when it finishes, and the monitor goes down when that call stops arriving. A dead man's switch is the only way to watch something with no port open — and those are exactly the things that stop quietly. Add `/fail` to the URL for a run that knows it failed, `?rtt=<ms>` to chart how long it took, and POST a body to attach the tail of its log to the check. Per-monitor grace period on top of the interval, because a job scheduled hourly does not run at exactly :00. From there it is an ordinary monitor: same incidents, same escalation, same status pages. |
+| **Server agent** | A small static binary (`agent`) that runs on the machine being watched and posts its CPU, memory, disk and load to a Server monitor. Thresholds per resource: crossing one reports **Degraded** and opens an incident; the agent going quiet reports **Down**, through the same deadline rule a heartbeat uses. A full disk is the classic outage no HTTP check ever sees — the site answers 200 right up until the write that fails — because every other monitor type is looking at the service from the outside. Disk is measured the way `df` measures it, deliberately: a monitoring number that disagrees with the operator's own command is a number they stop believing. |
+| **Multi-region checks** | Give each group of check workers a `STAYUP_REGION` and a monitor can require that *N regions independently agree* before a failure is reported. That is the one thing "failed attempts before alerting" cannot do: it debounces a monitor over time, so it catches a dropped packet but never a bad transit route — and a broken path between one probe and the target looks exactly like an outage from that probe, however long you wait. The requirement is capped at the number of regions actually reporting, so a region you never deployed can't silence a monitor, and recovery is never gated. Workers also take a per-region lease on each monitor before checking it, so a second replica no longer double-checks everything. |
 | **Dependencies** | A monitor can name the one it sits behind. While the parent is down, its children open no incidents and page nobody — the router being dead is one outage, not thirty, and neither "failed attempts before alerting" nor flapping detection can fix that, since both reason about a single monitor over time. The chain is walked to the top, so a site behind a load balancer behind a router falls silent when the router does. Everything else is unaffected: checks are still written, statuses still flip, the graphs still show the outage. |
 | **Domain expiry** | A Domain monitor looks the registration up over RDAP and goes Degraded inside the warning window, Down once the date has passed. A forgotten renewal takes the site, the mail and the certificate with it, and nothing renews it automatically. |
 | **TLS certificates** | Every HTTPS check records the certificate's expiry; a monitor goes Degraded — opening an incident and paging your integrations — once it's inside the warning window. Verification can be switched off per instance for self-signed and internal-CA hosts. |
@@ -115,6 +117,7 @@ Two code paths deliberately mirror each other, and must stay behaviourally ident
 | `src/lib/maintenance-notify.ts` | `worker/internal/maintenance/notify.go` |
 | `src/lib/monitor-dependencies.ts` | `worker/internal/dependencies` |
 | `src/lib/webhook-signature.ts` | `worker/internal/notify/signature.go` |
+| `src/lib/server-metrics.ts` (thresholds) | `worker/internal/hostmetrics` (measurement) |
 | `src/lib/oncall.ts` | `worker/internal/oncall` |
 | `src/lib/notification-rules.ts` | `worker/internal/routing` |
 | `src/lib/assertions.ts` (validation) | `worker/internal/checkers/assert.go` (evaluation) |
@@ -380,6 +383,7 @@ Two layers, on purpose:
 | `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | Single sign-on. Unset, nothing is registered and the sign-in page shows only the password form. |
 | `OIDC_DISCOVERY_URL` | The IdP's `.well-known/openid-configuration`. Without one, set `OIDC_AUTHORIZATION_URL`, `OIDC_TOKEN_URL` and `OIDC_USERINFO_URL` by hand. |
 | `OIDC_PROVIDER_ID` / `OIDC_PROVIDER_NAME` / `OIDC_SCOPES` | Callback path segment [`oidc`], sign-in button label [`Single sign-on`], and scopes [`openid profile email`]. Register `$BETTER_AUTH_URL/api/auth/callback/$OIDC_PROVIDER_ID` with the IdP. |
+| `STAYUP_REGION` | Where a check worker checks from (workers only). Unset means `default`, which is what a single-region install carries. Set it per location when running workers in more than one place — it decides which results count towards a monitor's "regions that must agree", and keeps two regions' workers from overwriting each other's heartbeat row. |
 | `OIDC_ALLOW_SIGNUP` / `OIDC_DEFAULT_ROLE` | Whether an IdP account with no StayUp user may create one [`true`], and what role it gets [`Viewer`]. The very first account on an instance is always an Admin regardless — it has nobody to grant it a role. |
 
 **Dashboard → Settings — runtime behaviour**, stored in the single-row `AppSettings` table and read
@@ -403,8 +407,9 @@ live by the workers on every tick. Changing these takes effect on the *next chec
 
 ## How the monitoring loop works
 
-1. Each check worker polls the DB every 5s for monitors of its type whose `interval` has elapsed and
-   that aren't paused (`worker/internal/runner`), and checks all due ones concurrently. Each check
+1. Each check worker polls the DB every 5s for monitors of its type whose `interval` has elapsed **in
+   its own region** and that aren't paused (`worker/internal/runner`), takes a short lease on each one
+   so a second replica doesn't check it too, and checks all due ones concurrently. Each check
    resolves the monitor's own timeout/latency/failure-count overrides over the instance defaults
    first (`settings.ForMonitor`), so everything downstream reads one already-resolved value.
 2. Every check writes a `MonitorCheck` row — the raw "ping" history, always recorded verbatim.
@@ -420,19 +425,21 @@ live by the workers on every tick. Changing these takes effect on the *next chec
 6. Status transitions over a rolling window are counted; past the flapping threshold the monitor is
    marked flapping and steps 6–7 are suppressed until it settles, with one standing "is flapping"
    incident in place of the churn.
-7. A confirmed Down/Degraded opens an incident, unless the monitor is inside an active maintenance
+7. If the monitor requires more than one region to agree, the failure is held back until that many
+   regions see it — capped at the number actually reporting, and never applied to recovery.
+8. A confirmed Down/Degraded opens an incident, unless the monitor is inside an active maintenance
    window, is flapping, has something it **depends on** already Down, or has **Open incidents
    automatically** switched off. Recovery moves the open
    incident to *Monitoring* (a human still resolves it) — that half is never gated, so an incident
    opened before the switch was flipped, or by hand, still closes out.
-8. Each incident event either follows the notification rules (route to specific integrations, or
+9. Each incident event either follows the notification rules (route to specific integrations, or
    suppress during quiet hours), broadcasts to every enabled integration when no rule applies, or —
    if the monitor has an escalation policy — pages that policy's steps one by one until someone
    acknowledges. A step targeting an on-call schedule resolves the rotation at the moment it fires.
    Either way it becomes a `Pending` `IntegrationDelivery` row.
-9. `worker/cmd/integrations` polls that queue every 5s, delivers each row through its channel, and
+10. `worker/cmd/integrations` polls that queue every 5s, delivers each row through its channel, and
    retries up to 5 times before marking it `Failed`. Everything lands in **Dashboard → Logs**.
-10. Once a day `worker/cmd/janitor` summarizes each finished day into one `MonitorDailyStat` row per
+11. Once a day `worker/cmd/janitor` summarizes each finished day into one `MonitorDailyStat` row per
    monitor — counts, average and nearest-rank p50/p95/p99 — then deletes raw checks and finished notifications past their retention. Status pages read
    those summaries for past days, so history outlives the checks it was built from.
 
@@ -443,9 +450,10 @@ live by the workers on every tick. Changing these takes effect on the *next chec
 | `worker/cmd/ping` | `Ping` | Burst of 3 native ICMP echoes; any reply = reachable |
 | `worker/cmd/dns` | `DNS` | Resolves the monitor's record type (A, AAAA, CNAME, MX, NS, TXT, SRV) and asserts its expected value |
 | `worker/cmd/probes` | `Postgres`, `MySQL`, `Redis`, `SMTP`, `IMAP`, `gRPC`, `WebSocket`, `Domain` | Opens a connection and speaks the minimum that proves the service answers |
-| `worker/cmd/heartbeat` | `Heartbeat` | Checks nothing — waits. Marks a monitor Down when its ping hasn't arrived within `interval` + grace |
+| `worker/cmd/heartbeat` | `Heartbeat`, `Server` | Checks nothing — waits. Marks a monitor Down when its ping or agent report hasn't arrived within `interval` + grace |
 | `worker/cmd/integrations` | — | Delivers queued notifications and drives escalation |
 | `worker/cmd/janitor` | — | Rolls finished days up into daily summaries, prunes past retention, and runs the daily update check |
+| `worker/cmd/agent` | `Server` | Not part of the stack: runs on the machine being watched and posts its own CPU/memory/disk/load |
 
 Every one of them upserts a row into `worker_heartbeat` at the top of each tick, which is what
 **Dashboard → Overview** and `/api/health` read to tell "this worker isn't running" apart from
@@ -506,6 +514,64 @@ a dead web server would, so it escalates, pages and appears on status pages iden
 The token is the credential. Regenerate it from the monitor form the moment it leaks; the old URL
 stops answering immediately.
 
+## Watching a server
+
+Create a monitor of type **Server**, copy its agent URL, and run the agent on the machine:
+
+```bash
+# the binary ships in the worker image
+docker cp <any-stayup-worker-container>:/usr/local/bin/agent /usr/local/bin/agent
+
+agent -url "https://status.example.com/api/agent/<token>" -interval 60s -disk /
+```
+
+Or as a systemd unit, with everything from the environment:
+
+```ini
+[Service]
+Environment=STAYUP_AGENT_URL=https://status.example.com/api/agent/<token>
+Environment=STAYUP_AGENT_INTERVAL=60s
+Environment=STAYUP_AGENT_DISK=/var/lib/docker
+ExecStart=/usr/local/bin/agent
+Restart=always
+```
+
+`-disk` is worth thinking about: the mount that fills up is rarely `/`. Point it at the one that
+actually matters — `/var/lib/docker`, a database volume, wherever the logs go.
+
+`agent -once` sends a single report and prints what StayUp made of it, including which thresholds it
+tripped, which is the quickest way to tell a misconfigured threshold from a working one.
+
+The agent needs nothing but that URL: no database, no credentials, no inbound port. It reads
+`/proc` and one `statfs`, so it is a few MB of static binary with no libc to match.
+
+## Multi-region checking
+
+Give each location's workers a region and they check independently of each other:
+
+```yaml
+# in Frankfurt
+worker-https:
+  environment:
+    STAYUP_REGION: eu-central
+# in Virginia
+worker-https:
+  environment:
+    STAYUP_REGION: us-east
+```
+
+Then set **Regions that must agree** on a monitor. At 1 (the default, and what every existing
+monitor keeps) the first region to see a failure reports it. Above 1, a failure is held back until
+that many regions see it independently.
+
+Two guards, both erring towards alerting, because the failure mode of getting this wrong is
+silence: the requirement is capped at the number of regions actually reporting — configure three,
+run two, and you get two — and recovery is never gated, so one region seeing the monitor back up
+reports it up.
+
+Regions also give the check workers the lease they never had: before this, two replicas of the same
+worker both saw every monitor as due and both checked it.
+
 ## Verifying a signed webhook
 
 Every delivery to a generic **Webhook** integration carries two headers. Verify both, and reject
@@ -553,13 +619,14 @@ src/
     api/trpc/[trpc]/     tRPC handler
     api/v1/              public REST API (Bearer <API key>): monitors, incidents, status
     api/heartbeat/       where a Heartbeat monitor's job checks in (token in the URL)
+    api/agent/           where a Server monitor's agent posts CPU/memory/disk/load
     api/public/status-domain/  custom-domain → slug lookup used by the proxy
     manifest.ts          web app manifest (linked from the dashboard layout only)
   components/core/       sidebar, navbar, footer, auto-refresh
   components/ui/         shadcn/ui primitives
   emails/                React Email templates
   lib/                   prisma, auth, oidc, settings, incidents, integration-delivery, maintenance,
-                         maintenance-notify, heartbeat, monitor-dependencies, api-v1,
+                         maintenance-notify, heartbeat, server-metrics, monitor-dependencies, api-v1,
                          webhook-signature, email, discord, push, audit, logging, redis,
                          oncall, notification-rules, assertions, badge, status-feed, urls
   prisma/schemas/        sqlite.prisma + postgresql.prisma, each with its own migrations/ folder
@@ -569,6 +636,7 @@ src/
 
 worker/                  separate Go module
   cmd/{https,port,ping,dns,probes,heartbeat,integrations,janitor}/   one binary each
+  cmd/agent/             the odd one out: runs on the machine being watched, not here
   internal/checkers/     "how do I check one monitor" per type
   internal/runner/       shared poll → check → persist → incident-sync loop
   internal/store/        hand-written SQL for both providers
@@ -577,6 +645,8 @@ worker/                  separate Go module
   internal/routing/      which integrations an alert goes to, and when
   internal/flapping/     transition counting and flapping state
   internal/dependencies/ is anything this monitor sits behind already down
+  internal/region/       which region this worker checks from, and who it is
+  internal/hostmetrics/  a Linux box's own CPU/memory/disk/load, for cmd/agent
 ```
 
 Every dashboard page is split into a server component (`page.tsx`, fetches via the direct tRPC

@@ -9,19 +9,28 @@ import (
 	"stayup/worker/internal/db"
 )
 
-// HeartbeatMonitor is a Heartbeat monitor as cmd/heartbeat needs it: enough
-// to work out whether its ping is overdue, and enough to open the incident if
+// HeartbeatMonitor is a push monitor as cmd/heartbeat needs it: enough to
+// work out whether its report is overdue, and enough to open the incident if
 // it is.
 //
-// Deliberately not the full Monitor shape: a Heartbeat monitor has no URL, no
-// port, no request options and no credentials — none of the columns the
-// listMonitors query exists to carry — but it *does* need CreatedAt, which
-// that query doesn't select. A monitor that has never been pinged has no
-// lastCheckedAt, and without a creation time the only two options are calling
-// it Down the second it is created or never calling it Down at all.
+// Covers both push types. A Heartbeat monitor is a job saying "I ran"; a
+// Server monitor is an agent saying "here is how the machine is doing". The
+// payload differs and so does what the Next.js side records, but the failure
+// is identical — nothing arrived in time — so one sweep handles both rather
+// than two loops that would drift apart.
+//
+// Deliberately not the full Monitor shape: a push monitor has no URL, no port,
+// no request options and no credentials — none of the columns the listMonitors
+// query exists to carry — but it *does* need CreatedAt, which that query
+// doesn't select. A monitor that has never reported has no lastCheckedAt, and
+// without a creation time the only two options are calling it Down the second
+// it is created or never calling it Down at all.
 type HeartbeatMonitor struct {
-	ID       string
-	Name     string
+	ID   string
+	Name string
+	// Heartbeat | Server — only used to word the failure, since the deadline
+	// and the incident path are the same for both.
+	Type     string
 	Status   string
 	Interval string
 	// Nil means "use the default grace period" (see cmd/heartbeat).
@@ -54,16 +63,17 @@ func (m HeartbeatMonitor) Deadline(defaultGrace time.Duration) time.Time {
 	return since.Add(intervalDuration(m.Interval) + grace)
 }
 
-// ListHeartbeatMonitors reads every enabled Heartbeat monitor. Paused ones
-// are filtered out here, the same way ListByType does it for the dialling
-// workers — and for the same reason: pausing has to mean "stop watching
-// this", including stopping the clock that would otherwise declare it down.
+// ListHeartbeatMonitors reads every enabled push monitor — Heartbeat and
+// Server. Paused ones are filtered out here, the same way ListByType does it
+// for the dialling workers, and for the same reason: pausing has to mean "stop
+// watching this", including stopping the clock that would otherwise declare it
+// down.
 func (s *Store) ListHeartbeatMonitors(ctx context.Context) ([]HeartbeatMonitor, error) {
 	rows, err := s.db.QueryContext(ctx, s.q(`
-		SELECT id, name, status, interval, "heartbeatGraceSeconds", "lastCheckedAt", "createdAt",
+		SELECT id, name, type, status, interval, "heartbeatGraceSeconds", "lastCheckedAt", "createdAt",
 		       "autoIncidents", "parentId"
 		FROM monitor
-		WHERE type = 'Heartbeat' AND enabled = ?
+		WHERE type IN ('Heartbeat', 'Server') AND enabled = ?
 	`), s.db.BoolArg(true))
 	if err != nil {
 		return nil, fmt.Errorf("store: list heartbeat monitors: %w", err)
@@ -78,7 +88,7 @@ func (s *Store) ListHeartbeatMonitors(ctx context.Context) ([]HeartbeatMonitor, 
 		var parentID sql.NullString
 		var autoIncidents db.Bool
 
-		if err := rows.Scan(&m.ID, &m.Name, &m.Status, &m.Interval, &grace, &lastCheckedAt, &m.CreatedAt,
+		if err := rows.Scan(&m.ID, &m.Name, &m.Type, &m.Status, &m.Interval, &grace, &lastCheckedAt, &m.CreatedAt,
 			&autoIncidents, &parentID); err != nil {
 			return nil, fmt.Errorf("store: scan heartbeat monitor: %w", err)
 		}

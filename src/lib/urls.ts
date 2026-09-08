@@ -16,6 +16,11 @@ export function dashboardBaseUrl(): string {
   return (process.env.BETTER_AUTH_URL || FALLBACK_ORIGIN).replace(/\/+$/, '');
 }
 
+/** Where a Server monitor's agent POSTs its readings (worker/cmd/agent). */
+export function agentReportUrl(token: string): string {
+  return `${dashboardBaseUrl()}/api/agent/${token}`;
+}
+
 /** The dashboard's incident list — where every "view incident" link points. */
 export function incidentsUrl(): string {
   return `${dashboardBaseUrl()}/dashboard/incidents`;

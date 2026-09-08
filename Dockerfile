@@ -6,6 +6,11 @@
 # binaries live in that one worker image; which one a container runs is just
 # its `command:`.
 #
+# Nine binaries are built, not eight: `agent` is the odd one out. It runs on a
+# machine being *watched* rather than next to StayUp, so it has no compose
+# service — it ships in the worker image so it can be copied out
+# (`docker cp <container>:/usr/local/bin/agent .`) onto the host it belongs on.
+#
 # Built from source by docker-compose.build.yml, and published to the GitLab
 # container registry as <registry>/web and <registry>/worker by
 # .gitlab-ci.yml's `build:web`/`build:worker` jobs — those images are what
@@ -114,7 +119,7 @@ COPY worker/ .
 # just `alpine` + `ca-certificates` instead of needing glibc/musl-dev shims.
 RUN --mount=type=cache,target=/root/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} sh -c '\
-    for cmd in https port ping dns probes heartbeat integrations janitor; do \
+    for cmd in https port ping dns probes heartbeat integrations janitor agent; do \
       go build -ldflags="-s -w" -o /out/$cmd ./cmd/$cmd; \
     done'
 

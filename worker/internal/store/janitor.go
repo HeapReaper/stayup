@@ -9,6 +9,7 @@ import (
 
 	"stayup/worker/internal/db"
 	"stayup/worker/internal/ids"
+	"stayup/worker/internal/region"
 )
 
 // Package-level note: everything in this file backs cmd/janitor, the
@@ -363,9 +364,13 @@ func (s *Store) pruneInBatches(ctx context.Context, query string, cutoff time.Ti
 
 // Heartbeat is one worker's liveness row — see RecordHeartbeat.
 type Heartbeat struct {
-	// Worker is the binary's own name ("https", "janitor", ...) and the row's
-	// primary key, so a worker has exactly one row however often it restarts.
+	// Worker is the binary's own name ("https", "janitor", ...), and Region
+	// where it is running. Together they form the row's primary key (see
+	// region.HeartbeatID), so a worker has exactly one row per region however
+	// often it restarts — and two regions running the same binary are two
+	// rows rather than one they overwrite every tick.
 	Worker          string
+	Region          string
 	IntervalSeconds int
 	StartedAt       time.Time
 	LastSeenAt      time.Time
@@ -391,9 +396,11 @@ func (s *Store) RecordHeartbeat(ctx context.Context, in Heartbeat) error {
 	switch s.db.Provider {
 	case db.Postgres:
 		query = `
-			INSERT INTO worker_heartbeat (id, "lastSeenAt", "intervalSeconds", "startedAt", version, revision, "memoryKb")
-			VALUES (?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO worker_heartbeat (id, worker, region, "lastSeenAt", "intervalSeconds", "startedAt", version, revision, "memoryKb")
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (id) DO UPDATE SET
+				worker = EXCLUDED.worker,
+				region = EXCLUDED.region,
 				"lastSeenAt" = EXCLUDED."lastSeenAt",
 				"intervalSeconds" = EXCLUDED."intervalSeconds",
 				"startedAt" = EXCLUDED."startedAt",
@@ -405,13 +412,14 @@ func (s *Store) RecordHeartbeat(ctx context.Context, in Heartbeat) error {
 		// Every column is written on every tick, so a full row replace is
 		// equivalent to the upsert above.
 		query = `
-			INSERT OR REPLACE INTO worker_heartbeat (id, "lastSeenAt", "intervalSeconds", "startedAt", version, revision, "memoryKb")
-			VALUES (?, ?, ?, ?, ?, ?, ?)
+			INSERT OR REPLACE INTO worker_heartbeat (id, worker, region, "lastSeenAt", "intervalSeconds", "startedAt", version, revision, "memoryKb")
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`
 	}
 
 	_, err := s.db.ExecContext(ctx, s.q(query),
-		in.Worker, s.db.TimeArg(in.LastSeenAt), in.IntervalSeconds, s.db.TimeArg(in.StartedAt),
+		region.HeartbeatID(in.Worker, in.Region), in.Worker, in.Region,
+		s.db.TimeArg(in.LastSeenAt), in.IntervalSeconds, s.db.TimeArg(in.StartedAt),
 		nullIfEmpty(in.Version), nullIfEmpty(in.Revision), nullIfZero(in.MemoryKB))
 	if err != nil {
 		return fmt.Errorf("store: record heartbeat: %w", err)

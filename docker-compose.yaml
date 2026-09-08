@@ -79,6 +79,13 @@ x-app-env: &app-env
   SMTP_USER: ${SMTP_USER:-}
   SMTP_PASS: ${SMTP_PASS:-}
   SMTP_FROM: ${SMTP_FROM:-StayUp <noreply@example.com>}
+  # Where this worker checks from. Unset means "default", which is what a
+  # single-region install carries — set it (eu-west, us-east, …) only when you
+  # run check workers in more than one place, and give each place its own
+  # value. It decides which results are compared against a monitor's "regions
+  # that must agree" setting, and it keeps two regions' workers from
+  # overwriting each other's heartbeat row.
+  STAYUP_REGION: ${STAYUP_REGION:-}
   # Optional single sign-on (OIDC / OAuth). Left unset, nothing is
   # registered and the sign-in page shows only the password form. Register
   # $BETTER_AUTH_URL/api/auth/callback/${OIDC_PROVIDER_ID:-oidc} as the

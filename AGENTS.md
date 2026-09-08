@@ -20,7 +20,7 @@ configuration lives in the single-row `AppSettings` table, which the workers re-
 | `src/app/(dashboard)/dashboard/*` | Authenticated pages. Always a pair: `page.tsx` (server component, fetches via the tRPC `caller`) + `*-client.tsx` (`'use client'`, mutations/interactivity). |
 | `src/app/(status)/status/[slug]` | The public status page. |
 | `src/app/(public)`, `login/`, `register/`, `logout/` | Auth surfaces. `/` redirects to `/login`. |
-| `src/app/api/` | better-auth handler, tRPC handler, `reports/pdf` (server-rendered SLA report) and `files` (upload + serve — both are file responses/bodies, which is why they aren't tRPC procedures), `public/status-domain` (custom-domain → slug lookup for the proxy), `v1/*` (the public REST API — authenticated by `AppSettings.apiKey`, not a session, so it can't be a tRPC procedure) and `heartbeat/[...segments]` (where a Heartbeat monitor's job checks in; unauthenticated by necessity, the token in the URL is the credential). |
+| `src/app/api/` | better-auth handler, tRPC handler, `reports/pdf` (server-rendered SLA report) and `files` (upload + serve — both are file responses/bodies, which is why they aren't tRPC procedures), `public/status-domain` (custom-domain → slug lookup for the proxy), `v1/*` (the public REST API — authenticated by `AppSettings.apiKey`, not a session, so it can't be a tRPC procedure), `heartbeat/[...segments]` and `agent/[token]` (where the two push monitor types report in; unauthenticated by necessity, the token in the URL is the credential). |
 | `src/trpc/routers/` | The entire API. `init.ts` defines `baseProcedure` / `protectedProcedure`; `_app.ts` is the registry. |
 | `src/lib/` | Server-side domain logic and clients (prisma, auth, settings, incidents, integration-delivery, maintenance, email, discord, push, audit, logging, redis, updates, version, permissions, workers, sla-report, report-pdf, stored-files-server). `report-range.ts`, `monitor-types.ts` and `stored-files.ts` are the Prisma-free half: client components import them, so they must stay free of server imports — which is why the upload cleanup helper lives in `stored-files-server.ts` instead. |
 | `src/lib/api-v1.ts` | The REST API's front door: bearer-key authentication, the published monitor shape, and the TRPCError → status-code mapping that lets one implementation serve both the dashboard and the API. |
@@ -28,12 +28,14 @@ configuration lives in the single-row `AppSettings` table, which the workers re-
 | `src/app/api/health/` | Unauthenticated container healthcheck. 200/503 on the *database*; worker liveness is reported but never fails it. |
 | `src/prisma/schemas/` | `sqlite.prisma` and `postgresql.prisma` **plus one migration folder each**. |
 | `src/proxy.ts` | Next middleware: auth redirects + custom-domain rewrite. |
-| `Dockerfile` | Both images: `runner` (web) and `worker-runner` (all eight Go binaries). |
+| `Dockerfile` | Both images: `runner` (web) and `worker-runner` (nine Go binaries — the eight workers plus `agent`, which ships there to be copied out). |
 | `docker-compose.build.yml` | Builds from source — the contributor stack. |
 | `docker-compose.yaml` | Pulls published images — the *user* stack, imported by URL. Standalone: no build context, no `.env`, no local paths. |
 | `docker-compose.coolify.yaml` | The same user stack behind Coolify's proxy: `expose:` instead of `ports:`, port fixed at 3000, secrets from Coolify's `SERVICE_*` magic variables. |
 | `.gitlab-ci.yml` | SAST + secret detection, and the two image-build jobs. |
-| `worker/cmd/*` | One `main.go` per binary: `https`, `port`, `ping`, `dns`, `probes`, `heartbeat`, `integrations`, `janitor`. |
+| `worker/cmd/*` | One `main.go` per binary: `https`, `port`, `ping`, `dns`, `probes`, `heartbeat`, `integrations`, `janitor`, `agent`. |
+| `worker/cmd/agent` | The only binary that does not run next to StayUp. It runs on the machine being watched, reads that machine's own CPU/memory/disk/load (`internal/hostmetrics`) and POSTs them to a Server monitor's push URL. No database, no store, no settings — it knows one URL. Built into the worker image so it can be copied out; it has no compose service on purpose. |
+| `worker/internal/region/` | Which region this worker checks from (`STAYUP_REGION`), and the per-process instance id that holds a monitor's lease. |
 | `worker/cmd/heartbeat` | The inverted worker: it checks nothing and dials nothing, it notices a Heartbeat monitor whose ping *stopped* arriving. Doesn't build on `internal/runner` for that reason — there is no check to perform — but shares everything after the result (the `MonitorCheck` row, the rolled-up status, `internal/incidents`). Its recovery half lives in the Next.js app (`src/lib/heartbeat.ts`), because a heartbeat recovers by arriving. |
 | `worker/internal/checkers/` | "How do I check one monitor" — one function per monitor type. |
 | `worker/internal/runner/` | The shared poll → check → persist → roll-up → incident-sync loop. |
@@ -56,6 +58,7 @@ configuration lives in the single-row `AppSettings` table, which the workers re-
    | `src/lib/maintenance-notify.ts` | `worker/internal/maintenance/notify.go` |
    | `src/lib/monitor-dependencies.ts` | `worker/internal/dependencies` |
    | `src/lib/webhook-signature.ts` | `worker/internal/notify/signature.go` |
+   | `src/lib/server-metrics.ts` (thresholds) | `worker/internal/hostmetrics` (measurement) |
    | `src/lib/settings.ts` | `worker/internal/settings` |
    | `src/lib/prisma.ts` | `worker/internal/db` |
    | `src/lib/updates.ts` | `worker/internal/updates` (+ `version.ts` / `internal/version`) |
@@ -189,7 +192,22 @@ configuration lives in the single-row `AppSettings` table, which the workers re-
    `announceGrace` bounds how stale a transition may be — without it, the first tick after an
    upgrade would mail out every window that came and went while nobody was listening.
 
-14. **`src/proxy.ts` must not import Prisma.** It runs in the middleware runtime; it reaches data over
+14. **Due-ness is per region, and every check is claimed.** `monitor.lastCheckedAt` is the newest
+   check from *anywhere* and is what the dashboard shows; the scheduler reads
+   `monitor_lease.lastCheckedAt` for its own region instead. Sharing one column across regions would
+   mean whichever region ticked first was the only one that ever checked anything.
+
+   The same table is the lock the check workers never had, so a second replica no longer
+   double-checks everything. Two rules to keep: claim before checking and release after (the lease is
+   time-bounded, so a worker killed mid-check frees the monitor by expiry rather than stranding it),
+   and release *before* asking for consensus, so this region's own verdict is one of the votes.
+
+   The consensus rule itself (`decideConsensus`) errs towards alerting in both of its softenings —
+   the requirement is capped at the regions actually reporting, and recovery is never gated. Getting
+   either backwards produces a monitor that can never alert, which is the one failure mode nobody
+   notices.
+
+15. **`src/proxy.ts` must not import Prisma.** It runs in the middleware runtime; it reaches data over
    loopback HTTP (`http://127.0.0.1:$PORT`, never `request.nextUrl.origin` — behind a TLS-terminating
    proxy that origin is `https://` while the process only speaks plain HTTP).
 
@@ -209,6 +227,8 @@ npx prisma migrate deploy      # production
 
 # workers (from worker/)
 go run ./cmd/https             # or port | ping | dns | probes | heartbeat | integrations | janitor
+STAYUP_REGION=eu-central go run ./cmd/https   # same worker, a second region
+go run ./cmd/agent -url http://localhost:3000/api/agent/<token> -once
 go build -o bin/https ./cmd/https
 go vet ./... && go test ./...
 
@@ -253,7 +273,7 @@ builds — so run them yourself before pushing.
   `as` only when reading rows that were written through a validated mutation.
 - **Status/impact vocabularies** — keep these exact strings in sync across TS, Go and the DB:
   - monitor `type`: `HTTP` | `Ping` | `Port` | `DNS` | `Postgres` | `MySQL` | `Redis` | `SMTP` |
-    `IMAP` | `gRPC` | `WebSocket` | `Domain` | `Heartbeat`
+    `IMAP` | `gRPC` | `WebSocket` | `Domain` | `Heartbeat` | `Server`
   - monitor `status`: `Up` | `Down` | `Degraded`
   - monitor `interval`: `15s` | `30s` | `60s` | `5m` | `1h` | `12h` | `24h`
   - monitor `dnsRecordType`: `A` | `AAAA` | `CNAME` | `MX` | `NS` | `TXT` | `SRV`
@@ -270,6 +290,10 @@ builds — so run them yourself before pushing.
 ## 6. Adding things — the usual recipes
 
 **A new monitor type**
+0. First decide whether StayUp dials it or it dials StayUp. A *push* type (`Heartbeat`, `Server`)
+   skips steps 1-3 entirely: it needs an endpoint under `src/app/api/`, an entry in `PUSH_TYPES`
+   (`src/lib/monitor-types.ts`), and `worker/cmd/heartbeat` already marks it down when its report
+   stops arriving. Everything below is for a type with something to dial.
 1. `worker/internal/checkers/<type>.go` implementing `runner.PerformCheck`.
 2. `worker/cmd/<type>/main.go` — copy an existing one, change the three labels.
 3. Add the binary to the `for cmd in …` loop in `Dockerfile` and a `worker-<type>` service in
@@ -348,6 +372,12 @@ fails it. Run the same pair against `dev.db` with `DB_PROVIDER=sqlite` for the o
 - **Worker liveness has a one-minute floor.** `isStale` in `src/lib/workers.ts` allows three missed
   ticks but never less than 60s, so a dead 5-second check worker takes a minute to show up as "not
   reporting". Lowering it would make a single slow tick look like an outage.
+- **A private status page and a custom domain don't combine.** Signing in happens on the app's own
+  origin, because that is where the session cookie lives and a browser will not send it to a vanity
+  hostname. `src/proxy.ts` redirects the auth paths off a custom domain rather than rewriting them
+  (which used to produce `/status/<slug>/login` and a 404 loop), and the status page editor warns
+  when both are set — but the visitor still lands on the page at the app's address, not the vanity
+  one. Fixing it properly means a one-time token hand-off that sets a cookie on the custom domain.
 - **Inert configuration.** Two `AppSettings` fields are still editable in the UI but read by
   nothing: `defaultCheckInterval` (the monitor form doesn't use it as its default) and `timezone`
   (timestamps render in the viewer's locale — `timezone` *is* read, but only by the notification
@@ -367,8 +397,6 @@ fails it. Run the same pair against `dev.db` with `DB_PROVIDER=sqlite` for the o
 - **Uptime is still raw-check based.** `runner`'s 30-day uptime percentage counts `MonitorCheck`
   rows, not rollups, so a `checkRetentionDays` below 30 quietly narrows the window it covers. The
   status page's day bars don't have this problem — they prefer rollups.
-- **The check workers don't claim work.** `runner.tick` selects every due monitor of its type with
-  no lease or lock, so running two replicas of the same worker double-checks every monitor.
 - Incident subscribers can subscribe ("Notify me" on the public status page) but there is no
   unsubscribe flow, and no double opt-in.
 - The update checker's release channel needs actual git tags: with no releases *and* no tags on the

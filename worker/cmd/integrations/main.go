@@ -25,6 +25,7 @@ import (
 	"stayup/worker/internal/logging"
 	"stayup/worker/internal/maintenance"
 	"stayup/worker/internal/procstat"
+	"stayup/worker/internal/region"
 	"stayup/worker/internal/settings"
 	"stayup/worker/internal/store"
 	"stayup/worker/internal/version"
@@ -84,6 +85,7 @@ func processDelivery(ctx context.Context, s *store.Store, cfg settings.Settings,
 func tick(ctx context.Context, s *store.Store, startedAt time.Time) {
 	if err := s.RecordHeartbeat(ctx, store.Heartbeat{
 		Worker:          "integrations",
+		Region:          region.Current(),
 		IntervalSeconds: int(tickInterval.Seconds()),
 		StartedAt:       startedAt,
 		LastSeenAt:      time.Now(),

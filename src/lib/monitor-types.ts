@@ -28,16 +28,30 @@ export const monitorTypeEnum = z.enum([
   // doesn't arrive in time. Everything with no port open — cron jobs,
   // nightly backups, import scripts — is only monitorable this way.
   'Heartbeat',
+  // The same inversion one layer down: an agent on the machine
+  // (worker/cmd/agent) POSTs CPU, memory, disk and load to
+  // /api/agent/<token>. A full disk is the classic outage no HTTP check ever
+  // sees — the site answers 200 right up until the write that fails — because
+  // every other monitor type is looking at the service from the outside.
+  'Server',
 ]);
 export type MonitorType = z.infer<typeof monitorTypeEnum>;
 
 /**
- * Monitor types StayUp dials out to. Everything except Heartbeat, which
- * dials in — the distinction decides whether a monitor needs a URL/host at
- * all, so both the form and the router branch on it.
+ * The monitor types that report *in* rather than being dialled. They share
+ * one push credential (`heartbeatToken`), one deadline rule (interval +
+ * grace) and one worker that notices silence (worker/cmd/heartbeat); what
+ * differs is the payload and what the endpoint does with it.
+ */
+export const PUSH_TYPES: MonitorType[] = ['Heartbeat', 'Server'];
+
+/**
+ * Monitor types StayUp dials out to — the distinction decides whether a
+ * monitor needs a URL/host at all, so both the form and the router branch
+ * on it.
  */
 export function isActiveMonitorType(type: MonitorType): boolean {
-  return type !== 'Heartbeat';
+  return !PUSH_TYPES.includes(type);
 }
 
 // The long end exists for Domain monitors: RDAP servers are rate-limited and
@@ -71,6 +85,14 @@ export const MONITOR_INTERVAL_SECONDS: Record<MonitorInterval, number> = {
  * Must stay in step with defaultGraceSeconds in worker/cmd/heartbeat.
  */
 export const DEFAULT_HEARTBEAT_GRACE_SECONDS = 60;
+
+/**
+ * How many regions a monitor may be required to agree with before a failure
+ * is reported. Capped because the requirement is also capped at the number of
+ * regions actually reporting (see agreedStatus in worker/internal/runner) —
+ * anything past a handful is a number nobody can satisfy.
+ */
+export const MAX_CONFIRMATION_REGIONS = 10;
 
 /** The deadline a heartbeat has to arrive within, in seconds. */
 export function heartbeatDeadlineSeconds(

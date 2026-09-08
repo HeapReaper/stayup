@@ -43,17 +43,38 @@ export function heartbeatPingUrl(token: string): string {
 }
 
 export interface HeartbeatPing {
-  /** 'Up' for a plain ping, 'Down' for an explicit /fail — a job that knows it failed. */
-  status: Extract<MonitorStatus, 'Up' | 'Down'>;
-  /** Optional detail the job posted (the tail of its log, an error string). */
+  /**
+   * 'Up' for a plain ping, 'Down' for an explicit /fail — a job that knows it
+   * failed — and 'Degraded' for an agent report that breached a threshold.
+   *
+   * A Server monitor never reports itself Down: the machine just spoke to us,
+   * so it is by definition reachable. Down for a Server monitor means silence,
+   * which only worker/cmd/heartbeat can observe.
+   */
+  status: Extract<MonitorStatus, 'Up' | 'Degraded' | 'Down'>;
+  /** Optional detail the sender posted (the tail of a log, a utilisation summary). */
   message?: string | null;
   /** Optional duration the job reported, in ms — rendered on the same graph as any other monitor's. */
   responseTime?: number | null;
+  /**
+   * The agent's latest reading, as JSON, for a Server monitor. Replaces
+   * whatever was stored; absent leaves the column alone, so a heartbeat ping
+   * never wipes a Server monitor's snapshot.
+   */
+  serverMetrics?: string | null;
+  /**
+   * What to say in the incident when this report isn't Up. The check's own
+   * message describes the reading; this describes the problem, and the two are
+   * not the same sentence for an agent ("Disk at 94%…" versus a log tail).
+   */
+  failureSummary?: string | null;
 }
 
 export interface HeartbeatMonitorRef {
   id: string;
   name: string;
+  /** Heartbeat | Server — both push types share this whole path. */
+  type: string;
   interval: string;
   heartbeatGraceSeconds: number | null;
   /** Off means this monitor is watched and charted but never pages. */
@@ -107,7 +128,13 @@ export async function recordHeartbeatPing(monitor: HeartbeatMonitorRef, ping: He
 
   await prisma.monitor.update({
     where: { id: monitor.id },
-    data: { status: ping.status, responseTime, uptime, lastCheckedAt: checkedAt },
+    data: {
+      status: ping.status,
+      responseTime,
+      uptime,
+      lastCheckedAt: checkedAt,
+      ...(ping.serverMetrics === undefined ? {} : { lastServerMetrics: ping.serverMetrics }),
+    },
   });
 
   logger.info(
@@ -127,29 +154,36 @@ export async function recordHeartbeatPing(monitor: HeartbeatMonitorRef, ping: He
     return;
   }
 
-  await openIncidentForFailure(monitor, ping.message ?? null);
+  await openIncidentForFailure(monitor, ping.status, ping.failureSummary ?? ping.message ?? null);
 }
 
 /**
- * Opens the incident for an explicit /fail, applying the same three gates the
- * workers apply to any failing check — a monitor with automatic incidents
- * switched off, one under maintenance and one whose parent is already Down all
- * page nobody, and have to behave identically here or the two paths would
- * drift (invariant 12 in AGENTS.md).
+ * Opens the incident for a report that arrived saying something is wrong — an
+ * explicit /fail from a job, or an agent reading past a threshold.
+ *
+ * Applies the same three gates the workers apply to any failing check: a
+ * monitor with automatic incidents switched off, one under maintenance and one
+ * whose parent is already Down all page nobody, and have to behave identically
+ * here or the two paths would drift (invariant 12 in AGENTS.md).
  */
-async function openIncidentForFailure(monitor: HeartbeatMonitorRef, detail: string | null) {
+async function openIncidentForFailure(
+  monitor: HeartbeatMonitorRef,
+  status: 'Degraded' | 'Down',
+  detail: string | null,
+) {
   if (!monitor.autoIncidents) return;
 
   const { suppressed, reason } = await isIncidentSuppressed(monitor.id, monitor.parentId);
   if (suppressed) {
-    logger.info(`[Heartbeat] ${monitor.name} reported a failure but ${reason} — skipping incident`);
+    logger.info(`[Heartbeat] ${monitor.name} reported a problem but ${reason} — skipping incident`);
     return;
   }
 
-  const message = detail
-    ? `Automatically detected: ${monitor.name} reported a failed run (${detail}).`
-    : `Automatically detected: ${monitor.name} reported a failed run.`;
+  // A Server monitor's agent describes what is wrong; a heartbeat job only
+  // ever says that it failed.
+  const fallback = monitor.type === 'Server' ? 'reported a problem' : 'reported a failed run';
+  const message = `Automatically detected: ${monitor.name} ${detail ?? fallback}.`;
 
-  const incident = await ensureIncidentForMonitor({ id: monitor.id, name: monitor.name }, 'Down', message);
+  const incident = await ensureIncidentForMonitor({ id: monitor.id, name: monitor.name }, status, message);
   logger.warn(`[Heartbeat] Incident open for ${monitor.name}: ${incident.title} (${incident.id})`);
 }

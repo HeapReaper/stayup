@@ -599,19 +599,32 @@ export default function StatusPagesClientPage({ initialStatusPages, monitors }: 
                     onCheckedChange={(checked) => setForm((prev) => ({ ...prev, isPublished: checked }))}
                   />
                 </div>
-                <div className="flex items-center justify-between rounded-lg border p-3">
-                  <div className="space-y-0.5">
-                    <Label htmlFor="sp-require-login">Require login to view</Label>
-                    <p className="text-xs text-muted-foreground">
-                      Only visitors signed in with a dashboard account can view this page. Others are
-                      redirected to sign in.
-                    </p>
+                <div className="space-y-2 rounded-lg border p-3">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="space-y-0.5">
+                      <Label htmlFor="sp-require-login">Require login to view</Label>
+                      <p className="text-xs text-muted-foreground">
+                        Only visitors signed in with a dashboard account can view this page. Others
+                        are redirected to sign in — with single sign-on too, if this instance has an
+                        identity provider configured.
+                      </p>
+                    </div>
+                    <Switch
+                      id="sp-require-login"
+                      checked={form.requireLogin}
+                      onCheckedChange={(checked) => setForm((prev) => ({ ...prev, requireLogin: checked }))}
+                    />
                   </div>
-                  <Switch
-                    id="sp-require-login"
-                    checked={form.requireLogin}
-                    onCheckedChange={(checked) => setForm((prev) => ({ ...prev, requireLogin: checked }))}
-                  />
+                  {form.requireLogin && form.customDomain.trim() !== '' && (
+                    <p className="text-xs text-amber-600 dark:text-amber-400">
+                      Signing in happens on this instance&apos;s own domain, because that is where
+                      the session cookie lives — a browser will not send it to{' '}
+                      <span className="font-mono">{form.customDomain.trim()}</span>. Visitors who
+                      open the custom domain are sent to sign in and then land on the page at this
+                      instance&apos;s address, not the vanity one. Private page or vanity domain:
+                      you can have either, not both at once.
+                    </p>
+                  )}
                 </div>
                 <div className="flex items-center justify-between rounded-lg border p-3">
                   <div className="space-y-0.5">

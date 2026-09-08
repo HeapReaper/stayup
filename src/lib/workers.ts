@@ -45,7 +45,12 @@ export const WORKER_LABELS: Record<string, string> = {
 };
 
 export type WorkerStatusView = {
+  /** The heartbeat row's key: the bare worker name, or "<worker>@<region>" outside the default region. */
   id: string;
+  /** The binary's own name, which is what WORKER_LABELS is keyed on. */
+  worker: string;
+  /** Null in the default region — the only region a single-region install has. */
+  region: string | null;
   label: string;
   /** null when this worker has never written a heartbeat. */
   lastSeenAt: string | null;
@@ -77,23 +82,53 @@ function isStale(lastSeenAt: Date, intervalSeconds: number, now: number): boolea
   return now - lastSeenAt.getTime() > allowed;
 }
 
+/**
+ * Splits a heartbeat row into its worker and region.
+ *
+ * The columns are authoritative when present. The fallback parses the id,
+ * which is what a row written by an image from before regions existed carries
+ * — that row is a default-region worker whose id is just its name, so it
+ * resolves correctly without a data migration.
+ */
+function identify(row: { id: string; worker: string | null; region: string | null }): {
+  worker: string;
+  region: string | null;
+} {
+  if (row.worker) return { worker: row.worker, region: row.region || null };
+
+  const [worker, region] = row.id.split('@');
+  return { worker, region: region || null };
+}
+
 export async function getWorkerStatuses(): Promise<WorkerStatusView[]> {
   const rows = await prisma.workerHeartbeat.findMany();
   const byId = new Map(rows.map((row) => [row.id, row]));
   const now = Date.now();
 
   // Iterate the expected list, not the rows: an unknown row (a worker from a
-  // newer image, say) still gets reported, but a missing one can't hide.
-  const ids = [...new Set([...EXPECTED_WORKERS, ...rows.map((row) => row.id)])];
+  // newer image, or the same binary reporting from a second region) still gets
+  // reported, but a missing one can't hide.
+  //
+  // Expectation is per *worker*, not per region: StayUp has no idea which
+  // regions an operator meant to deploy, so a region that was never brought up
+  // is silence rather than a missing row. What it can insist on is that every
+  // binary reports from somewhere — which is what a row keyed on the bare name
+  // covers, since a worker in the default region keeps its plain id.
+  const seenWorkers = new Set(rows.map((row) => identify(row).worker));
+  const ids = [
+    ...EXPECTED_WORKERS.filter((worker) => !seenWorkers.has(worker)),
+    ...rows.map((row) => row.id),
+  ];
 
   return ids.map((id) => {
     const row = byId.get(id);
-    const label = WORKER_LABELS[id] ?? 'Unknown worker';
 
     if (!row) {
       return {
         id,
-        label,
+        worker: id,
+        region: null,
+        label: WORKER_LABELS[id] ?? 'Unknown worker',
         lastSeenAt: null,
         startedAt: null,
         intervalSeconds: null,
@@ -105,9 +140,13 @@ export async function getWorkerStatuses(): Promise<WorkerStatusView[]> {
       };
     }
 
+    const { worker, region } = identify(row);
+
     return {
       id,
-      label,
+      worker,
+      region,
+      label: WORKER_LABELS[worker] ?? 'Unknown worker',
       lastSeenAt: row.lastSeenAt.toISOString(),
       startedAt: row.startedAt.toISOString(),
       intervalSeconds: row.intervalSeconds,

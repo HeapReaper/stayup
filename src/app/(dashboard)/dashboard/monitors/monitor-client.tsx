@@ -22,14 +22,18 @@ import {
   HeartPulse,
   Link2,
   RefreshCw,
+  Server as ServerIcon,
+  Globe2,
 } from 'lucide-react';
 
 import { useTRPC } from '@/trpc/client';
 import type { Monitor } from '@/trpc/routers/monitor';
 import {
   PROBE_TYPES,
+  PUSH_TYPES,
   DEFAULT_PORTS,
   DEFAULT_HEARTBEAT_GRACE_SECONDS,
+  MAX_CONFIRMATION_REGIONS,
   dnsRecordTypeEnum,
   monitorTypeEnum,
   type DnsRecordType,
@@ -100,8 +104,14 @@ type MonitorFormState = {
   // The monitor this one sits behind. While the parent is Down, this
   // monitor's own failures open no incident.
   parentId: string;
-  // Heartbeat-only: how late the ping may be, on top of the interval.
+  // Push types only: how late the report may be, on top of the interval.
   heartbeatGraceSeconds: string;
+  // Server-only utilisation limits, in percent. Blank = not alerted on.
+  cpuThresholdPercent: string;
+  memoryThresholdPercent: string;
+  diskThresholdPercent: string;
+  // How many regions must agree before a failure is reported. Blank = 1.
+  confirmationRegions: string;
   // HTTP-only; kept in the form for every type (the server blanks them out
   // for Ping/Port/DNS) so switching type back and forth doesn't lose input.
   method: MonitorMethod;
@@ -145,6 +155,7 @@ const MONITOR_TYPE_LABELS: Record<MonitorType, string> = {
   WebSocket: 'WebSocket',
   Domain: 'Domain expiry',
   Heartbeat: 'Heartbeat (push)',
+  Server: 'Server agent',
 };
 
 /** What the URL/host field means per type — it is not always a URL. */
@@ -210,6 +221,10 @@ function emptyForm(): MonitorFormState {
     escalationPolicyId: NO_ESCALATION_POLICY,
     parentId: NO_PARENT,
     heartbeatGraceSeconds: '',
+    cpuThresholdPercent: '',
+    memoryThresholdPercent: '',
+    diskThresholdPercent: '',
+    confirmationRegions: '',
     method: 'GET',
     requestHeaders: '',
     requestBody: '',
@@ -242,6 +257,11 @@ function monitorToForm(monitor: Monitor): MonitorFormState {
     parentId: monitor.parentId ?? NO_PARENT,
     heartbeatGraceSeconds:
       monitor.heartbeatGraceSeconds === null ? '' : String(monitor.heartbeatGraceSeconds),
+    cpuThresholdPercent: monitor.cpuThresholdPercent === null ? '' : String(monitor.cpuThresholdPercent),
+    memoryThresholdPercent:
+      monitor.memoryThresholdPercent === null ? '' : String(monitor.memoryThresholdPercent),
+    diskThresholdPercent: monitor.diskThresholdPercent === null ? '' : String(monitor.diskThresholdPercent),
+    confirmationRegions: monitor.confirmationRegions === null ? '' : String(monitor.confirmationRegions),
     method: monitor.method,
     requestHeaders: monitor.requestHeaders ?? '',
     requestBody: monitor.requestBody ?? '',
@@ -261,6 +281,27 @@ function monitorToForm(monitor: Monitor): MonitorFormState {
       monitor.failedAttemptsThreshold === null ? '' : String(monitor.failedAttemptsThreshold),
     latencyThresholdMs: monitor.latencyThresholdMs === null ? '' : String(monitor.latencyThresholdMs),
   };
+}
+
+/**
+ * The one-line utilisation summary under a Server monitor's name.
+ *
+ * Only the readings that exist: an agent build that stops sending one, or a
+ * container without a readable /proc, should leave a gap rather than a "0%"
+ * that reads like a measurement.
+ */
+function serverSummary(monitor: Monitor): string {
+  const metrics = monitor.serverMetrics;
+  if (!metrics) return 'Waiting for its first agent report';
+
+  const parts: string[] = [];
+  if (metrics.cpuPercent !== undefined) parts.push(`CPU ${metrics.cpuPercent.toFixed(0)}%`);
+  if (metrics.memoryPercent !== undefined) parts.push(`RAM ${metrics.memoryPercent.toFixed(0)}%`);
+  if (metrics.diskPercent !== undefined) parts.push(`disk ${metrics.diskPercent.toFixed(0)}%`);
+  if (metrics.load1 !== undefined) parts.push(`load ${metrics.load1.toFixed(2)}`);
+
+  const summary = parts.length > 0 ? parts.join(' · ') : 'agent reported no readings';
+  return metrics.hostname ? `${metrics.hostname} — ${summary}` : summary;
 }
 
 function formatLastChecked(date: Date | string | null) {
@@ -434,9 +475,9 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    // A Heartbeat monitor has no target to dial — it is dialled instead — so
-    // it is the one type that may be saved without a URL or host.
-    if (!form.name || (form.type !== 'Heartbeat' && !form.url)) return;
+    // A push monitor has no target to dial — it is dialled instead — so those
+    // are the types that may be saved without a URL or host.
+    if (!form.name || (!PUSH_TYPES.includes(form.type) && !form.url)) return;
 
     const payload = {
       name: form.name,
@@ -448,6 +489,10 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
       escalationPolicyId: form.escalationPolicyId === NO_ESCALATION_POLICY ? null : form.escalationPolicyId,
       parentId: form.parentId === NO_PARENT ? null : form.parentId,
       heartbeatGraceSeconds: form.heartbeatGraceSeconds ? Number(form.heartbeatGraceSeconds) : null,
+      cpuThresholdPercent: form.cpuThresholdPercent ? Number(form.cpuThresholdPercent) : null,
+      memoryThresholdPercent: form.memoryThresholdPercent ? Number(form.memoryThresholdPercent) : null,
+      diskThresholdPercent: form.diskThresholdPercent ? Number(form.diskThresholdPercent) : null,
+      confirmationRegions: form.confirmationRegions ? Number(form.confirmationRegions) : null,
       method: form.method,
       requestHeaders: form.requestHeaders,
       requestBody: form.requestBody,
@@ -532,22 +577,27 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                   required
                 />
               </div>
-              {form.type === 'Heartbeat' ? (
+              {PUSH_TYPES.includes(form.type) ? (
                 <div className="space-y-3 rounded-lg border p-3">
                   <div className="flex items-start gap-2">
-                    <HeartPulse className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
+                    {form.type === 'Server' ? (
+                      <ServerIcon className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
+                    ) : (
+                      <HeartPulse className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
+                    )}
                     <p className="text-xs text-muted-foreground">
-                      This is the one monitor type StayUp does not dial. Your job calls the URL
-                      below when it finishes, and the monitor goes down when that call stops
-                      arriving — the only way to watch something with no port open, like a cron
-                      job or a nightly backup.
+                      {form.type === 'Server'
+                        ? 'StayUp does not dial this one either. An agent on the machine posts its CPU, memory, disk and load to the URL below; a full disk is the classic outage no HTTP check ever sees, because every other monitor type looks at the service from the outside.'
+                        : 'This is a monitor type StayUp does not dial. Your job calls the URL below when it finishes, and the monitor goes down when that call stops arriving — the only way to watch something with no port open, like a cron job or a nightly backup.'}
                     </p>
                   </div>
 
                   {editingMonitor?.heartbeatUrl ? (
                     <>
                       <div className="grid gap-2">
-                        <Label htmlFor="heartbeatUrl">Ping URL</Label>
+                        <Label htmlFor="heartbeatUrl">
+                          {form.type === 'Server' ? 'Agent URL' : 'Ping URL'}
+                        </Label>
                         <div className="flex gap-2">
                           <Input id="heartbeatUrl" readOnly value={editingMonitor.heartbeatUrl} className="font-mono text-xs" />
                           <Button
@@ -571,15 +621,26 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                           </Button>
                         </div>
                       </div>
-                      <p className="text-xs text-muted-foreground">
-                        In a cron line: <code className="font-mono">… &amp;&amp; curl -fsS {'"'}$URL{'"'}</code>.
-                        Add <code className="font-mono">/fail</code> to the end to report a run that
-                        failed. The URL is the credential — regenerating it invalidates the old one.
-                      </p>
+                      {form.type === 'Server' ? (
+                        <p className="text-xs text-muted-foreground">
+                          On the machine:{' '}
+                          <code className="font-mono">agent -url {'"'}$URL{'"'} -interval 60s</code>, or set{' '}
+                          <code className="font-mono">STAYUP_AGENT_URL</code> in a systemd unit. Use{' '}
+                          <code className="font-mono">-disk /var/lib/docker</code> to measure the mount
+                          that actually fills up. The URL is the credential — regenerating it
+                          invalidates the old one.
+                        </p>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">
+                          In a cron line: <code className="font-mono">… &amp;&amp; curl -fsS {'"'}$URL{'"'}</code>.
+                          Add <code className="font-mono">/fail</code> to the end to report a run that
+                          failed. The URL is the credential — regenerating it invalidates the old one.
+                        </p>
+                      )}
                     </>
                   ) : (
                     <p className="text-xs text-muted-foreground">
-                      Save the monitor to get its ping URL.
+                      Save the monitor to get its {form.type === 'Server' ? 'agent' : 'ping'} URL.
                     </p>
                   )}
                 </div>
@@ -599,7 +660,7 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                 </div>
               )}
 
-              {form.type === 'Heartbeat' && (
+              {PUSH_TYPES.includes(form.type) && (
                 <div className="grid gap-2">
                   <Label htmlFor="heartbeatGraceSeconds">Grace period (seconds)</Label>
                   <Input
@@ -612,10 +673,44 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                     onChange={(e) => setForm({ ...form, heartbeatGraceSeconds: e.target.value })}
                   />
                   <p className="text-xs text-muted-foreground">
-                    How late the ping may be, on top of the interval, before the monitor is called
-                    down. A job scheduled hourly does not run at exactly :00 — it queues, it
+                    How late the report may be, on top of the interval, before the monitor is
+                    called down. A job scheduled hourly does not run at exactly :00 — it queues, it
                     retries, the box is busy — so a deadline of exactly one interval would page on
                     the first slow night.
+                  </p>
+                </div>
+              )}
+
+              {form.type === 'Server' && (
+                <div className="space-y-3 rounded-lg border p-3">
+                  <Label className="text-sm font-normal">Utilisation thresholds</Label>
+                  <div className="grid grid-cols-3 gap-3">
+                    {([
+                      ['cpuThresholdPercent', 'CPU %'],
+                      ['memoryThresholdPercent', 'Memory %'],
+                      ['diskThresholdPercent', 'Disk %'],
+                    ] as const).map(([field, label]) => (
+                      <div className="grid gap-2" key={field}>
+                        <Label htmlFor={field} className="text-xs font-normal">
+                          {label}
+                        </Label>
+                        <Input
+                          id={field}
+                          type="number"
+                          min={1}
+                          max={100}
+                          placeholder="Off"
+                          value={form[field]}
+                          onChange={(e) => setForm({ ...form, [field]: e.target.value })}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Reaching a threshold reports the monitor <strong>Degraded</strong> and opens an
+                    incident. Blank means that resource is still measured and shown, just never
+                    alerted on. The machine going silent is a separate, harder failure — that is
+                    what the grace period above decides, and it reports <strong>Down</strong>.
                   </p>
                 </div>
               )}
@@ -1033,6 +1128,27 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
               </div>
 
               <div className="grid gap-2">
+                <Label htmlFor="confirmationRegions">Regions that must agree</Label>
+                <Input
+                  id="confirmationRegions"
+                  type="number"
+                  min={1}
+                  max={MAX_CONFIRMATION_REGIONS}
+                  placeholder="1 — the first region to see a failure reports it"
+                  value={form.confirmationRegions}
+                  onChange={(e) => setForm({ ...form, confirmationRegions: e.target.value })}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Only meaningful with workers in more than one region (<code className="font-mono">STAYUP_REGION</code>).
+                  Above 1, a failure is reported once that many regions see it independently — which
+                  is the only thing that tells a real outage apart from a bad route between one
+                  probe and the target. Capped at the number of regions actually reporting, so a
+                  number you never deployed can&apos;t silence a monitor. Recovery is never gated:
+                  one region seeing it back up reports it up.
+                </p>
+              </div>
+
+              <div className="grid gap-2">
                 <Label htmlFor="parent">Depends on</Label>
                 <Select
                   value={form.parentId}
@@ -1175,7 +1291,12 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                           {monitor.type}
                         </Badge>
                       </div>
-                      {monitor.type === 'Heartbeat' ? (
+                      {monitor.type === 'Server' ? (
+                        <span className="text-xs text-muted-foreground flex items-center gap-1 mt-0.5">
+                          <ServerIcon className="h-3 w-3" />
+                          {serverSummary(monitor)}
+                        </span>
+                      ) : monitor.type === 'Heartbeat' ? (
                         <span className="text-xs text-muted-foreground flex items-center gap-1 mt-0.5">
                           <HeartPulse className="h-3 w-3" />
                           Waiting to be pinged
@@ -1191,6 +1312,12 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                           {monitor.port ? `:${monitor.port}` : ''}
                           {monitor.type === 'HTTP' && <ExternalLink className="h-3 w-3" />}
                         </a>
+                      )}
+                      {monitor.confirmationRegions !== null && monitor.confirmationRegions > 1 && (
+                        <span className="text-xs text-muted-foreground flex items-center gap-1 mt-0.5">
+                          <Globe2 className="h-3 w-3" />
+                          Needs {monitor.confirmationRegions} regions to agree
+                        </span>
                       )}
                       {monitor.parentName && (
                         <span
