@@ -107,6 +107,47 @@ notification records.
 
 ---
 
+## Resource usage
+
+The whole stack idles at roughly **250 MB of RAM** across nine containers, so a 1 GB VPS is
+comfortable. Measured with `docker stats` on an idle instance (no monitors configured yet) running
+the pre-built images from `docker-compose.yaml`:
+
+| Container | Idle memory |
+|---|---|
+| `web` (Next.js) | 146 MiB |
+| `postgres` | 78 MiB |
+| `worker-port` | 3.7 MiB |
+| `worker-https` | 3.3 MiB |
+| `worker-dns` | 3.1 MiB |
+| `worker-probes` | ~3 MiB \* |
+| `worker-integrations` | 3.1 MiB |
+| `worker-ping` | 3.0 MiB |
+| `worker-janitor` | 2.8 MiB |
+| **Total** | **~246 MiB** |
+
+\* `worker-probes` is estimated: the eight other figures are measured, and every worker is the same
+binary shape. The eight measured containers come to 243 MiB.
+
+Almost all of it is the Node runtime and Postgres; all seven Go workers together account for about
+22 MiB, or under 10% of the total. That is the point of the Go rewrite — adding a worker costs a few
+megabytes, not a whole V8 heap, so the per-worker footprint stays flat as you scale checks out.
+
+Adding monitors barely moves these numbers. Each worker loads the monitors of its own type once per
+poll (`store.ListByType`) and drops them again, and a monitor row is a few hundred bytes — hundreds
+of monitors are still well under a megabyte of working set. What actually grows is the *database*,
+and how fast is up to your retention settings in Dashboard → Settings → Monitoring, where the
+janitor rolls finished days up into daily summaries and deletes the raw checks behind them.
+
+Reproduce it yourself with:
+
+```bash
+docker compose up -d
+docker stats --no-stream --format '{{.Name}}\t{{.MemUsage}}'
+```
+
+---
+
 ## Getting started
 
 ### Requirements
@@ -114,6 +155,7 @@ notification records.
 - Node.js 20+
 - Go 1.25+ (only if you want to run the workers outside Docker)
 - Optionally Docker + Docker Compose (runs everything, including Postgres and Redis)
+- ~250 MB of RAM for the full Docker stack — see [Resource usage](#resource-usage)
 
 ### Local development
 
