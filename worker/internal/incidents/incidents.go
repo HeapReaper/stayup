@@ -19,11 +19,6 @@ import (
 	"stayup/worker/internal/store"
 )
 
-// incidentURL matches the hardcoded default in
-// src/emails/incident-update-email.tsx — nothing on the TS side ever passes
-// a different one, so there's nothing to port here.
-const incidentURL = "http://localhost:3000/dashboard/incidents"
-
 // MonitorRef is the minimal monitor shape callers need — mirrors MonitorRef
 // in src/lib/incidents.ts.
 type MonitorRef struct {
@@ -291,7 +286,7 @@ func notifySubscribers(ctx context.Context, s *store.Store, incidentID, incident
 			StatusColor:   notify.StatusColor(status),
 			Message:       message,
 			MonitorName:   monitorName,
-			IncidentURL:   incidentURL,
+			IncidentURL:   notify.IncidentsURL(),
 		})
 		if err != nil {
 			continue
@@ -347,7 +342,7 @@ func notifyStatusPageSubscribers(ctx context.Context, s *store.Store, incidentID
 				Status:        status,
 				StatusColor:   notify.StatusColor(status),
 				Message:       message,
-				IncidentURL:   incidentURL,
+				IncidentURL:   notify.IncidentsURL(),
 			})
 		}
 		if err != nil {

@@ -9,6 +9,7 @@
 // twice at 3am. Everything below is in service of that, including the field
 // order (identity, then severity, then measurements).
 import { logger } from '@/lib/logging';
+import { incidentsUrl } from '@/lib/urls';
 
 export interface DiscordEmbedField {
   name: string;
@@ -71,15 +72,6 @@ const COLOR_NEUTRAL = 0x99aab5;
 function truncate(value: string, limit: number): string {
   if (value.length <= limit) return value;
   return `${value.slice(0, limit - 1)}…`;
-}
-
-/**
- * Base URL of this instance, for the "open the incident" link on the embed.
- * BETTER_AUTH_URL is the only thing either runtime knows about its own public
- * origin; the fallback matches the hardcoded default the incident e-mails use.
- */
-function dashboardBaseUrl(): string {
-  return (process.env.BETTER_AUTH_URL || 'http://localhost:3000').replace(/\/+$/, '');
 }
 
 /**
@@ -165,7 +157,7 @@ export function buildAlertEmbed(subject: string, message: string, context: Alert
   };
 
   if (fields.length > 0) embed.fields = fields;
-  if (context.incidentId) embed.url = `${dashboardBaseUrl()}/dashboard/incidents`;
+  if (context.incidentId) embed.url = incidentsUrl();
 
   return embed;
 }

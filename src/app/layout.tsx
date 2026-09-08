@@ -28,7 +28,9 @@ export const metadata: Metadata = {
   // declarations.
   icons: {
     icon: [{ url: '/logo.webp', type: 'image/webp' }],
-    apple: '/logo.webp',
+    // PNG, and square: iOS silently ignores a WebP apple-touch-icon, and
+    // pads a non-square one with black. Generated from the same logo.
+    apple: [{ url: '/apple-icon-180.png', sizes: '180x180', type: 'image/png' }],
   },
 };
 

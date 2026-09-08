@@ -4,6 +4,8 @@ import { createAuthMiddleware } from 'better-auth/api';
 import { admin } from 'better-auth/plugins';
 import { prisma } from '@/lib/prisma';
 import { sendEmail } from '@/lib/email';
+import { getSettings } from '@/lib/settings';
+import { logger } from '@/lib/logging';
 import WelcomeEmail from '@/emails/welcome-email';
 
 export const auth = betterAuth({
@@ -16,9 +18,10 @@ export const auth = betterAuth({
     // Lets an already-authenticated dashboard user create other users
     // (src/trpc/routers/user.ts's `create`, via auth.api.createUser) without
     // going through the public /register flow, which the hook below closes
-    // once the first account exists. This app doesn't otherwise have a
-    // roles/permissions concept — every logged-in user has full dashboard
-    // access, same as before adding this plugin.
+    // once the first account exists. The plugin only supplies the `role`
+    // column it writes into; what a role may actually *do* is StayUp's own
+    // model — see src/lib/permissions.ts, enforced by `capabilityProcedure`
+    // in src/trpc/init.ts.
     plugins: [admin()],
     hooks: {
         before: createAuthMiddleware(async (ctx) => {
@@ -36,13 +39,21 @@ export const auth = betterAuth({
         user: {
             create: {
                 after: async (user) => {
-                    if (user.email) {
-                        void sendEmail({
+                    if (!user.email) return;
+
+                    // Sent in the background on purpose: a mail server that is
+                    // slow or misconfigured must not fail the account creation
+                    // that triggered it.
+                    void (async () => {
+                        const { organizationName } = await getSettings();
+                        await sendEmail({
                             to: user.email,
-                            subject: 'Welcome to NextTemp!',
-                            react: WelcomeEmail({ name: user.name }),
+                            subject: `Welcome to StayUp at ${organizationName}`,
+                            react: WelcomeEmail({ name: user.name, organizationName }),
                         });
-                    }
+                    })().catch((error) => {
+                        logger.error(`[Auth] Welcome email to ${user.email} failed`, error);
+                    });
                 },
             },
         },

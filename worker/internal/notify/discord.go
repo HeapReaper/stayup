@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
-	"strings"
 	"time"
 
 	"stayup/worker/internal/logging"
@@ -91,18 +89,6 @@ func truncate(value string, limit int) string {
 		return value
 	}
 	return string(runes[:limit-1]) + "…"
-}
-
-// dashboardBaseURL is this instance's public origin, for the "open the
-// incident" link on the embed. BETTER_AUTH_URL is the only thing either
-// runtime knows about it; the fallback matches incidentURL in
-// internal/incidents.
-func dashboardBaseURL() string {
-	base := strings.TrimSpace(os.Getenv("BETTER_AUTH_URL"))
-	if base == "" {
-		base = "http://localhost:3000"
-	}
-	return strings.TrimRight(base, "/")
 }
 
 // AlertColor mirrors alertColor(): the incident status decides first and the
@@ -210,7 +196,7 @@ func BuildAlertEmbed(subject, message string, ctx AlertContext) DiscordEmbed {
 	}
 
 	if ctx.IncidentID != nil && *ctx.IncidentID != "" {
-		embed.URL = dashboardBaseURL() + "/dashboard/incidents"
+		embed.URL = IncidentsURL()
 	}
 	return embed
 }

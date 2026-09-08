@@ -1,6 +1,26 @@
+import type { Metadata, Viewport } from 'next';
 import Sidebar from '@/components/core/sidebar';
 import React from 'react';
 import {SidebarProvider, SidebarTrigger} from '@/components/ui/sidebar';
+
+// Scoped to the dashboard rather than the root layout on purpose: the public
+// status pages are served by this same app on their own domains, and must not
+// advertise a manifest branded "StayUp" that opens someone else's dashboard.
+// See src/app/manifest.ts.
+export const metadata: Metadata = {
+  manifest: '/manifest.webmanifest',
+  appleWebApp: { capable: true, title: 'StayUp', statusBarStyle: 'default' },
+};
+
+// Colours the browser/OS chrome around the installed app. The two values are
+// --background from src/app/globals.css, light and dark, so the bar above the
+// dashboard matches whichever theme it renders in.
+export const viewport: Viewport = {
+  themeColor: [
+    { media: '(prefers-color-scheme: light)', color: '#ffffff' },
+    { media: '(prefers-color-scheme: dark)', color: '#0c090c' },
+  ],
+};
 export default function DashboardLayout({
   children,
 }: {

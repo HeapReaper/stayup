@@ -18,6 +18,17 @@ no agent to install on the monitored machines — one `docker compose up` and yo
 
 ---
 
+## Screenshots
+
+| | |
+|---|---|
+| [![Dashboard](screenshots/dashboard.png)](screenshots/dashboard.png) | [![Add monitor](screenshots/add-monitor.png)](screenshots/add-monitor.png) |
+| **Dashboard** — every monitor at a glance, with status, uptime and response time. | **New monitor** — pick a check type and tune interval, timeout and thresholds per monitor. |
+| [![SLA reports](screenshots/sla-reports.png)](screenshots/sla-reports.png) | [![Status page](screenshots/status-page.png)](screenshots/status-page.png) |
+| **SLA reports** — uptime, p50/p95/p99 and error budget over any range, exportable as PDF or CSV. | **Status page** — the customer-facing page with component groups, uptime history and incidents. |
+
+---
+
 ## Features
 
 | | |
@@ -102,6 +113,7 @@ Two code paths deliberately mirror each other, and must stay behaviourally ident
 | `src/lib/settings.ts` | `worker/internal/settings` |
 | `src/lib/prisma.ts` | `worker/internal/db` |
 | `src/lib/updates.ts` | `worker/internal/updates` |
+| `src/lib/urls.ts` | `worker/internal/notify/urls.go` |
 
 A manually created incident and an automatically detected one produce the same incident, timeline and
 notification records.
@@ -442,12 +454,13 @@ src/
     api/auth/[...all]/   better-auth handler
     api/trpc/[trpc]/     tRPC handler
     api/public/status-domain/  custom-domain → slug lookup used by the proxy
+    manifest.ts          web app manifest (linked from the dashboard layout only)
   components/core/       sidebar, navbar, footer, auto-refresh
   components/ui/         shadcn/ui primitives
   emails/                React Email templates
   lib/                   prisma, auth, settings, incidents, integration-delivery, maintenance,
                          email, discord, push, audit, logging, redis,
-                         oncall, notification-rules, assertions, badge, status-feed
+                         oncall, notification-rules, assertions, badge, status-feed, urls
   prisma/schemas/        sqlite.prisma + postgresql.prisma, each with its own migrations/ folder
   trpc/                  init.ts (context + procedures), client/server helpers, routers/
   validations/           Zod schemas
@@ -567,8 +580,13 @@ TypeScript side.
   terminated at the edge, dialling the public origin would attempt TLS against a plaintext server.
 - **Web Push** is served by `public/sw.js`, which the Integrations page registers as `/sw.js`. VAPID
   keys are generated automatically on first use. Browsers only allow it over HTTPS (or localhost).
-- **Incident links in worker-sent e-mails** currently hardcode `http://localhost:3000/dashboard/incidents`
-  (`worker/internal/incidents`).
+- **Links in alerts** (incident e-mails, Discord embeds, push notifications) are built from
+  `BETTER_AUTH_URL`, on both the TypeScript and the Go side — a worker has no incoming request to
+  infer the origin from. Leave it unset and every alert links to `http://localhost:3000`, which is
+  useless on a phone at 3am; set it to your public origin in production.
+- **Installable dashboard.** `src/app/manifest.ts` plus the service worker web push already needs
+  makes `/dashboard` installable as a PWA on Android and iOS. The manifest is linked from the
+  dashboard layout only, so status pages on custom domains don't advertise it.
 
 ## Contributing
 

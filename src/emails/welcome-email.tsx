@@ -4,62 +4,72 @@ import {
   Body,
   Container,
   Text,
+  Img,
   Button,
   Heading,
   Hr,
   Section,
   Tailwind,
 } from '@react-email/components';
+import { dashboardBaseUrl } from '@/lib/urls';
 
 interface WelcomeEmailProps {
   name?: string;
+  /** Instance's organisation name (Settings -> General), for "on <org>'s StayUp". */
+  organizationName?: string;
 }
 
-export default function WelcomeEmail({ name }: WelcomeEmailProps) {
-  const userName = name || "there";
+export default function WelcomeEmail({ name, organizationName }: WelcomeEmailProps) {
+  const userName = name || 'there';
 
   return (
     <Html>
       <Head />
       <Tailwind>
-        <Body className="bg-purple-50 font-sans my-0 py-10">
-          <Container className="mx-auto my-0 p-8 bg-white rounded-2xl border border-solid border-purple-100 max-w-[480px] shadow-sm">
+        <Body className="bg-slate-50 font-sans my-0 py-10">
+          <Container className="mx-auto my-0 p-8 bg-white rounded-2xl border border-solid border-slate-200 max-w-[480px] shadow-sm">
             <Section className="text-center mb-6">
-              <div className="inline-block w-10 h-10 bg-purple-600 rounded-xl text-white font-bold text-xl leading-10 text-center">
-                N
-              </div>
-              <Text className="text-lg font-bold text-purple-950 mt-2 mb-0">
-                Next<span className="text-purple-600">Temp</span>
+              <Img
+                src={`${dashboardBaseUrl()}/icon-192.png`}
+                width="40"
+                height="40"
+                alt=""
+                className="inline-block rounded-xl"
+              />
+              <Text className="text-lg font-bold text-slate-900 mt-2 mb-0">
+                Stay<span className="text-emerald-600">Up</span>
               </Text>
             </Section>
 
-            <Heading className="text-purple-950 text-2xl font-extrabold text-center mb-4 mt-0">
-              Welcome to NextTemp, {userName}! 👋
+            <Heading className="text-slate-900 text-2xl font-extrabold text-center mb-4 mt-0">
+              Welcome to StayUp, {userName}! 👋
             </Heading>
 
-            <Text className="text-purple-800 text-base leading-relaxed mb-4">
-              Thanks for joining! Your account has been created successfully.
-              NextTemp gives you a fast, type-safe Next.js stack so you can build
-              and deploy your next big project without friction.
+            <Text className="text-slate-700 text-base leading-relaxed mb-4">
+              An account has been created for you on{' '}
+              {organizationName ? `${organizationName}'s` : 'this'} StayUp instance — the uptime
+              monitoring, incident management and status pages for the services your team runs.
             </Text>
 
-            <Text className="text-purple-800 text-base leading-relaxed mb-6">
-              You can now log in to your dashboard to manage your session and explore all features.
+            <Text className="text-slate-700 text-base leading-relaxed mb-6">
+              Sign in to see what's being monitored and what's currently up. If you're expected to
+              take alerts, check that your notification integrations are connected before you're on
+              call.
             </Text>
 
             <Section className="text-center mb-7">
               <Button
-                href="http://localhost:3000/dashboard"
-                className="bg-purple-600 text-white px-7 py-3 rounded-xl font-semibold text-sm no-underline inline-block shadow-md shadow-purple-600/20"
+                href={`${dashboardBaseUrl()}/dashboard`}
+                className="bg-emerald-600 text-white px-7 py-3 rounded-xl font-semibold text-sm no-underline inline-block shadow-md shadow-emerald-600/20"
               >
                 Go to Dashboard &rarr;
               </Button>
             </Section>
 
-            <Hr className="border-solid border-purple-100 my-6" />
+            <Hr className="border-solid border-slate-200 my-6" />
 
-            <Text className="text-purple-400 text-xs text-center my-0">
-              Made with 💜 by NextTemp. If you have any questions, reply to this email.
+            <Text className="text-slate-400 text-xs text-center my-0">
+              You're receiving this because an administrator created an account for you.
             </Text>
           </Container>
         </Body>
