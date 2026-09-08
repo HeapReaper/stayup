@@ -20,19 +20,21 @@ configuration lives in the single-row `AppSettings` table, which the workers re-
 | `src/app/(dashboard)/dashboard/*` | Authenticated pages. Always a pair: `page.tsx` (server component, fetches via the tRPC `caller`) + `*-client.tsx` (`'use client'`, mutations/interactivity). |
 | `src/app/(status)/status/[slug]` | The public status page. |
 | `src/app/(public)`, `login/`, `register/`, `logout/` | Auth surfaces. `/` redirects to `/login`. |
-| `src/app/api/` | better-auth handler, tRPC handler, `reports/pdf` (server-rendered SLA report) and `files` (upload + serve — both are file responses/bodies, which is why they aren't tRPC procedures), and `public/status-domain` (custom-domain → slug lookup for the proxy). |
+| `src/app/api/` | better-auth handler, tRPC handler, `reports/pdf` (server-rendered SLA report) and `files` (upload + serve — both are file responses/bodies, which is why they aren't tRPC procedures), `public/status-domain` (custom-domain → slug lookup for the proxy), `v1/*` (the public REST API — authenticated by `AppSettings.apiKey`, not a session, so it can't be a tRPC procedure) and `heartbeat/[...segments]` (where a Heartbeat monitor's job checks in; unauthenticated by necessity, the token in the URL is the credential). |
 | `src/trpc/routers/` | The entire API. `init.ts` defines `baseProcedure` / `protectedProcedure`; `_app.ts` is the registry. |
 | `src/lib/` | Server-side domain logic and clients (prisma, auth, settings, incidents, integration-delivery, maintenance, email, discord, push, audit, logging, redis, updates, version, permissions, workers, sla-report, report-pdf, stored-files-server). `report-range.ts`, `monitor-types.ts` and `stored-files.ts` are the Prisma-free half: client components import them, so they must stay free of server imports — which is why the upload cleanup helper lives in `stored-files-server.ts` instead. |
+| `src/lib/api-v1.ts` | The REST API's front door: bearer-key authentication, the published monitor shape, and the TRPCError → status-code mapping that lets one implementation serve both the dashboard and the API. |
 | `src/lib/permissions.ts` | The whole authorization model: roles → capabilities. Enforced only by `capabilityProcedure` in `src/trpc/init.ts`. |
 | `src/app/api/health/` | Unauthenticated container healthcheck. 200/503 on the *database*; worker liveness is reported but never fails it. |
 | `src/prisma/schemas/` | `sqlite.prisma` and `postgresql.prisma` **plus one migration folder each**. |
 | `src/proxy.ts` | Next middleware: auth redirects + custom-domain rewrite. |
-| `Dockerfile` | Both images: `runner` (web) and `worker-runner` (all six Go binaries). |
+| `Dockerfile` | Both images: `runner` (web) and `worker-runner` (all eight Go binaries). |
 | `docker-compose.build.yml` | Builds from source — the contributor stack. |
 | `docker-compose.yaml` | Pulls published images — the *user* stack, imported by URL. Standalone: no build context, no `.env`, no local paths. |
 | `docker-compose.coolify.yaml` | The same user stack behind Coolify's proxy: `expose:` instead of `ports:`, port fixed at 3000, secrets from Coolify's `SERVICE_*` magic variables. |
 | `.gitlab-ci.yml` | SAST + secret detection, and the two image-build jobs. |
-| `worker/cmd/*` | One `main.go` per binary: `https`, `port`, `ping`, `dns`, `integrations`, `janitor`. |
+| `worker/cmd/*` | One `main.go` per binary: `https`, `port`, `ping`, `dns`, `probes`, `heartbeat`, `integrations`, `janitor`. |
+| `worker/cmd/heartbeat` | The inverted worker: it checks nothing and dials nothing, it notices a Heartbeat monitor whose ping *stopped* arriving. Doesn't build on `internal/runner` for that reason — there is no check to perform — but shares everything after the result (the `MonitorCheck` row, the rolled-up status, `internal/incidents`). Its recovery half lives in the Next.js app (`src/lib/heartbeat.ts`), because a heartbeat recovers by arriving. |
 | `worker/internal/checkers/` | "How do I check one monitor" — one function per monitor type. |
 | `worker/internal/runner/` | The shared poll → check → persist → roll-up → incident-sync loop. |
 | `worker/internal/store/` | All SQL. Both providers, one query string each. |
@@ -51,6 +53,9 @@ configuration lives in the single-row `AppSettings` table, which the workers re-
    | `src/lib/incidents.ts` | `worker/internal/incidents` |
    | `src/lib/integration-delivery.ts` | `worker/internal/delivery` + `worker/internal/notify` |
    | `src/lib/maintenance.ts` | `worker/internal/maintenance` |
+   | `src/lib/maintenance-notify.ts` | `worker/internal/maintenance/notify.go` |
+   | `src/lib/monitor-dependencies.ts` | `worker/internal/dependencies` |
+   | `src/lib/webhook-signature.ts` | `worker/internal/notify/signature.go` |
    | `src/lib/settings.ts` | `worker/internal/settings` |
    | `src/lib/prisma.ts` | `worker/internal/db` |
    | `src/lib/updates.ts` | `worker/internal/updates` (+ `version.ts` / `internal/version`) |
@@ -82,10 +87,24 @@ configuration lives in the single-row `AppSettings` table, which the workers re-
      full strength until their session expired.
    - `normalizeRole()` maps anything unrecognised onto `Admin`, including better-auth's own default
      (`"user"`, which is what the first `/register` account gets). That's deliberate: the
-     alternative locks the only account out of the instance it just created.
+     alternative locks the only account out of the instance it just created. **That fallback is not
+     a safety net for new sign-up paths.** SSO can create accounts too, and every one of them would
+     have landed on it — so `databaseHooks.user.create.before` in `src/lib/auth.ts` now writes a
+     role explicitly (Admin for the very first account, `OIDC_DEFAULT_ROLE` — Viewer by default —
+     for everyone after), and `normalizeRole()` only covers rows written before that existed. Any
+     future way of creating a user must decide its own role there rather than leaning on the
+     fallback.
 
    `user.updateProfile` is the one mutation that is deliberately only `protectedProcedure`: it edits
    the caller's own account and nothing else.
+
+   **The REST API is a fourth door into the same mutations** (`src/app/api/v1`, authenticated by
+   `AppSettings.apiKey` rather than a session). It deliberately does *not* go through
+   `capabilityProcedure` — there is no user to look a role up for — so it calls the exported
+   `createMonitor`/`updateMonitor`/`deleteMonitor`/`setMonitorEnabled` functions in
+   `src/trpc/routers/monitor.ts` directly, and the key's ceiling is decided by which of those the
+   API exposes at all. It exposes monitors and nothing else on purpose: users and instance settings
+   stay behind a human login. Adding an endpoint there is granting the API key a capability.
 
 5. **No superjson transformer.** Serialise `Date` → ISO string inside routers, so the RSC `caller`
    and the HTTP client return identical shapes. Follow `serializeMonitor` in
@@ -148,7 +167,29 @@ configuration lives in the single-row `AppSettings` table, which the workers re-
     rollup is the only thing that survives the delete — the public status page reads rollups for past
     days and raw checks only for today. Reordering those two steps silently erases history.
 
-12. **`src/proxy.ts` must not import Prisma.** It runs in the middleware runtime; it reaches data over
+12. **Incident suppression is one function, and it only ever suppresses *opening*.**
+   `incidents.Suppressed` (`worker/internal/incidents`) is the single place that answers "is this
+   failure already explained": an active maintenance window, or an ancestor that is already Down
+   (`internal/dependencies`, mirrored by `src/lib/monitor-dependencies.ts`). Both the runner and
+   `cmd/heartbeat` call it, and a third failing path must too — two copies of that question would
+   drift the moment a third reason is added.
+
+   Recovery is never gated on any of it, and neither is `Monitor.autoIncidents`. An incident that is
+   already open — opened before the window started, before the parent fell over, or by a human — has
+   to reach *Monitoring* when the monitor comes back, or flipping any of those mid-outage strands it
+   as permanently investigating.
+
+13. **A maintenance window has four announcements and two senders**, split by which runtime is awake
+   when the transition happens: the dashboard sends `Scheduled` and `Cancelled` (a person did it),
+   `worker/internal/maintenance/notify.go` sends `Started` and `Ended` (a clock did). The wording is
+   mirrored line for line, because one window's notices have to read as one conversation.
+
+   Two things hold it together: the `notified*At` columns are send-once marks (a five-second poll
+   loop must not re-announce every tick, so they are written even when some sends failed), and
+   `announceGrace` bounds how stale a transition may be — without it, the first tick after an
+   upgrade would mail out every window that came and went while nobody was listening.
+
+14. **`src/proxy.ts` must not import Prisma.** It runs in the middleware runtime; it reaches data over
    loopback HTTP (`http://127.0.0.1:$PORT`, never `request.nextUrl.origin` — behind a TLS-terminating
    proxy that origin is `https://` while the process only speaks plain HTTP).
 
@@ -167,7 +208,7 @@ npx prisma migrate dev         # dev migration for $DB_PROVIDER only — repeat 
 npx prisma migrate deploy      # production
 
 # workers (from worker/)
-go run ./cmd/https             # or port | ping | dns | integrations
+go run ./cmd/https             # or port | ping | dns | probes | heartbeat | integrations | janitor
 go build -o bin/https ./cmd/https
 go vet ./... && go test ./...
 
@@ -187,8 +228,9 @@ docker build --check --target worker-runner .
 
 The tests are `worker/internal/checkers/http_test.go` (the HTTP checker's request options,
 status-code spec and certificate-expiry logic), `worker/internal/updates/updates_test.go` (the
-version comparison) and `worker/internal/notify/discord_test.go` (the alert embed's fields, colours
-and truncation). The last two exist because their logic is duplicated in TypeScript: the tables
+version comparison), `worker/internal/notify/discord_test.go` (the alert embed's fields, colours
+and truncation) and `worker/internal/notify/signature_test.go` (the webhook HMAC, against a vector
+generated with the TypeScript half). The last two exist because their logic is duplicated in TypeScript: the tables
 there mirror `src/lib/updates.ts` and `src/lib/discord.ts`, so a change to either side's rules
 belongs in both. Both pairs were checked by generating the same inputs through each
 implementation and diffing the output — worth redoing after touching either side. Everything else is verified by running the affected
@@ -211,7 +253,7 @@ builds — so run them yourself before pushing.
   `as` only when reading rows that were written through a validated mutation.
 - **Status/impact vocabularies** — keep these exact strings in sync across TS, Go and the DB:
   - monitor `type`: `HTTP` | `Ping` | `Port` | `DNS` | `Postgres` | `MySQL` | `Redis` | `SMTP` |
-    `IMAP` | `gRPC` | `WebSocket` | `Domain`
+    `IMAP` | `gRPC` | `WebSocket` | `Domain` | `Heartbeat`
   - monitor `status`: `Up` | `Down` | `Degraded`
   - monitor `interval`: `15s` | `30s` | `60s` | `5m` | `1h` | `12h` | `24h`
   - monitor `dnsRecordType`: `A` | `AAAA` | `CNAME` | `MX` | `NS` | `TXT` | `SRV`
@@ -219,6 +261,8 @@ builds — so run them yourself before pushing.
   - incident `impact`: `Critical` | `Major` | `Minor`
   - integration `type`: `Discord` | `Slack` | `Webhook` | `Telegram` | `Email` | `PagerDuty` | `Push`
   - delivery `status`: `Pending` | `Sent` | `Failed`
+  - maintenance announcement phase: `Scheduled` | `Started` | `Ended` | `Cancelled` (the TS side
+    sends the two a person triggers, the Go side the two a clock does — see invariant 13)
 - **Go**: package-level doc comment on every `internal/` package, stating which TS file it mirrors.
   Errors are logged with `logging.Error(context, err)` and the tick continues — a worker should never
   exit because one monitor failed.
@@ -230,7 +274,8 @@ builds — so run them yourself before pushing.
 2. `worker/cmd/<type>/main.go` — copy an existing one, change the three labels.
 3. Add the binary to the `for cmd in …` loop in `Dockerfile` and a `worker-<type>` service in
    **all three** of `docker-compose.build.yml`, `docker-compose.yaml` and
-   `docker-compose.coolify.yaml`, plus its name to `EXPECTED_WORKERS` in `src/lib/workers.ts` —
+   `docker-compose.coolify.yaml`, plus its name to `EXPECTED_WORKERS` *and* `WORKER_LABELS` in
+   `src/lib/workers.ts` —
    a worker missing from that list is invisible on the dashboard rather than reported as down.
    (A worker built on `internal/runner` gets its heartbeat for free; one with its own loop must
    call `store.RecordHeartbeat` per tick, like `cmd/integrations` and `cmd/janitor` do — including
@@ -279,10 +324,22 @@ or writes the column.
 - **Worker liveness has a one-minute floor.** `isStale` in `src/lib/workers.ts` allows three missed
   ticks but never less than 60s, so a dead 5-second check worker takes a minute to show up as "not
   reporting". Lowering it would make a single slow tick look like an outage.
-- **Inert configuration.** Some `AppSettings` fields are still editable in the UI but read by
-  nothing: `defaultCheckInterval` (the monitor form doesn't use it as its default), `timezone`
-  (timestamps render in the viewer's locale), and `apiKey` / `webhookSigningSecret` (there is no
-  public API to authenticate, and outgoing webhooks aren't signed).
+- **Inert configuration.** Two `AppSettings` fields are still editable in the UI but read by
+  nothing: `defaultCheckInterval` (the monitor form doesn't use it as its default) and `timezone`
+  (timestamps render in the viewer's locale — `timezone` *is* read, but only by the notification
+  rules' active windows). `apiKey` and `webhookSigningSecret` used to be on this list; both are now
+  live (`src/app/api/v1`, `src/lib/webhook-signature.ts`).
+- **A heartbeat monitor's uptime is coarser than a dialled one's.** `cmd/heartbeat` writes one check
+  per missed deadline (`interval` + grace), not one per interval, so a silent job produces slightly
+  fewer Down rows than a healthy one would have produced Up rows. Close enough for a percentage,
+  not a basis for anything exact.
+- **Maintenance start/end announcements have a one-hour cutoff.** `announceGrace` in
+  `worker/internal/maintenance/notify.go` — a transition older than that is never announced rather
+  than announced stale, which is also what stops an upgrade mailing out a backlog. A window that
+  starts and ends while the integrations worker is down is therefore never announced at all.
+- **Two-factor enrolment shows a setup key, not a QR code.** Rendering one needs an encoder and the
+  repo has no dependency for it; every authenticator accepts a typed key, and the `otpauth://` link
+  works on a phone.
 - **Uptime is still raw-check based.** `runner`'s 30-day uptime percentage counts `MonitorCheck`
   rows, not rollups, so a `checkRetentionDays` below 30 quietly narrows the window it covers. The
   status page's day bars don't have this problem — they prefer rollups.
@@ -306,3 +363,13 @@ or writes the column.
   a worker against production webhooks while experimenting.
 - The GitLab CI pipeline (`.gitlab-ci.yml`) only runs SAST and secret detection — CI passing is not
   evidence that anything works.
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->

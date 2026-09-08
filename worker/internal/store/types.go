@@ -19,6 +19,17 @@ type Monitor struct {
 	LastCheckedAt      *time.Time
 	EscalationPolicyID *string
 
+	// ParentID is the monitor this one sits behind, or nil. While an ancestor
+	// is Down, this monitor's failing checks open no incident — see
+	// internal/dependencies, which mirrors src/lib/monitor-dependencies.ts.
+	ParentID *string
+
+	// Heartbeat-only. HeartbeatGraceSeconds is how late the ping may be on
+	// top of Interval before cmd/heartbeat calls the monitor Down; nil means
+	// defaultGraceSeconds there. The token itself is never read by a worker —
+	// only the Next.js ping endpoint looks it up.
+	HeartbeatGraceSeconds *int
+
 	// HTTP-only request options; zero values for every other monitor type.
 	// See the `monitor` model in src/prisma/schemas/*.prisma for what each
 	// one means, and internal/checkers/http.go for how they're applied.
@@ -72,6 +83,13 @@ func (m Monitor) IsDue(now time.Time) bool {
 		return true
 	}
 	return now.Sub(*m.LastCheckedAt) >= intervalDuration(m.Interval)
+}
+
+// IntervalDuration is this monitor's configured check interval. Exported for
+// cmd/heartbeat, which needs the interval itself (to add a grace period to
+// it) rather than the "is it due" answer IsDue gives.
+func (m Monitor) IntervalDuration() time.Duration {
+	return intervalDuration(m.Interval)
 }
 
 // Must stay in step with monitorIntervalEnum in src/trpc/routers/monitor.ts —
@@ -288,6 +306,10 @@ type AppSettings struct {
 	SMTPUseTLS      bool
 	VapidPublicKey  *string
 	VapidPrivateKey *string
+	// Shared secret the generic Webhook channel signs its deliveries with
+	// (internal/notify/signature.go). Read by the workers only — it never
+	// leaves the server except as a digest.
+	WebhookSigningSecret string
 	// UpdateCheckEnabled off means cmd/janitor skips its daily update check —
 	// the dashboard's "Check now" button still works. See internal/updates.
 	UpdateCheckEnabled bool

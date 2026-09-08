@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"stayup/worker/internal/logging"
 	"stayup/worker/internal/notify"
@@ -75,7 +76,11 @@ func Deliver(integration store.Integration, subject, message string, alert notif
 		return deliverJSONWebhook(integration.Target, map[string]string{"text": fmt.Sprintf("*%s*\n%s", subject, message)}, "Slack")
 
 	case "Webhook":
-		return deliverJSONWebhook(integration.Target, map[string]string{"subject": subject, "message": message}, "Webhook")
+		// The one channel StayUp signs. Slack, Telegram and PagerDuty are
+		// third-party endpoints that authenticate the URL or the token; a
+		// generic webhook lands on somebody's own service, which otherwise
+		// cannot tell a real alert from a POST by anyone who learned the URL.
+		return deliverSignedWebhook(integration.Target, map[string]string{"subject": subject, "message": message}, cfg.WebhookSigningSecret)
 
 	case "Telegram":
 		return deliverTelegram(integration, subject, message)
@@ -98,6 +103,41 @@ func Deliver(integration store.Integration, subject, message string, alert notif
 	default:
 		return fail("Unknown integration type: " + integration.Type)
 	}
+}
+
+// deliverSignedWebhook is deliverJSONWebhook plus the HMAC headers from
+// internal/notify — mirrors the 'Webhook' branch of deliverToIntegration() in
+// src/lib/integration-delivery.ts, which signs the same bytes the same way.
+//
+// The marshalled body is signed and sent in that order, deliberately: signing
+// a re-marshalled copy would let a key-order difference invalidate a correct
+// signature.
+func deliverSignedWebhook(url string, payload map[string]string, secret string) Result {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fail(err.Error())
+	}
+
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fail(err.Error())
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for name, value := range notify.WebhookSignatureHeaders(secret, body, time.Now()) {
+		req.Header.Set(name, value)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		logging.Error("[Integrations] Delivery to Webhook failed", err)
+		return fail(err.Error())
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fail(fmt.Sprintf("Webhook returned %d", resp.StatusCode))
+	}
+	return ok()
 }
 
 func deliverJSONWebhook(url string, payload map[string]string, label string) Result {

@@ -26,7 +26,8 @@ func (s *Store) GetSettings(ctx context.Context) (*AppSettings, error) {
 		       "updateCheckEnabled",
 		       "smtpHost", "smtpPort", "smtpUser", "smtpPass", "smtpFromEmail", "smtpFromName", "smtpUseTls",
 		       "domainExpiryWarningEnabled", "domainExpiryWarningDays",
-		       "flappingEnabled", "flappingWindowMinutes", "flappingThreshold"
+		       "flappingEnabled", "flappingWindowMinutes", "flappingThreshold",
+		       "webhookSigningSecret"
 		FROM app_settings
 		WHERE id = 'singleton'
 	`).Scan(&settings.ID, &settings.Timezone, &supportEmail, &settings.HTTPTimeoutSecs, &settings.FailedAttemptsThreshold, &settings.LatencyThreshold,
@@ -35,7 +36,8 @@ func (s *Store) GetSettings(ctx context.Context) (*AppSettings, error) {
 		&updateCheckEnabled,
 		&smtpHost, &smtpPort, &smtpUser, &smtpPass, &smtpFromEmail, &smtpFromName, &smtpUseTLS,
 		&domainExpiryWarningEnabled, &settings.DomainExpiryWarningDays,
-		&flappingEnabled, &settings.FlappingWindowMinutes, &settings.FlappingThreshold)
+		&flappingEnabled, &settings.FlappingWindowMinutes, &settings.FlappingThreshold,
+		&settings.WebhookSigningSecret)
 
 	if err == sql.ErrNoRows {
 		return nil, nil

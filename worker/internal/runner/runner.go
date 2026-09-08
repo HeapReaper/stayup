@@ -17,7 +17,6 @@ import (
 	"stayup/worker/internal/flapping"
 	"stayup/worker/internal/incidents"
 	"stayup/worker/internal/logging"
-	"stayup/worker/internal/maintenance"
 	"stayup/worker/internal/procstat"
 	"stayup/worker/internal/settings"
 	"stayup/worker/internal/store"
@@ -230,12 +229,12 @@ func noteFlappingStarted(ctx context.Context, s *store.Store, workerLabel string
 		return
 	}
 
-	underMaintenance, err := maintenance.IsMonitorUnderMaintenance(ctx, s, monitor.ID)
+	suppressed, _, err := incidents.Suppressed(ctx, s, monitor.ID, monitor.ParentID)
 	if err != nil {
 		logging.Error(fmt.Sprintf("[%s] Failed to open flapping incident for %q", workerLabel, monitor.Name), err)
 		return
 	}
-	if underMaintenance {
+	if suppressed {
 		return
 	}
 
@@ -315,13 +314,13 @@ func syncIncidentForResult(ctx context.Context, s *store.Store, workerLabel stri
 			return
 		}
 
-		underMaintenance, err := maintenance.IsMonitorUnderMaintenance(ctx, s, monitor.ID)
+		suppressed, reason, err := incidents.Suppressed(ctx, s, monitor.ID, monitor.ParentID)
 		if err != nil {
 			logging.Error(fmt.Sprintf("[%s] Failed to sync incident for %q", workerLabel, monitor.Name), err)
 			return
 		}
-		if underMaintenance {
-			logging.Info(fmt.Sprintf("[%s] %s is %s but under maintenance — skipping incident", workerLabel, monitor.Name, strings.ToLower(status)))
+		if suppressed {
+			logging.Info(fmt.Sprintf("[%s] %s is %s but %s — skipping incident", workerLabel, monitor.Name, strings.ToLower(status), reason))
 			return
 		}
 

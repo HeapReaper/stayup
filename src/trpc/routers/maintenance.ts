@@ -3,6 +3,7 @@ import { TRPCError } from '@trpc/server';
 import { createTRPCRouter, protectedProcedure, capabilityProcedure } from '../init';
 import { prisma } from '@/lib/prisma';
 import { logAudit } from '@/lib/audit';
+import { announceMaintenance } from '@/lib/maintenance-notify';
 
 /** Maintenance windows: Admin and Member. */
 const writeMaintenance = capabilityProcedure('maintenance:write');
@@ -20,6 +21,12 @@ export type MaintenanceWindowSummary = {
   monitors: { id: string; name: string }[];
   createdBy: { id: string; name: string } | null;
   createdAt: string;
+  /** Whether subscribers hear about this window at all. */
+  notifySubscribers: boolean;
+  /** When each announcement went out, or null if it hasn't (yet, or ever). */
+  notifiedScheduledAt: string | null;
+  notifiedStartedAt: string | null;
+  notifiedEndedAt: string | null;
 };
 
 /** Status isn't stored — it's always derived from now vs startsAt/endsAt/cancelledAt. */
@@ -46,6 +53,10 @@ function serialize(window: {
   endsAt: Date;
   cancelledAt: Date | null;
   createdAt: Date;
+  notifySubscribers: boolean;
+  notifiedScheduledAt: Date | null;
+  notifiedStartedAt: Date | null;
+  notifiedEndedAt: Date | null;
   createdBy: { id: string; name: string } | null;
   monitors: { monitor: { id: string; name: string } }[];
 }): MaintenanceWindowSummary {
@@ -59,6 +70,10 @@ function serialize(window: {
     monitors: window.monitors.map((m) => m.monitor),
     createdBy: window.createdBy,
     createdAt: window.createdAt.toISOString(),
+    notifySubscribers: window.notifySubscribers,
+    notifiedScheduledAt: window.notifiedScheduledAt?.toISOString() ?? null,
+    notifiedStartedAt: window.notifiedStartedAt?.toISOString() ?? null,
+    notifiedEndedAt: window.notifiedEndedAt?.toISOString() ?? null,
   };
 }
 
@@ -69,6 +84,9 @@ const maintenanceInput = z
     startsAt: z.coerce.date(),
     endsAt: z.coerce.date(),
     monitorIds: z.array(z.string()).min(1, 'Select at least one monitor'),
+    // Defaults to on: being told about planned work is what subscribers
+    // expect, and the windows nobody needs to hear about are the exception.
+    notifySubscribers: z.boolean().optional().default(true),
   })
   .refine((data) => data.endsAt > data.startsAt, {
     message: 'End time must be after the start time',
@@ -93,10 +111,15 @@ export const maintenanceRouter = createTRPCRouter({
         startsAt: input.startsAt,
         endsAt: input.endsAt,
         createdById: ctx.session.user.id,
+        notifySubscribers: input.notifySubscribers,
         monitors: { create: input.monitorIds.map((monitorId) => ({ monitorId })) },
       },
       include: withMonitorsAndCreator,
     });
+
+    // Not awaited: a slow mail server must not fail the window that was just
+    // scheduled. announceMaintenance swallows its own errors and logs them.
+    void announceMaintenance(window.id, 'Scheduled');
 
     await logAudit({
       actorId: ctx.session.user.id,
@@ -125,6 +148,7 @@ export const maintenanceRouter = createTRPCRouter({
             message: input.message || null,
             startsAt: input.startsAt,
             endsAt: input.endsAt,
+            notifySubscribers: input.notifySubscribers,
             monitors: { create: input.monitorIds.map((monitorId) => ({ monitorId })) },
           },
           include: withMonitorsAndCreator,
@@ -138,6 +162,17 @@ export const maintenanceRouter = createTRPCRouter({
         target: window.title,
         ipAddress: ctx.ipAddress,
       });
+
+      // Re-announce only when the window was moved, and only while it is
+      // still in the future: a subscriber who has already written the old
+      // slot down needs to hear about the new one, but a typo fixed in the
+      // title — or an edit to a window that already started — is not news.
+      const moved =
+        existing.startsAt.getTime() !== input.startsAt.getTime() ||
+        existing.endsAt.getTime() !== input.endsAt.getTime();
+      if (moved && input.startsAt > new Date()) {
+        void announceMaintenance(window.id, 'Scheduled');
+      }
 
       return serialize(window);
     }),
@@ -158,6 +193,10 @@ export const maintenanceRouter = createTRPCRouter({
       target: window.title,
       ipAddress: ctx.ipAddress,
     });
+
+    // Worth an announcement of its own: a subscriber who rearranged their
+    // afternoon around the window has to hear that it isn't happening.
+    void announceMaintenance(window.id, 'Cancelled');
 
     return { id: window.id };
   }),

@@ -33,6 +33,7 @@ import { prisma } from '@/lib/prisma';
 import { ASSERTION_TYPES } from '@/lib/assertions';
 import { currentVersion } from '@/lib/version';
 import {
+  DEFAULT_HEARTBEAT_GRACE_SECONDS,
   DEFAULT_PORTS,
   PROBE_TYPES,
   dnsRecordTypeEnum,
@@ -41,6 +42,7 @@ import {
   monitorTypeEnum,
   type MonitorType,
 } from '@/lib/monitor-types';
+import { generateHeartbeatToken } from '@/lib/heartbeat';
 
 /**
  * Bumped only when a document written by an older StayUp can no longer be
@@ -81,7 +83,9 @@ const escalationPolicySchema = z.object({
 
 const monitorSchema = z.object({
   name: z.string().trim().min(1).max(120),
-  url: z.string().trim().min(1).max(500),
+  // Blank for a Heartbeat monitor, which has no target to dial — everything
+  // else is held to a non-empty host by the monitor router on the way in.
+  url: z.string().trim().max(500).default(''),
   type: monitorTypeEnum,
   interval: monitorIntervalEnum,
   port: z.number().int().min(1).max(65535).nullable().default(null),
@@ -108,8 +112,17 @@ const monitorSchema = z.object({
   failedAttemptsThreshold: z.number().int().min(1).max(20).nullable().default(null),
   latencyThresholdMs: z.number().int().min(50).max(60_000).nullable().default(null),
 
+  // Heartbeat-only. The ping *token* is deliberately absent: it is the
+  // monitor's credential, and rule 2 of this file is that exports carry no
+  // secrets. An imported heartbeat monitor gets a fresh token and a warning
+  // that its cron line needs updating — which is also the honest answer, since
+  // the two instances are not the same endpoint.
+  heartbeatGraceSeconds: z.number().int().min(0).max(86_400).nullable().default(null),
+
   tags: z.array(z.string().trim().min(1).max(40)).default([]),
   escalationPolicy: z.string().trim().min(1).max(120).nullable().default(null),
+  /** Name of the monitor this one sits behind, or null. Linked in a second pass — a parent may appear later in the array. */
+  parent: z.string().trim().min(1).max(120).nullable().default(null),
   /** True when the source monitor had a password that was deliberately left out. */
   credentialRequired: z.boolean().default(false),
 });
@@ -230,6 +243,7 @@ export async function exportConfig(): Promise<ConfigDocument> {
         include: {
           tags: { include: { tag: { select: { name: true } } } },
           escalationPolicy: { select: { name: true } },
+          parent: { select: { name: true } },
         },
       }),
       prisma.notificationRule.findMany({
@@ -301,8 +315,10 @@ export async function exportConfig(): Promise<ConfigDocument> {
       httpTimeoutSeconds: monitor.httpTimeoutSeconds,
       failedAttemptsThreshold: monitor.failedAttemptsThreshold,
       latencyThresholdMs: monitor.latencyThresholdMs,
+      heartbeatGraceSeconds: monitor.heartbeatGraceSeconds,
       tags: monitor.tags.map(({ tag }) => tag.name),
       escalationPolicy: monitor.escalationPolicy?.name ?? null,
+      parent: monitor.parent?.name ?? null,
       credentialRequired: !!monitor.credential,
     })),
     notificationRules: notificationRules.map((rule) => ({
@@ -482,6 +498,14 @@ export async function importConfig(document: ConfigDocument, actorId: string | n
           failedAttemptsThreshold: monitor.failedAttemptsThreshold,
           latencyThresholdMs: monitor.latencyThresholdMs,
           escalationPolicyId,
+          // A fresh token, never the source instance's: it is a credential,
+          // and it addresses a different instance anyway.
+          ...(monitor.type === 'Heartbeat'
+            ? {
+                heartbeatToken: generateHeartbeatToken(),
+                heartbeatGraceSeconds: monitor.heartbeatGraceSeconds ?? DEFAULT_HEARTBEAT_GRACE_SECONDS,
+              }
+            : {}),
           createdById: actorId,
           // connectOrCreate rather than a lookup: a document may name a tag
           // its own `tags` array never declared, and losing the tag would be
@@ -499,11 +523,39 @@ export async function importConfig(document: ConfigDocument, actorId: string | n
           `Monitor "${monitor.name}" needs its password re-entered — exports never carry credentials.`,
         );
       }
+      if (monitor.type === 'Heartbeat') {
+        summary.warnings.push(
+          `Monitor "${monitor.name}" was given a new ping URL — update whatever job calls it.`,
+        );
+      }
       return 'created';
     });
   }
 
   const monitorIdByName = nameIndex(await prisma.monitor.findMany({ select: { id: true, name: true } }));
+
+  // Dependencies in a second pass: a monitor may name a parent that appears
+  // later in the array, so there is no ordering of the loop above that always
+  // has the parent in hand. Failures here are warnings rather than errors —
+  // the monitor itself imported fine, it just alerts on its own.
+  for (const monitor of document.monitors.filter((m) => m.parent)) {
+    const id = monitorIdByName.get(monitor.name);
+    const parentId = monitorIdByName.get(monitor.parent as string);
+
+    if (!id) continue;
+    if (!parentId) {
+      summary.warnings.push(
+        `Monitor "${monitor.name}" depends on unknown monitor "${monitor.parent}" — imported without the dependency.`,
+      );
+      continue;
+    }
+    // Self-reference is the only cycle a single document can express without
+    // a chain, and a chain of names can only be as deep as the document is.
+    // The monitor router's full cycle check is the belt; this is the braces.
+    if (id === parentId) continue;
+
+    await prisma.monitor.update({ where: { id }, data: { parentId } });
+  }
   const tagIdByName = nameIndex(await prisma.tag.findMany({ select: { id: true, name: true } }));
   const ruleIntegrationIdByName = nameIndex(await prisma.integration.findMany({ select: { id: true, name: true } }));
 

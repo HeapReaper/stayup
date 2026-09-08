@@ -23,6 +23,7 @@ import (
 	"stayup/worker/internal/delivery"
 	"stayup/worker/internal/incidents"
 	"stayup/worker/internal/logging"
+	"stayup/worker/internal/maintenance"
 	"stayup/worker/internal/procstat"
 	"stayup/worker/internal/settings"
 	"stayup/worker/internal/store"
@@ -95,6 +96,14 @@ func tick(ctx context.Context, s *store.Store, startedAt time.Time) {
 
 	if err := incidents.EscalateOverdueIncidents(ctx, s); err != nil {
 		logging.Error("[integrations-worker] Failed to escalate overdue incidents", err)
+	}
+
+	// The other thing that happens on a clock rather than on a check: a
+	// maintenance window opening or closing. Nothing in the Next.js app is
+	// awake at 02:00 to notice, so the announcement lives here — next to
+	// escalation, which is the same shape of problem.
+	if err := maintenance.AnnounceDueWindows(ctx, s); err != nil {
+		logging.Error("[integrations-worker] Failed to announce maintenance windows", err)
 	}
 
 	pending, err := s.ListPendingDeliveries(ctx, batchSize)

@@ -39,6 +39,9 @@ const kumaMonitorSchema = z
     interval: z.number().nullable().optional(),
     timeout: z.number().nullable().optional(),
     maxretries: z.number().nullable().optional(),
+    // Kuma's grace period for a push monitor: how long after the interval a
+    // missing ping is still tolerated. Same meaning as heartbeatGraceSeconds.
+    retryInterval: z.number().nullable().optional(),
     method: z.string().nullable().optional(),
     body: z.string().nullable().optional(),
     headers: z.string().nullable().optional(),
@@ -92,12 +95,16 @@ const MONITOR_TYPE_MAP: Record<string, MonitorType> = {
   mysql: 'MySQL',
   redis: 'Redis',
   'grpc-keyword': 'gRPC',
+  // Kuma's push monitor is exactly StayUp's Heartbeat monitor: the job calls
+  // in and silence is the failure. The token is *not* carried across — it
+  // addresses a different instance, and it is a credential — so an imported
+  // one gets a fresh ping URL and a warning saying so.
+  push: 'Heartbeat',
 };
 
 /** Why a Kuma type has no StayUp equivalent, in the operator's terms. */
 const UNSUPPORTED_REASONS: Record<string, string> = {
   group: 'monitor groups have no equivalent — its children were imported individually',
-  push: 'push monitors wait to be called; StayUp only performs active checks',
   docker: 'Docker container checks need the Docker socket, which StayUp deliberately never takes',
   'real-browser': 'headless-browser checks are not supported',
   mongodb: 'MongoDB is not a supported monitor type',
@@ -172,14 +179,16 @@ export function parseUptimeKumaBackup(raw: unknown): KumaConversion {
     }
 
     const target = targetFor(type, source);
-    if (!target) {
+    // A Heartbeat monitor has no target by definition — it is the one type
+    // that is called rather than calling.
+    if (!target && type !== 'Heartbeat') {
       skipped.push({ name, reason: 'no usable host, URL or connection string in the backup' });
       continue;
     }
 
     const monitor: ConfigMonitor = {
       name,
-      url: target,
+      url: target ?? '',
       type,
       interval: intervalFromSeconds(source.interval),
       port: type === 'Port' || type === 'gRPC' ? source.port ?? null : source.port ?? null,
@@ -206,10 +215,20 @@ export function parseUptimeKumaBackup(raw: unknown): KumaConversion {
       httpTimeoutSeconds: clamp(source.timeout, 1, 300),
       failedAttemptsThreshold: clamp(source.maxretries, 1, 20),
       latencyThresholdMs: null,
+      // Kuma's grace period is in seconds too, under a different name.
+      heartbeatGraceSeconds: type === 'Heartbeat' ? clamp(source.retryInterval, 0, 86_400) : null,
       tags: tagsFor(source, tags),
       escalationPolicy: null,
+      // Kuma's monitor groups are folders, not dependencies: a child of a
+      // paused group is imported as paused (see `enabled` above), but nothing
+      // in a Kuma backup says one monitor's failure explains another's.
+      parent: null,
       credentialRequired: false,
     };
+
+    if (type === 'Heartbeat') {
+      warnings.push(`"${name}" was imported as a heartbeat monitor with a new ping URL — update whatever job calls it.`);
+    }
 
     applyAssertion(kumaType, source, monitor, warnings);
 
@@ -228,7 +247,10 @@ export function parseUptimeKumaBackup(raw: unknown): KumaConversion {
     if (source.ignoreTls) {
       warnings.push(`"${name}" ignored TLS errors. In StayUp that is instance-wide: Settings → Monitoring → SSL/TLS certificate check.`);
     }
-    if (PASSWORD_BEARING.has(type) && !hasInlineCredentials(target)) {
+    // `target` is only ever null for a Heartbeat monitor, which is not in
+    // PASSWORD_BEARING — the ?? keeps the narrowing local rather than
+    // widening hasInlineCredentials' contract.
+    if (PASSWORD_BEARING.has(type) && !hasInlineCredentials(target ?? '')) {
       monitor.credentialRequired = true;
     }
 

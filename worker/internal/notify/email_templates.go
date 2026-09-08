@@ -85,3 +85,52 @@ type IntegrationAlertData struct {
 
 // IntegrationAlertTemplate is the rendered-HTML template for SendEmail.
 func IntegrationAlertTemplate() *template.Template { return integrationAlertTemplate }
+
+var maintenanceTemplate = template.Must(template.New("maintenance").Parse(`<!doctype html>
+<html><head><meta charset="utf-8"><style>` + emailBaseCSS + `</style></head>
+<body><div class="card">
+	<div class="brand"><div class="logo">S</div><p class="brand-text">Stay<span>Up</span></p></div>
+	<p class="status" style="color:{{.PhaseColor}}">{{.PhaseLabel}}</p>
+	<h1>{{.Title}}</h1>
+	{{if .Affected}}<p class="affected">Affected: {{.Affected}}</p>{{end}}
+	<p class="message">{{.Message}}</p>
+	<div class="button-wrap"><a class="button" href="{{.LinkURL}}">View Details &rarr;</a></div>
+	<hr>
+	<p class="footer">You're receiving this because you subscribed to status updates for these services.</p>
+</div></body></html>`))
+
+// MaintenanceData mirrors MaintenanceEmailProps in src/emails/maintenance-email.tsx.
+type MaintenanceData struct {
+	PhaseLabel string
+	PhaseColor string
+	Title      string
+	Message    string
+	Affected   string
+	LinkURL    string
+}
+
+// maintenancePhaseColors mirrors the `accent` ternary in maintenance-email.tsx:
+// blue while the work is coming or happening, green once it's done, grey once
+// it's called off. Deliberately none of the incident reds — a planned window
+// must not read as an outage at a glance.
+var maintenancePhaseColors = map[string]string{
+	"Ended":     "#059669",
+	"Cancelled": "#64748b",
+}
+
+// MaintenancePhaseColor is the accent colour for one announcement phase.
+func MaintenancePhaseColor(phase string) string {
+	if c, ok := maintenancePhaseColors[phase]; ok {
+		return c
+	}
+	return "#2563eb"
+}
+
+// MaintenanceTemplate is the rendered-HTML template for SendEmail.
+func MaintenanceTemplate() *template.Template { return maintenanceTemplate }
+
+// MaintenanceURL is the dashboard's maintenance list — where a maintenance
+// announcement's "View Details" link points.
+func MaintenanceURL() string {
+	return DashboardBaseURL() + "/dashboard/maintenance"
+}

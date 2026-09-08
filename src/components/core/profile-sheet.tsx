@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import ImageUpload from '@/components/core/image-upload';
+import TwoFactorSettings from '@/components/core/two-factor-settings';
 import { humanBytes, MAX_UPLOAD_BYTES } from '@/lib/stored-files';
 import {
   Sheet,
@@ -148,6 +149,11 @@ export default function ProfileSheet({ user, open, onOpenChange }: ProfileSheetP
                 At least 8 characters. Other devices you are signed in on stay signed in.
               </p>
             </div>
+
+            {/* Outside the tRPC round-trip the rest of this form makes: 2FA
+                enrolment talks to better-auth directly, and its state is the
+                plugin's rather than this form's. */}
+            <TwoFactorSettings enabled={user.twoFactorEnabled === true} />
 
             {formError && <p className="text-sm text-destructive">{formError}</p>}
           </div>

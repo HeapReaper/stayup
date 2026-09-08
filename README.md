@@ -33,10 +33,12 @@ no agent to install on the monitored machines — one `docker compose up` and yo
 
 | | |
 |---|---|
-| **Monitors** | HTTP(s), Ping (ICMP), Port (raw TCP), DNS, PostgreSQL, MySQL, Redis, SMTP, IMAP, gRPC, WebSocket and Domain-expiry checks, at 15s/30s/60s/5m/1h/12h/24h intervals. Pause a monitor without losing its history, tag it, and see uptime % over a rolling 30-day window, response-time history and a full ping log. Timeout, latency threshold and failures-before-alerting are per-monitor overrides of the instance defaults — a nightly batch API and a health endpoint are never usefully held to the same numbers. Automatic incident creation is a per-monitor switch too: turn it off and the monitor is still checked and charted but never opens an incident, so it never alerts — the noisy dependency you want on a graph and not on your phone. |
+| **Monitors** | HTTP(s), Ping (ICMP), Port (raw TCP), DNS, PostgreSQL, MySQL, Redis, SMTP, IMAP, gRPC, WebSocket, Domain-expiry and Heartbeat checks, at 15s/30s/60s/5m/1h/12h/24h intervals. Pause a monitor without losing its history, tag it, and see uptime % over a rolling 30-day window, response-time history and a full ping log. Timeout, latency threshold and failures-before-alerting are per-monitor overrides of the instance defaults — a nightly batch API and a health endpoint are never usefully held to the same numbers. Automatic incident creation is a per-monitor switch too: turn it off and the monitor is still checked and charted but never opens an incident, so it never alerts — the noisy dependency you want on a graph and not on your phone. |
 | **HTTP checks** | Beyond "did it answer": request method, headers and body, redirect policy, which status codes count as up (`200,201`, `200-204,301`), and a content assertion on the response body — a substring, an RE2 regex, or a JSON path (`$.db.connected` equals `true`). Any of the three can be inverted. |
 | **DNS records** | A DNS monitor picks its record type — `A`, `AAAA`, `CNAME`, `MX`, `NS`, `TXT` or `SRV` — and optionally the value it must contain (matched case-insensitively anywhere in the answer; blank just asserts the record still resolves). The records worth watching on their own are the ones whose loss is invisible to an HTTP check: an `MX` that stops resolving takes mail down while the website stays green, and a `TXT` holding SPF or DKIM can be clobbered by a well-meaning DNS edit and only surface when mail starts bouncing. |
 | **Connection checks** | Each speaks just enough of its protocol to prove the service is really answering, not merely listening: PostgreSQL runs `SELECT 1`, MySQL reads the server handshake (or logs in and runs `SELECT 1`, given a `mysql://` connection string), Redis sends `PING`, SMTP does greeting/EHLO/NOOP/QUIT, IMAP reads the `* OK` greeting, gRPC calls `grpc.health.v1.Health/Check` (h2c or TLS), and WebSocket completes the RFC 6455 upgrade — the proxy that answers HTTP but never upgrades fails here and passes every other check. |
+| **Heartbeat monitors** | The one type StayUp never dials: a cron job, a nightly backup or an import script calls `/api/heartbeat/<token>` when it finishes, and the monitor goes down when that call stops arriving. A dead man's switch is the only way to watch something with no port open — and those are exactly the things that stop quietly. Add `/fail` to the URL for a run that knows it failed, `?rtt=<ms>` to chart how long it took, and POST a body to attach the tail of its log to the check. Per-monitor grace period on top of the interval, because a job scheduled hourly does not run at exactly :00. From there it is an ordinary monitor: same incidents, same escalation, same status pages. |
+| **Dependencies** | A monitor can name the one it sits behind. While the parent is down, its children open no incidents and page nobody — the router being dead is one outage, not thirty, and neither "failed attempts before alerting" nor flapping detection can fix that, since both reason about a single monitor over time. The chain is walked to the top, so a site behind a load balancer behind a router falls silent when the router does. Everything else is unaffected: checks are still written, statuses still flip, the graphs still show the outage. |
 | **Domain expiry** | A Domain monitor looks the registration up over RDAP and goes Degraded inside the warning window, Down once the date has passed. A forgotten renewal takes the site, the mail and the certificate with it, and nothing renews it automatically. |
 | **TLS certificates** | Every HTTPS check records the certificate's expiry; a monitor goes Degraded — opening an incident and paging your integrations — once it's inside the warning window. Verification can be switched off per instance for self-signed and internal-CA hosts. |
 | **Incidents** | Opened automatically when a monitor goes Down/Degraded and moved to *Monitoring* on recovery, or created by hand. Impact levels, a status timeline (Investigating → Identified → Monitoring → Resolved), acknowledgement, and post-mortems that can be drafted privately and published later. |
@@ -44,7 +46,7 @@ no agent to install on the monitored machines — one `docker compose up` and yo
 | **File uploads** | Upload a logo for a status page and a profile picture for your account, straight from the form. Stored in the database rather than on a volume — so they survive a redeploy and every `web` replica serves them — and handed back from `/api/files/<id>` with a one-year immutable cache. PNG, JPEG, WebP or GIF up to 2 MB; the type is taken from the file's own bytes, never from what the browser claimed, and SVG is refused on purpose (it can carry script, and these are served from the app's own origin). An upload that never gets attached to anything is swept by the janitor a day later. |
 | **Components** | A line on a status page is usually a monitor, but does not have to be. A component with no monitor behind it — a payment provider, a shipping partner, a feature behind a flag — carries its own name, blurb and a state you set by hand, so "Payments: degraded" needs no endpoint to poll. |
 | **Badges & feeds** | `/status/<slug>/badge/<id>.svg` renders an embeddable shields-style badge for any component — `?metric=uptime` for the percentage, `overall` for the whole page, `?label=` to retitle it. `/status/<slug>/feed.xml` and `/atom.xml` publish the incident history as RSS 2.0 and Atom 1.0: no account, no confirmation, no unsubscribe. All of them work on a custom domain too. |
-| **Maintenance windows** | Scheduled windows that suppress incident creation for the covered monitors while active, and show as "Scheduled maintenance" on the status page instead of an outage. |
+| **Maintenance windows** | Scheduled windows that suppress incident creation for the covered monitors while active, and show as "Scheduled maintenance" on the status page instead of an outage. Announced too, which is the half subscribers actually want: a notice when the window is scheduled, when it starts and when it finishes, plus one if it is moved or cancelled — to every enabled integration and everyone subscribed to a status page carrying those monitors. Per-window opt-out for work nobody outside the team needs to hear about. |
 | **Integrations** | Discord, Slack, generic Webhook, Telegram, E-mail, PagerDuty (Events API v2) and browser Web Push. Queued, retried up to 5×, with a delivery log. Discord alerts arrive as embeds — monitor, incident status, impact, endpoint, response time, 30-day uptime and a relative "last check", colour-coded by severity. |
 | **Escalation policies** | Ordered paging chains ("page on-call, then the team channel after 10 minutes if nobody acknowledged") attachable per monitor. Each rung targets either a fixed integration or an on-call schedule. |
 | **On-call schedules** | Daily or weekly rotations with a handoff hour in the team's own timezone, and overrides for "I'm ill this week" — including an override that covers a window with *nobody*, so paging falls through to the next step instead of waking someone who is away. A rotation step resolves at the moment it fires, not when the incident opened. |
@@ -55,6 +57,10 @@ no agent to install on the monitored machines — one `docker compose up` and yo
 | **Logs & audit trail** | Every check, every notification delivery and every significant dashboard action, with actor and IP. |
 | **Retention** | Raw checks and finished notifications are pruned on a schedule you set, after each day is summarized into a rollup (counts, average *and* the response-time percentiles) — so a 90-day status page and a year-old SLA report keep working on a 7-day raw retention. |
 | **Users & roles** | Invite-only. The first account is created through `/register` (and is an Admin); after that self-service sign-up is closed and further users are invited from the dashboard. **Admin** runs the instance (accounts, settings), **Member** runs the monitoring, **Viewer** reads. Everyone can edit their own profile. |
+| **Two-factor auth** | TOTP, per account, from the profile sheet: confirm your password, add the key to an authenticator app, prove it with a code, and keep the one-time backup codes. An Admin here can reroute every alert and read every stored credential, so a password on its own is thin. Sign-in then asks for a 6-digit code (or a backup code), with an optional 60-day "don't ask on this device". |
+| **Single sign-on** | Optional OIDC / OAuth, configured from the environment (`OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_DISCOVERY_URL`). The sign-in page then offers your identity provider next to the password form. `OIDC_ALLOW_SIGNUP=false` rejects IdP accounts that have no StayUp user yet, and `OIDC_DEFAULT_ROLE` decides what the ones it does create get (Viewer by default — an IdP is not an authorization model). |
+| **REST API** | `Authorization: Bearer <API key>` against `/api/v1/monitors` (list, create, read, patch, delete), `/api/v1/incidents` (read, filterable) and `/api/v1/status` (the whole instance in one object, for a wallboard or a deploy gate). Writes go through the *same* code path as the dashboard form, so a monitor provisioned by Terraform is byte-for-byte the monitor the form would have produced — including the audit entry. The key carries Member permissions: it can change monitors, not manage users or instance settings. |
+| **Signed webhooks** | Every delivery to a generic **Webhook** integration is signed with the instance's webhook secret: `X-StayUp-Timestamp` plus `X-StayUp-Signature: sha256=<hmac>` over `<timestamp>.<body>`. The receiver can tell a real alert from anyone who learned the URL, and reject replays. Slack, Discord, Telegram and PagerDuty are left unsigned — those authenticate the URL or the token themselves. |
 | **Worker health** | Every worker writes a heartbeat each tick, so the dashboard names the worker that stopped instead of leaving you to infer it from monitors that went quiet. Each heartbeat carries that process's memory use, so the same card shows what every worker — and the web process itself — is costing in RAM. `/api/health` reports liveness counts only, and is what the containers' healthcheck uses. |
 | **Update checks** | Knows which build it is running and, once a day, whether a newer one has been published — shown on Settings → Updates and as a badge in the sidebar. Switchable off; nothing is ever installed automatically. |
 
@@ -87,6 +93,7 @@ no agent to install on the monitored machines — one `docker compose up` and yo
    │  Go workers (worker/) — one process each, no Node runtime              │
    │  https · port · ping · dns   →  check monitors, write pings/incidents  │
    │  probes                      →  database/mail/gRPC/WebSocket/domain    │
+   │  heartbeat                   →  notice a push monitor that stopped     │
    │  integrations                →  deliver queued notifications, escalate │
    └───────────────────────────────────┬────────────────────────────────────┘
                                        ▼
@@ -105,6 +112,9 @@ Two code paths deliberately mirror each other, and must stay behaviourally ident
 | `src/lib/incidents.ts` | `worker/internal/incidents` |
 | `src/lib/integration-delivery.ts` | `worker/internal/delivery` + `worker/internal/notify` |
 | `src/lib/maintenance.ts` | `worker/internal/maintenance` |
+| `src/lib/maintenance-notify.ts` | `worker/internal/maintenance/notify.go` |
+| `src/lib/monitor-dependencies.ts` | `worker/internal/dependencies` |
+| `src/lib/webhook-signature.ts` | `worker/internal/notify/signature.go` |
 | `src/lib/oncall.ts` | `worker/internal/oncall` |
 | `src/lib/notification-rules.ts` | `worker/internal/routing` |
 | `src/lib/assertions.ts` (validation) | `worker/internal/checkers/assert.go` (evaluation) |
@@ -122,7 +132,7 @@ notification records.
 
 ## Resource usage
 
-The whole stack idles at roughly **250 MB of RAM** across nine containers, so a 1 GB VPS is
+The whole stack idles at roughly **250 MB of RAM** across ten containers, so a 1 GB VPS is
 comfortable. Measured with `docker stats` on an idle instance (no monitors configured yet) running
 the pre-built images from `docker-compose.yaml`:
 
@@ -134,16 +144,17 @@ the pre-built images from `docker-compose.yaml`:
 | `worker-https` | 3.3 MiB |
 | `worker-dns` | 3.1 MiB |
 | `worker-probes` | ~3 MiB \* |
+| `worker-heartbeat` | ~3 MiB \* |
 | `worker-integrations` | 3.1 MiB |
 | `worker-ping` | 3.0 MiB |
 | `worker-janitor` | 2.8 MiB |
-| **Total** | **~246 MiB** |
+| **Total** | **~249 MiB** |
 
-\* `worker-probes` is estimated: the eight other figures are measured, and every worker is the same
-binary shape. The eight measured containers come to 243 MiB.
+\* `worker-probes` and `worker-heartbeat` are estimated: the eight other figures are measured, and
+every worker is the same binary shape. The eight measured containers come to 243 MiB.
 
-Almost all of it is the Node runtime and Postgres; all seven Go workers together account for about
-22 MiB, or under 10% of the total. That is the point of the Go rewrite — adding a worker costs a few
+Almost all of it is the Node runtime and Postgres; all eight Go workers together account for about
+25 MiB, or around 10% of the total. That is the point of the Go rewrite — adding a worker costs a few
 megabytes, not a whole V8 heap, so the per-worker footprint stays flat as you scale checks out.
 
 Adding monitors barely moves these numbers. Each worker loads the monitors of its own type once per
@@ -205,7 +216,7 @@ Nothing in `worker/` hot-reloads: restart a worker after editing its code. `go b
 
 ### Docker (build from source)
 
-`docker-compose.build.yml` runs the whole stack — Postgres, Redis, the Next.js app and all seven
+`docker-compose.build.yml` runs the whole stack — Postgres, Redis, the Next.js app and all eight
 workers — built from your checkout. Use it when you're changing the code; to just *run* StayUp, use
 the pre-built images below instead (that's what the default `docker-compose.yaml` does).
 
@@ -222,7 +233,7 @@ A few things worth knowing:
 
 - **Postgres only.** Compose forces `DB_PROVIDER=postgresql` and points `DB_URL`/`REDIS_URL` at the
   in-network `postgres`/`redis` hostnames, regardless of what your `.env` says for local `npm run dev`
-  (which defaults to SQLite). Running six worker containers against one SQLite file is exactly the
+  (which defaults to SQLite). Running eight worker containers against one SQLite file is exactly the
   concurrent-writer situation SQLite isn't built for.
 - **No dedicated `migrate` service.** Only `web` runs `prisma migrate deploy` (the Go workers carry
   neither Prisma nor Node); every `worker-*` service waits for `web` to become *healthy*, and that
@@ -241,7 +252,7 @@ Every push to `main` and every git tag publishes two images to the GitLab contai
 | Image | Contains |
 |---|---|
 | `registry.gitlab.com/heapreaper/stayup/web` | the Next.js app (dashboard, API, status pages) |
-| `registry.gitlab.com/heapreaper/stayup/worker` | all seven Go binaries — the `command:` decides which one a container runs |
+| `registry.gitlab.com/heapreaper/stayup/worker` | all eight Go binaries — the `command:` decides which one a container runs |
 
 Tags: `latest` (tip of `main`), the release tag on tagged builds, and the commit short SHA on every
 build. Pin `latest` for a rolling install, or a tag for a reproducible one.
@@ -287,7 +298,7 @@ docker compose up -d
 `web` runs `prisma migrate deploy` on every start, so schema changes apply themselves, and the
 workers wait for it to report healthy before they touch the database.
 
-The published stack ships Postgres, the app and the seven workers — no Redis, since nothing reads or
+The published stack ships Postgres, the app and the eight workers — no Redis, since nothing reads or
 writes it yet. Images are `linux/amd64`; see the `PLATFORMS` variable in `.gitlab-ci.yml` for
 building `linux/arm64` as well.
 
@@ -366,6 +377,10 @@ Two layers, on purpose:
 | `REDIS_URL` | Optional; a helper exists (`src/lib/redis.ts`) but nothing depends on it yet. |
 | `LOG_LEVEL` | `debug` \| `info` \| `warning` \| `error` |
 | `POSTGRES_PASSWORD` | Docker Compose only — the password of the `postgres` container. |
+| `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | Single sign-on. Unset, nothing is registered and the sign-in page shows only the password form. |
+| `OIDC_DISCOVERY_URL` | The IdP's `.well-known/openid-configuration`. Without one, set `OIDC_AUTHORIZATION_URL`, `OIDC_TOKEN_URL` and `OIDC_USERINFO_URL` by hand. |
+| `OIDC_PROVIDER_ID` / `OIDC_PROVIDER_NAME` / `OIDC_SCOPES` | Callback path segment [`oidc`], sign-in button label [`Single sign-on`], and scopes [`openid profile email`]. Register `$BETTER_AUTH_URL/api/auth/callback/$OIDC_PROVIDER_ID` with the IdP. |
+| `OIDC_ALLOW_SIGNUP` / `OIDC_DEFAULT_ROLE` | Whether an IdP account with no StayUp user may create one [`true`], and what role it gets [`Viewer`]. The very first account on an instance is always an Admin regardless — it has nobody to grant it a role. |
 
 **Dashboard → Settings — runtime behaviour**, stored in the single-row `AppSettings` table and read
 live by the workers on every tick. Changing these takes effect on the *next check*, no restart:
@@ -379,8 +394,9 @@ live by the workers on every tick. Changing these takes effect on the *next chec
 - *SMTP* — overrides the `.env` mail settings **per field** (blank falls back to `SMTP_*`), applied to
   the very next send by both the app and the workers, with a "send test e-mail" button that reports
   the mail server's own error
-- *API* — API key and webhook signing secret (regeneratable), plus the auto-generated VAPID key pair
-  used for Web Push
+- *API* — the API key that authenticates `/api/v1/*` and the secret every outgoing generic-webhook
+  delivery is signed with (both regeneratable), plus the auto-generated VAPID key pair used for Web
+  Push
 - *Updates* — which build is running, whether a newer one exists, and whether to look once a day
 
 ---
@@ -405,7 +421,8 @@ live by the workers on every tick. Changing these takes effect on the *next chec
    marked flapping and steps 6–7 are suppressed until it settles, with one standing "is flapping"
    incident in place of the churn.
 7. A confirmed Down/Degraded opens an incident, unless the monitor is inside an active maintenance
-   window, is flapping, or has **Open incidents automatically** switched off. Recovery moves the open
+   window, is flapping, has something it **depends on** already Down, or has **Open incidents
+   automatically** switched off. Recovery moves the open
    incident to *Monitoring* (a human still resolves it) — that half is never gated, so an incident
    opened before the switch was flipped, or by hand, still closes out.
 8. Each incident event either follows the notification rules (route to specific integrations, or
@@ -426,6 +443,7 @@ live by the workers on every tick. Changing these takes effect on the *next chec
 | `worker/cmd/ping` | `Ping` | Burst of 3 native ICMP echoes; any reply = reachable |
 | `worker/cmd/dns` | `DNS` | Resolves the monitor's record type (A, AAAA, CNAME, MX, NS, TXT, SRV) and asserts its expected value |
 | `worker/cmd/probes` | `Postgres`, `MySQL`, `Redis`, `SMTP`, `IMAP`, `gRPC`, `WebSocket`, `Domain` | Opens a connection and speaks the minimum that proves the service answers |
+| `worker/cmd/heartbeat` | `Heartbeat` | Checks nothing — waits. Marks a monitor Down when its ping hasn't arrived within `interval` + grace |
 | `worker/cmd/integrations` | — | Delivers queued notifications and drives escalation |
 | `worker/cmd/janitor` | — | Rolls finished days up into daily summaries, prunes past retention, and runs the daily update check |
 
@@ -435,6 +453,85 @@ Every one of them upserts a row into `worker_heartbeat` at the top of each tick,
 it, so the Workers card doubles as a memory readout — no Docker socket needed, since each process
 already knows its own footprint. The web process is on that card too, reporting itself live rather
 than through a row; behind more than one app replica it's whichever replica served the page.
+
+---
+
+## The REST API
+
+One instance-wide key, from **Dashboard → Settings → API**, sent as a bearer token. It carries
+Member permissions: enough to provision and change monitors, not enough to manage users or the
+instance settings — those stay behind a human login.
+
+```bash
+export STAYUP=https://status.example.com
+export KEY=up_live_...
+
+curl -H "Authorization: Bearer $KEY" "$STAYUP/api/v1/status"
+curl -H "Authorization: Bearer $KEY" "$STAYUP/api/v1/monitors?status=Down"
+curl -H "Authorization: Bearer $KEY" "$STAYUP/api/v1/incidents?open=true"
+
+curl -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"name":"Checkout API","url":"https://api.example.com/health","type":"HTTP","interval":"60s"}' \
+  "$STAYUP/api/v1/monitors"
+
+curl -X PATCH -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"enabled":false}' "$STAYUP/api/v1/monitors/<id>"
+```
+
+`PATCH` is a genuine partial update, but it validates as a whole monitor: the body is merged onto
+the stored one and the result goes through the same schema the dashboard form does. That matters
+because the interesting rules are cross-field — a `Port` monitor needs a port, a JSON-path assertion
+needs a path, a `HEAD` request can't assert on a body.
+
+Writes call the same functions the tRPC mutations call, so a monitor created here is the monitor the
+form would have created, down to the audit-log entry (attributed to "API key", since a key is not a
+person).
+
+## Heartbeat monitors
+
+Create a monitor of type **Heartbeat** and the form gives you a URL. Put it on the end of the job:
+
+```cron
+17 3 * * *  /usr/local/bin/nightly-backup && curl -fsS https://status.example.com/api/heartbeat/<token>
+```
+
+If the call doesn't arrive within the monitor's interval plus its grace period,
+`worker/cmd/heartbeat` writes a failing check and opens an incident — through exactly the same path
+a dead web server would, so it escalates, pages and appears on status pages identically.
+
+- `…/<token>/fail` — the job ran and knows it failed
+- `…/<token>?rtt=8412` — how long it took, charted like any other response time
+- `POST` with a body — the first kilobyte is kept as the check's message (`… | curl --data-binary @- …`)
+
+The token is the credential. Regenerate it from the monitor form the moment it leaks; the old URL
+stops answering immediately.
+
+## Verifying a signed webhook
+
+Every delivery to a generic **Webhook** integration carries two headers. Verify both, and reject
+anything older than a few minutes — that is what the timestamp is inside the signature for.
+
+```js
+const crypto = require('node:crypto');
+
+function verify(rawBody, headers, secret) {
+  const timestamp = headers['x-stayup-timestamp'];
+  const expected = 'sha256=' + crypto
+    .createHmac('sha256', secret)
+    .update(`${timestamp}.${rawBody}`)
+    .digest('hex');
+
+  const given = Buffer.from(headers['x-stayup-signature'] ?? '');
+  const want = Buffer.from(expected);
+
+  if (given.length !== want.length || !crypto.timingSafeEqual(given, want)) return false;
+  return Math.abs(Date.now() / 1000 - Number(timestamp)) < 300;
+}
+```
+
+Sign the **raw body**, not a re-serialized copy of the parsed JSON — key order would differ and a
+correct signature would fail. Slack, Discord, Telegram and PagerDuty deliveries are not signed:
+those authenticate the URL or the token themselves.
 
 ---
 
@@ -451,15 +548,19 @@ src/
                          /status/[slug]/badge/[component] → embeddable SVG badge
                          /status/[slug]/{feed,atom}.xml   → incident feeds
     login/ register/ logout/
+    login/two-factor/    the TOTP step of a sign-in
     api/auth/[...all]/   better-auth handler
     api/trpc/[trpc]/     tRPC handler
+    api/v1/              public REST API (Bearer <API key>): monitors, incidents, status
+    api/heartbeat/       where a Heartbeat monitor's job checks in (token in the URL)
     api/public/status-domain/  custom-domain → slug lookup used by the proxy
     manifest.ts          web app manifest (linked from the dashboard layout only)
   components/core/       sidebar, navbar, footer, auto-refresh
   components/ui/         shadcn/ui primitives
   emails/                React Email templates
-  lib/                   prisma, auth, settings, incidents, integration-delivery, maintenance,
-                         email, discord, push, audit, logging, redis,
+  lib/                   prisma, auth, oidc, settings, incidents, integration-delivery, maintenance,
+                         maintenance-notify, heartbeat, monitor-dependencies, api-v1,
+                         webhook-signature, email, discord, push, audit, logging, redis,
                          oncall, notification-rules, assertions, badge, status-feed, urls
   prisma/schemas/        sqlite.prisma + postgresql.prisma, each with its own migrations/ folder
   trpc/                  init.ts (context + procedures), client/server helpers, routers/
@@ -467,7 +568,7 @@ src/
   proxy.ts               auth redirects + custom-domain rewrite (Next middleware)
 
 worker/                  separate Go module
-  cmd/{https,port,ping,dns,probes,integrations,janitor}/   one binary each
+  cmd/{https,port,ping,dns,probes,heartbeat,integrations,janitor}/   one binary each
   internal/checkers/     "how do I check one monitor" per type
   internal/runner/       shared poll → check → persist → incident-sync loop
   internal/store/        hand-written SQL for both providers
@@ -475,6 +576,7 @@ worker/                  separate Go module
   internal/oncall/       who holds the pager at a given instant
   internal/routing/      which integrations an alert goes to, and when
   internal/flapping/     transition counting and flapping state
+  internal/dependencies/ is anything this monitor sits behind already down
 ```
 
 Every dashboard page is split into a server component (`page.tsx`, fetches via the direct tRPC

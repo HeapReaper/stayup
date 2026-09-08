@@ -25,6 +25,7 @@ export const EXPECTED_WORKERS = [
   'ping',
   'dns',
   'probes',
+  'heartbeat',
   'integrations',
   'janitor',
 ] as const;
@@ -38,6 +39,7 @@ export const WORKER_LABELS: Record<string, string> = {
   ping: 'Ping monitors',
   dns: 'DNS monitors',
   probes: 'Database, mail, gRPC, WebSocket & domain monitors',
+  heartbeat: 'Heartbeat monitors (missed check-ins)',
   integrations: 'Notification delivery & escalation',
   janitor: 'Rollups, retention & update checks',
 };

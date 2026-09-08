@@ -52,6 +52,10 @@ type Settings struct {
 	DeliveryRetentionDays int
 	VapidPublicKey        string
 	VapidPrivateKey       string
+	// Shared secret the generic Webhook channel signs with — the other half
+	// of AppSettings.apiKey, and until now just as unused. See
+	// internal/notify/signature.go.
+	WebhookSigningSecret string
 	// UpdateCheckEnabled off means cmd/janitor's daily pass skips the update
 	// check, leaving the dashboard's "Check now" button as the only thing
 	// that reaches out (internal/updates).
@@ -189,6 +193,7 @@ func Get(ctx context.Context, s *store.Store) (Settings, error) {
 		UpdateCheckEnabled:    row.UpdateCheckEnabled,
 		VapidPublicKey:        *row.VapidPublicKey,
 		VapidPrivateKey:       *row.VapidPrivateKey,
+		WebhookSigningSecret:  row.WebhookSigningSecret,
 		SMTP:                  resolveSMTP(row),
 	}, nil
 }

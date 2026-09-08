@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"stayup/worker/internal/delivery"
+	"stayup/worker/internal/dependencies"
 	"stayup/worker/internal/logging"
+	"stayup/worker/internal/maintenance"
 	"stayup/worker/internal/notify"
 	"stayup/worker/internal/oncall"
 	"stayup/worker/internal/routing"
@@ -24,6 +26,48 @@ import (
 type MonitorRef struct {
 	ID   string
 	Name string
+}
+
+// Suppressed answers the one question every "this monitor is failing" path
+// has to ask before opening an incident: is this failure already explained by
+// something we know about?
+//
+// Two reasons, checked in cost order. A maintenance window is somebody
+// telling us in advance that this monitor will fail. An ancestor that is Down
+// is the same statement made by the topology — the router being dead explains
+// all thirty monitors behind it, and paging for each of them is thirty pages
+// about one outage, which is exactly what failedAttemptsThreshold and
+// flapping detection cannot fix (both reason about one monitor over time).
+//
+// Suppression only ever skips *opening* an incident, exactly like
+// Monitor.autoIncidents: an incident that is already open still closes out on
+// recovery, so a window starting or a parent falling over mid-outage can't
+// strand one.
+//
+// Callers pass parentID (which they already hold) purely so a monitor without
+// a dependency skips the walk entirely — which is most of them.
+func Suppressed(ctx context.Context, s *store.Store, monitorID string, parentID *string) (bool, string, error) {
+	underMaintenance, err := maintenance.IsMonitorUnderMaintenance(ctx, s, monitorID)
+	if err != nil {
+		return false, "", err
+	}
+	if underMaintenance {
+		return true, "under maintenance", nil
+	}
+
+	if parentID == nil {
+		return false, "", nil
+	}
+
+	ancestorDown, err := dependencies.IsAncestorDown(ctx, s, monitorID)
+	if err != nil {
+		return false, "", err
+	}
+	if ancestorDown {
+		return true, "something it depends on is down", nil
+	}
+
+	return false, "", nil
 }
 
 // EnsureIncidentForMonitor mirrors ensureIncidentForMonitor(): opens a new

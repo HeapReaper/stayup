@@ -68,6 +68,15 @@
 #   LOG_LEVEL            error | warning | info | debug [info]
 #   SMTP_HOST/_PORT/_USER/_PASS/_FROM   fallback mail transport; can also be
 #                        configured (and overridden) in Dashboard → Settings.
+#   OIDC_CLIENT_ID/_CLIENT_SECRET/_DISCOVERY_URL  single sign-on. Set these
+#                        three (plus OIDC_PROVIDER_NAME for the button label)
+#                        and the sign-in page offers your identity provider
+#                        alongside the password form. Register
+#                        $BETTER_AUTH_URL/api/auth/callback/oidc as the
+#                        redirect URI. OIDC_ALLOW_SIGNUP=false rejects IdP
+#                        accounts that have no StayUp user yet;
+#                        OIDC_DEFAULT_ROLE [Viewer] is what the ones it does
+#                        create get.
 #
 # First run: open the app and register — that first account is the only one
 # the public sign-up form ever creates, and it is an Admin. Everyone after
@@ -113,6 +122,21 @@ x-app-env: &app-env
   SMTP_USER: ${SMTP_USER:-}
   SMTP_PASS: ${SMTP_PASS:-}
   SMTP_FROM: ${SMTP_FROM:-StayUp <noreply@example.com>}
+  # Optional single sign-on (OIDC / OAuth). Left unset, nothing is
+  # registered and the sign-in page shows only the password form. Register
+  # $BETTER_AUTH_URL/api/auth/callback/${OIDC_PROVIDER_ID:-oidc} as the
+  # redirect URI with your identity provider.
+  OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+  OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+  OIDC_DISCOVERY_URL: ${OIDC_DISCOVERY_URL:-}
+  OIDC_AUTHORIZATION_URL: ${OIDC_AUTHORIZATION_URL:-}
+  OIDC_TOKEN_URL: ${OIDC_TOKEN_URL:-}
+  OIDC_USERINFO_URL: ${OIDC_USERINFO_URL:-}
+  OIDC_PROVIDER_ID: ${OIDC_PROVIDER_ID:-}
+  OIDC_PROVIDER_NAME: ${OIDC_PROVIDER_NAME:-}
+  OIDC_SCOPES: ${OIDC_SCOPES:-}
+  OIDC_ALLOW_SIGNUP: ${OIDC_ALLOW_SIGNUP:-}
+  OIDC_DEFAULT_ROLE: ${OIDC_DEFAULT_ROLE:-}
 
 # Every worker is the same image with a different command, and none of them
 # may start against a database that hasn't been migrated yet — hence waiting
@@ -205,6 +229,13 @@ services:
   worker-probes:
     <<: *worker
     command: ["/usr/local/bin/probes"]
+
+  # The one worker that checks monitors by *not* being called: Heartbeat
+  # monitors are pinged by the job itself (cron, backup, import script) and
+  # this marks them down when that ping stops arriving.
+  worker-heartbeat:
+    <<: *worker
+    command: ["/usr/local/bin/heartbeat"]
 
   # Not a monitor checker: delivers queued notifications (Discord, Slack,
   # Webhook, Telegram, Email, PagerDuty, Push) and drives escalation policies.

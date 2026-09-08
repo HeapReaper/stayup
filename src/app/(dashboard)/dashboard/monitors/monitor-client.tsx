@@ -19,6 +19,9 @@ import {
   Play,
   ShieldAlert,
   Activity,
+  HeartPulse,
+  Link2,
+  RefreshCw,
 } from 'lucide-react';
 
 import { useTRPC } from '@/trpc/client';
@@ -26,6 +29,7 @@ import type { Monitor } from '@/trpc/routers/monitor';
 import {
   PROBE_TYPES,
   DEFAULT_PORTS,
+  DEFAULT_HEARTBEAT_GRACE_SECONDS,
   dnsRecordTypeEnum,
   monitorTypeEnum,
   type DnsRecordType,
@@ -82,6 +86,9 @@ interface MonitorsClientPageProps {
 // in incidents-client.tsx (Base UI's Select can't use an empty string value).
 const NO_ESCALATION_POLICY = 'none';
 
+/** Same sentinel trick for the "does not depend on anything" option. */
+const NO_PARENT = 'none';
+
 type MonitorFormState = {
   name: string;
   url: string;
@@ -90,6 +97,11 @@ type MonitorFormState = {
   port: string;
   tags: string[];
   escalationPolicyId: string;
+  // The monitor this one sits behind. While the parent is Down, this
+  // monitor's own failures open no incident.
+  parentId: string;
+  // Heartbeat-only: how late the ping may be, on top of the interval.
+  heartbeatGraceSeconds: string;
   // HTTP-only; kept in the form for every type (the server blanks them out
   // for Ping/Port/DNS) so switching type back and forth doesn't lose input.
   method: MonitorMethod;
@@ -132,6 +144,7 @@ const MONITOR_TYPE_LABELS: Record<MonitorType, string> = {
   gRPC: 'gRPC',
   WebSocket: 'WebSocket',
   Domain: 'Domain expiry',
+  Heartbeat: 'Heartbeat (push)',
 };
 
 /** What the URL/host field means per type — it is not always a URL. */
@@ -195,6 +208,8 @@ function emptyForm(): MonitorFormState {
     port: '',
     tags: [],
     escalationPolicyId: NO_ESCALATION_POLICY,
+    parentId: NO_PARENT,
+    heartbeatGraceSeconds: '',
     method: 'GET',
     requestHeaders: '',
     requestBody: '',
@@ -224,6 +239,9 @@ function monitorToForm(monitor: Monitor): MonitorFormState {
     port: monitor.port ? String(monitor.port) : '',
     tags: monitor.tags.map((tag) => tag.name),
     escalationPolicyId: monitor.escalationPolicyId ?? NO_ESCALATION_POLICY,
+    parentId: monitor.parentId ?? NO_PARENT,
+    heartbeatGraceSeconds:
+      monitor.heartbeatGraceSeconds === null ? '' : String(monitor.heartbeatGraceSeconds),
     method: monitor.method,
     requestHeaders: monitor.requestHeaders ?? '',
     requestBody: monitor.requestBody ?? '',
@@ -344,6 +362,22 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
     }),
   );
 
+  const regenerateHeartbeatToken = useMutation(
+    trpc.monitor.regenerateHeartbeatToken.mutationOptions({
+      onSuccess: () => invalidateMonitors(),
+      onError: (error) => setFormError(error.message),
+    }),
+  );
+
+  // The monitor currently open in the form, for the things that can only be
+  // shown once it exists on the server — its heartbeat URL, above all.
+  const editingMonitor = editingId ? monitors.find((m) => m.id === editingId) : undefined;
+
+  // A monitor can't depend on itself, and the router refuses a dependency
+  // that would close a loop; excluding the monitor being edited here means
+  // the obvious half of that never even reaches the server.
+  const parentCandidates = monitors.filter((m) => m.id !== editingId);
+
   // Filter by search query & status tab
   const filteredMonitors = monitors.filter((m) => {
     const matchesSearch =
@@ -400,7 +434,9 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.name || !form.url) return;
+    // A Heartbeat monitor has no target to dial — it is dialled instead — so
+    // it is the one type that may be saved without a URL or host.
+    if (!form.name || (form.type !== 'Heartbeat' && !form.url)) return;
 
     const payload = {
       name: form.name,
@@ -410,6 +446,8 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
       port: form.port ? Number(form.port) : undefined,
       tagNames: form.tags,
       escalationPolicyId: form.escalationPolicyId === NO_ESCALATION_POLICY ? null : form.escalationPolicyId,
+      parentId: form.parentId === NO_PARENT ? null : form.parentId,
+      heartbeatGraceSeconds: form.heartbeatGraceSeconds ? Number(form.heartbeatGraceSeconds) : null,
       method: form.method,
       requestHeaders: form.requestHeaders,
       requestBody: form.requestBody,
@@ -494,19 +532,93 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                   required
                 />
               </div>
-              <div className="grid gap-2">
-                <Label htmlFor="url">{TARGET_LABELS[form.type]?.label ?? 'URL, host or IP address'}</Label>
-                <Input
-                  id="url"
-                  placeholder={TARGET_LABELS[form.type]?.placeholder ?? 'https://api.example.com/health'}
-                  value={form.url}
-                  onChange={(e) => setForm({ ...form, url: e.target.value })}
-                  required
-                />
-                {TARGET_LABELS[form.type]?.hint && (
-                  <p className="text-xs text-muted-foreground">{TARGET_LABELS[form.type]?.hint}</p>
-                )}
-              </div>
+              {form.type === 'Heartbeat' ? (
+                <div className="space-y-3 rounded-lg border p-3">
+                  <div className="flex items-start gap-2">
+                    <HeartPulse className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
+                    <p className="text-xs text-muted-foreground">
+                      This is the one monitor type StayUp does not dial. Your job calls the URL
+                      below when it finishes, and the monitor goes down when that call stops
+                      arriving — the only way to watch something with no port open, like a cron
+                      job or a nightly backup.
+                    </p>
+                  </div>
+
+                  {editingMonitor?.heartbeatUrl ? (
+                    <>
+                      <div className="grid gap-2">
+                        <Label htmlFor="heartbeatUrl">Ping URL</Label>
+                        <div className="flex gap-2">
+                          <Input id="heartbeatUrl" readOnly value={editingMonitor.heartbeatUrl} className="font-mono text-xs" />
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="icon"
+                            title="Copy"
+                            onClick={() => handleCopyUrl(editingMonitor.heartbeatUrl as string)}
+                          >
+                            <Copy className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="icon"
+                            title="Issue a new URL — the current one stops working immediately"
+                            disabled={regenerateHeartbeatToken.isPending}
+                            onClick={() => regenerateHeartbeatToken.mutate({ id: editingMonitor.id })}
+                          >
+                            <RefreshCw className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        In a cron line: <code className="font-mono">… &amp;&amp; curl -fsS {'"'}$URL{'"'}</code>.
+                        Add <code className="font-mono">/fail</code> to the end to report a run that
+                        failed. The URL is the credential — regenerating it invalidates the old one.
+                      </p>
+                    </>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      Save the monitor to get its ping URL.
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <div className="grid gap-2">
+                  <Label htmlFor="url">{TARGET_LABELS[form.type]?.label ?? 'URL, host or IP address'}</Label>
+                  <Input
+                    id="url"
+                    placeholder={TARGET_LABELS[form.type]?.placeholder ?? 'https://api.example.com/health'}
+                    value={form.url}
+                    onChange={(e) => setForm({ ...form, url: e.target.value })}
+                    required
+                  />
+                  {TARGET_LABELS[form.type]?.hint && (
+                    <p className="text-xs text-muted-foreground">{TARGET_LABELS[form.type]?.hint}</p>
+                  )}
+                </div>
+              )}
+
+              {form.type === 'Heartbeat' && (
+                <div className="grid gap-2">
+                  <Label htmlFor="heartbeatGraceSeconds">Grace period (seconds)</Label>
+                  <Input
+                    id="heartbeatGraceSeconds"
+                    type="number"
+                    min={0}
+                    max={86400}
+                    placeholder={`Default (${DEFAULT_HEARTBEAT_GRACE_SECONDS})`}
+                    value={form.heartbeatGraceSeconds}
+                    onChange={(e) => setForm({ ...form, heartbeatGraceSeconds: e.target.value })}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    How late the ping may be, on top of the interval, before the monitor is called
+                    down. A job scheduled hourly does not run at exactly :00 — it queues, it
+                    retries, the box is busy — so a deadline of exactly one interval would page on
+                    the first slow night.
+                  </p>
+                </div>
+              )}
 
               {(form.type === 'Port' || PROBE_TYPES.includes(form.type)) && form.type !== 'Domain' && (
                 <div className="grid sm:grid-cols-2 gap-4">
@@ -921,6 +1033,40 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
               </div>
 
               <div className="grid gap-2">
+                <Label htmlFor="parent">Depends on</Label>
+                <Select
+                  value={form.parentId}
+                  onValueChange={(val) => {
+                    if (val) setForm({ ...form, parentId: val });
+                  }}
+                >
+                  <SelectTrigger id="parent">
+                    <SelectValue>
+                      {(val: string) =>
+                        val === NO_PARENT
+                          ? 'Nothing — alert on its own'
+                          : (parentCandidates.find((m) => m.id === val)?.name ?? 'Nothing — alert on its own')
+                      }
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NO_PARENT}>Nothing — alert on its own</SelectItem>
+                    {parentCandidates.map((candidate) => (
+                      <SelectItem key={candidate.id} value={candidate.id}>
+                        {candidate.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  While the monitor above is down, this one opens no incident and pages nobody: the
+                  router being dead is one outage, not thirty. It is still checked and still shows
+                  as down — only the alert is suppressed, the same way a maintenance window
+                  suppresses it.
+                </p>
+              </div>
+
+              <div className="grid gap-2">
                 <Label htmlFor="escalation">Escalation policy</Label>
                 <Select
                   value={form.escalationPolicyId}
@@ -1029,16 +1175,37 @@ export default function MonitorsClientPage({ initialMonitors }: MonitorsClientPa
                           {monitor.type}
                         </Badge>
                       </div>
-                      <a
-                        href={monitor.type === 'HTTP' ? monitor.url : undefined}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-xs text-muted-foreground hover:underline flex items-center gap-1 mt-0.5"
-                      >
-                        {monitor.url}
-                        {monitor.port ? `:${monitor.port}` : ''}
-                        {monitor.type === 'HTTP' && <ExternalLink className="h-3 w-3" />}
-                      </a>
+                      {monitor.type === 'Heartbeat' ? (
+                        <span className="text-xs text-muted-foreground flex items-center gap-1 mt-0.5">
+                          <HeartPulse className="h-3 w-3" />
+                          Waiting to be pinged
+                        </span>
+                      ) : (
+                        <a
+                          href={monitor.type === 'HTTP' ? monitor.url : undefined}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-xs text-muted-foreground hover:underline flex items-center gap-1 mt-0.5"
+                        >
+                          {monitor.url}
+                          {monitor.port ? `:${monitor.port}` : ''}
+                          {monitor.type === 'HTTP' && <ExternalLink className="h-3 w-3" />}
+                        </a>
+                      )}
+                      {monitor.parentName && (
+                        <span
+                          className={
+                            monitor.parentDown
+                              ? 'text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1 mt-0.5'
+                              : 'text-xs text-muted-foreground flex items-center gap-1 mt-0.5'
+                          }
+                        >
+                          <Link2 className="h-3 w-3" />
+                          {monitor.parentDown
+                            ? `${monitor.parentName} is down — incidents suppressed`
+                            : `Depends on ${monitor.parentName}`}
+                        </span>
+                      )}
                       {certExpiryNotice(monitor.certExpiresAt) && (
                         <span className="text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1 mt-0.5">
                           <ShieldAlert className="h-3 w-3" />

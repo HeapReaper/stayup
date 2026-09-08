@@ -738,7 +738,8 @@ export default function SettingsClientPage({
             <CardHeader>
               <CardTitle>API Key & Webhook Secrets</CardTitle>
               <CardDescription>
-                Reference tokens for your own scripts/integrations. Keep them secret.
+                One key authenticates the REST API; the other proves an outgoing webhook really
+                came from this instance. Keep both secret.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
@@ -762,14 +763,20 @@ export default function SettingsClientPage({
                   </Button>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Keep this key secret. Never expose this key in public repositories.
+                  Send it as <code className="font-mono">Authorization: Bearer &lt;key&gt;</code> to{' '}
+                  <code className="font-mono">/api/v1/monitors</code>,{' '}
+                  <code className="font-mono">/api/v1/incidents</code> and{' '}
+                  <code className="font-mono">/api/v1/status</code> — enough to provision monitors
+                  from Terraform or a shell script. It carries the same permissions as a Member, so
+                  it can change monitors but not manage users or these settings. Regenerating it
+                  breaks every script still using the old one.
                 </p>
               </div>
 
               <Separator />
 
               <div className="space-y-4">
-                <h4 className="text-sm font-semibold">Incoming Webhook Secrets</h4>
+                <h4 className="text-sm font-semibold">Outgoing Webhook Signature</h4>
                 <div className="grid gap-2">
                   <Label htmlFor="webhookSigning">Webhook Signing Secret</Label>
                   <div className="flex gap-2">
@@ -789,6 +796,17 @@ export default function SettingsClientPage({
                       <Copy className="h-4 w-4" /> Copy
                     </Button>
                   </div>
+                  <p className="text-xs text-muted-foreground">
+                    Every delivery to a <strong>Webhook</strong> integration is signed with this
+                    secret, so the receiving service can tell a real alert from anyone who learned
+                    the URL. Two headers come with each POST:{' '}
+                    <code className="font-mono">X-StayUp-Timestamp</code> (unix seconds) and{' '}
+                    <code className="font-mono">X-StayUp-Signature</code>, which is{' '}
+                    <code className="font-mono">sha256=</code> followed by the hex HMAC-SHA256 of{' '}
+                    <code className="font-mono">&lt;timestamp&gt;.&lt;body&gt;</code>. Verify both,
+                    and reject anything more than a few minutes old. Slack, Discord, Telegram and
+                    PagerDuty are not signed — those authenticate the URL or token themselves.
+                  </p>
                 </div>
               </div>
 

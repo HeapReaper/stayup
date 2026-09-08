@@ -21,6 +21,8 @@ import { sendDiscordAlert, type AlertContext } from '@/lib/discord';
 import IncidentUpdateEmail from '@/emails/incident-update-email';
 import { getSettings } from '@/lib/settings';
 import { decideRouting, type RoutingDecision } from '@/lib/notification-rules';
+import { isMonitorUnderMaintenance } from '@/lib/maintenance';
+import { isAncestorDown } from '@/lib/monitor-dependencies';
 
 export const incidentImpactEnum = z.enum(['Critical', 'Major', 'Minor']);
 export const incidentStatusEnum = z.enum(['Investigating', 'Identified', 'Monitoring', 'Resolved']);
@@ -409,6 +411,35 @@ export async function acknowledgeIncident(incidentId: string, userId: string) {
   logger.info(`[Incidents] ${incident.id} acknowledged by ${userId}`);
 
   return incident;
+}
+
+/**
+ * Whether a monitor's failure is already explained by something we know
+ * about, and so must not open an incident of its own.
+ *
+ * Mirrors `Suppressed` in worker/internal/incidents (invariant 12): a
+ * maintenance window is somebody telling us in advance that this monitor will
+ * fail, and an ancestor that is Down is the same statement made by the
+ * topology — the router being dead explains all thirty monitors behind it.
+ *
+ * Only *opening* is ever suppressed. Recovery is deliberately never gated on
+ * any of this, so a window starting or a parent falling over mid-outage can't
+ * strand an incident that is already open.
+ *
+ * Callers pass parentId (which they already hold) purely so a monitor with no
+ * dependency skips the walk entirely — which is most of them.
+ */
+export async function isIncidentSuppressed(
+  monitorId: string,
+  parentId: string | null,
+): Promise<{ suppressed: boolean; reason: string }> {
+  if (await isMonitorUnderMaintenance(monitorId)) {
+    return { suppressed: true, reason: 'under maintenance' };
+  }
+  if (parentId && (await isAncestorDown(monitorId))) {
+    return { suppressed: true, reason: 'something it depends on is down' };
+  }
+  return { suppressed: false, reason: '' };
 }
 
 /**

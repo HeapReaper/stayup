@@ -4,9 +4,10 @@ import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { Lock, Mail, ArrowRight, Loader2, AlertCircle, LogIn } from 'lucide-react';
+import { Lock, Mail, ArrowRight, Loader2, AlertCircle, LogIn, KeyRound } from 'lucide-react';
 import { authClient } from '@/lib/auth-client';
 import { loginSchema } from '@/validations/auth';
+import type { OidcProviderInfo } from '@/lib/oidc';
 
 import {
   Card,
@@ -24,13 +25,32 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 type LoginPage = {
   existingUser: boolean;
   callbackUrl?: string | null;
+  /** The configured SSO provider, or null when this instance has none. */
+  oidc?: OidcProviderInfo | null;
 }
 
-export default function SignInClientPage({ existingUser, callbackUrl }: LoginPage) {
+export default function SignInClientPage({ existingUser, callbackUrl, oidc }: LoginPage) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<{ email?: string; password?: string }>({});
   const [loading, setLoading] = useState(false);
+
+  /** Where to land after a successful sign-in — carried through the 2FA step too. */
+  const destination = callbackUrl || '/dashboard';
+
+  async function handleOidcSignIn() {
+    if (!oidc) return;
+    setError(null);
+    setLoading(true);
+
+    // The IdP takes over from here, so nothing after this line runs on a
+    // success — only a configuration error comes back.
+    const res = await authClient.signIn.social({ provider: oidc.providerId, callbackURL: destination });
+    if (res.error) {
+      setError(res.error.message || 'Single sign-on is not available right now.');
+      setLoading(false);
+    }
+  }
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -64,8 +84,14 @@ export default function SignInClientPage({ existingUser, callbackUrl }: LoginPag
 
       if (res.error) {
         setError(res.error.message || 'Something went wrong.');
+      } else if (res.data && 'twoFactorRedirect' in res.data && res.data.twoFactorRedirect) {
+        // The password was right but it isn't enough on its own: better-auth
+        // has issued no session yet, only a short-lived 2FA cookie. Carry the
+        // destination across so a user who came from a protected status page
+        // still ends up there.
+        router.push(`/login/two-factor?callbackUrl=${encodeURIComponent(destination)}`);
       } else {
-        router.push(callbackUrl || '/dashboard');
+        router.push(destination);
       }
     } catch {
       setError('An unexpected error occurred.');
@@ -163,6 +189,31 @@ export default function SignInClientPage({ existingUser, callbackUrl }: LoginPag
                   )}
                 </Button>
               </form>
+
+              {oidc && (
+                <>
+                  <div className="relative my-6">
+                    <div className="absolute inset-0 flex items-center">
+                      <span className="w-full border-t" />
+                    </div>
+                    <div className="relative flex justify-center text-xs uppercase">
+                      <span className="bg-card px-2 text-muted-foreground">or</span>
+                    </div>
+                  </div>
+
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="lg"
+                    className="w-full"
+                    disabled={loading}
+                    onClick={handleOidcSignIn}
+                  >
+                    <KeyRound className="w-4 h-4 mr-2" />
+                    Continue with {oidc.name}
+                  </Button>
+                </>
+              )}
             </CardContent>
 
             {!existingUser && (

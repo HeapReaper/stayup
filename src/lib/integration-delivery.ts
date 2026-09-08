@@ -9,6 +9,8 @@ import { sendEmail } from '@/lib/email';
 import { sendDiscordAlert, type AlertContext } from '@/lib/discord';
 import { sendPushNotification, InvalidPushSubscriptionError } from '@/lib/push';
 import IntegrationAlertEmail from '@/emails/integration-alert-email';
+import { getSettings } from '@/lib/settings';
+import { webhookSignatureHeaders } from '@/lib/webhook-signature';
 
 // Deliberately not importing the `Integration` model type from
 // `@prisma/client` — see src/lib/incidents.ts for why (a minimal local shape
@@ -57,10 +59,24 @@ export async function deliverToIntegration(
       }
 
       case 'Webhook': {
+        // Signed, unlike Slack/Telegram/PagerDuty above and below: those are
+        // third-party endpoints that authenticate the URL or the token, while
+        // this one lands on somebody's own service, which otherwise has no
+        // way to tell a real alert from a POST by anyone who learned the URL.
+        //
+        // The serialized string is what gets signed and what gets sent, in
+        // that order — signing the object and re-serializing it would let a
+        // key-order difference invalidate a correct signature.
+        const { webhookSigningSecret } = await getSettings();
+        const body = JSON.stringify({ subject, message });
+
         const response = await fetch(integration.target, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ subject, message }),
+          headers: {
+            'Content-Type': 'application/json',
+            ...webhookSignatureHeaders(webhookSigningSecret, body),
+          },
+          body,
         });
         if (!response.ok) return { success: false, error: `Webhook returned ${response.status}` };
         return { success: true };

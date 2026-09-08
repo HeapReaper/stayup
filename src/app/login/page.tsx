@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation';
 import { prisma } from '@/lib/prisma';
 import SignInClientPage from '@/app/login/login-client';
+import { oidcProviderInfo } from '@/lib/oidc';
 
 // Without this, Next's static analysis sees a plain data fetch with no
 // request-varying input and may prerender the page once at build time —
@@ -20,5 +21,10 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
   // be used as an open redirect.
   const safeCallbackUrl = callbackUrl && /^\/status\/[a-z0-9-]+$/.test(callbackUrl) ? callbackUrl : null;
 
-  return <SignInClientPage existingUser={existingUser} callbackUrl={safeCallbackUrl} />;
+  // Read on the server: the OIDC configuration lives in the environment
+  // (src/lib/oidc.ts) and only its public half — the provider's id and
+  // display name — crosses to the browser.
+  return (
+    <SignInClientPage existingUser={existingUser} callbackUrl={safeCallbackUrl} oidc={oidcProviderInfo()} />
+  );
 }

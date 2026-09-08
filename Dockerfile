@@ -1,8 +1,8 @@
 # Two images from one Dockerfile: `web` (target `runner`) runs
-# `prisma migrate deploy && next start`; the six `worker-*` services (target
+# `prisma migrate deploy && next start`; the eight `worker-*` services (target
 # `worker-runner`) each run one statically-linked Go binary built from
 # worker/ — no Node/V8 involved, which is the whole point (RAM footprint per
-# worker container drops from a full Node runtime to a few MB). All six
+# worker container drops from a full Node runtime to a few MB). All eight
 # binaries live in that one worker image; which one a container runs is just
 # its `command:`.
 #
@@ -114,7 +114,7 @@ COPY worker/ .
 # just `alpine` + `ca-certificates` instead of needing glibc/musl-dev shims.
 RUN --mount=type=cache,target=/root/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} sh -c '\
-    for cmd in https port ping dns probes integrations janitor; do \
+    for cmd in https port ping dns probes heartbeat integrations janitor; do \
       go build -ldflags="-s -w" -o /out/$cmd ./cmd/$cmd; \
     done'
 

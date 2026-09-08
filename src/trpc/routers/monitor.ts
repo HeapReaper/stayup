@@ -5,10 +5,13 @@ import { createTRPCRouter, protectedProcedure, capabilityProcedure } from '../in
 import { prisma } from '@/lib/prisma';
 import { logAudit } from '@/lib/audit';
 import { ASSERTION_TYPES, type AssertionType, validateJsonPath, validateRegex } from '@/lib/assertions';
+import { generateHeartbeatToken, heartbeatPingUrl } from '@/lib/heartbeat';
+import { wouldCreateDependencyCycle } from '@/lib/monitor-dependencies';
 // Re-exported below so existing importers of this router keep working; the
 // definitions live in a Prisma-free module because client components import
 // them as values (see src/lib/monitor-types.ts).
 import {
+  DEFAULT_HEARTBEAT_GRACE_SECONDS,
   DEFAULT_PORTS,
   PROBE_TYPES,
   dnsRecordTypeEnum,
@@ -24,6 +27,7 @@ import {
 } from '@/lib/monitor-types';
 
 export {
+  DEFAULT_HEARTBEAT_GRACE_SECONDS,
   DEFAULT_PORTS,
   PROBE_TYPES,
   dnsRecordTypeEnum,
@@ -42,6 +46,9 @@ export const assertionTypeEnum = z.enum(ASSERTION_TYPES);
 const withRelations = {
   tags: { include: { tag: true } },
   escalationPolicy: { select: { id: true, name: true } },
+  // Named so the monitors list can say "suppressed by Core router" rather
+  // than showing an id nobody recognises.
+  parent: { select: { id: true, name: true, status: true } },
 } satisfies Prisma.MonitorInclude;
 
 type RawMonitor = Prisma.MonitorGetPayload<{ include: typeof withRelations }>;
@@ -86,6 +93,21 @@ export type Monitor = Omit<
   credentialSet: boolean;
   tags: { id: string; name: string; color: string }[];
   escalationPolicyName: string | null;
+  parentName: string | null;
+  /**
+   * True while this monitor's incidents are being suppressed because
+   * something it depends on is Down. Only the immediate parent is reflected
+   * here — the workers walk the whole chain (src/lib/monitor-dependencies.ts),
+   * but a parent that is itself suppressed is Down too, so the badge lands on
+   * the right rows either way.
+   */
+  parentDown: boolean;
+  /**
+   * The URL a Heartbeat monitor's job pings. Null for every other type, and
+   * for a Heartbeat monitor that somehow has no token yet. Carries the token,
+   * so it never leaves an authenticated procedure.
+   */
+  heartbeatUrl: string | null;
 };
 
 function serializeMonitor(monitor: RawMonitor): Monitor {
@@ -108,6 +130,9 @@ function serializeMonitor(monitor: RawMonitor): Monitor {
     credentialSet: !!credential,
     tags: monitor.tags.map(({ tag }) => tag),
     escalationPolicyName: monitor.escalationPolicy?.name ?? null,
+    parentName: monitor.parent?.name ?? null,
+    parentDown: monitor.parent?.status === 'Down',
+    heartbeatUrl: monitor.heartbeatToken ? heartbeatPingUrl(monitor.heartbeatToken) : null,
   };
 }
 
@@ -117,6 +142,10 @@ function serializeMonitor(monitor: RawMonitor): Monitor {
 // bare host, DSN or domain name as-is.
 function normalizeUrl(type: MonitorType, url: string) {
   const trimmed = url.trim();
+  // A Heartbeat monitor has no target — it is the target. Its address is the
+  // ping URL derived from heartbeatToken, so the column stays empty rather
+  // than holding a URL that would go stale the moment BETTER_AUTH_URL changes.
+  if (type === 'Heartbeat') return '';
   if (type === 'HTTP' && !/^https?:\/\//i.test(trimmed)) {
     return `https://${trimmed}`;
   }
@@ -179,7 +208,10 @@ const optionalText = (max: number) =>
 
 const monitorBaseInput = z.object({
   name: z.string().trim().min(1, 'Name is required').max(120),
-  url: z.string().trim().min(1, 'URL or host is required').max(500),
+  // Optional only because a Heartbeat monitor has nothing to dial; every
+  // other type is held to the non-empty rule by a refine below, so the form
+  // still reports a missing host the way it always did.
+  url: z.string().trim().max(500).optional().default(''),
   type: monitorTypeEnum,
   interval: monitorIntervalEnum,
   port: z.coerce.number().int().min(1).max(65535).optional(),
@@ -233,6 +265,15 @@ const monitorBaseInput = z.object({
   // charted, but no incident and therefore no alert (see
   // syncIncidentForResult in worker/internal/runner/runner.go).
   autoIncidents: z.boolean().optional().default(true),
+
+  // The monitor this one sits behind. While the parent is Down, this
+  // monitor's failures open no incident — one page for the router instead of
+  // thirty for everything behind it. Null/'' clears the dependency.
+  parentId: z.string().nullable().optional(),
+
+  // Heartbeat-only: how late the ping may be, on top of the interval, before
+  // the monitor is called Down. Null means the instance default.
+  heartbeatGraceSeconds: z.number().int().min(0).max(86_400).nullable().optional(),
 });
 
 /** True when this monitor actually asserts something about the response body. */
@@ -243,6 +284,12 @@ function hasBodyAssertion(data: z.infer<typeof monitorBaseInput>): boolean {
 
 const withPortRequiredForPortType = <T extends typeof monitorBaseInput>(schema: T) =>
   schema
+    // Every type except Heartbeat is something StayUp dials, and a checker
+    // with no address fails every check with a message nobody can act on.
+    .refine((data) => data.type === 'Heartbeat' || data.url.trim().length > 0, {
+      message: 'URL or host is required',
+      path: ['url'],
+    })
     .refine((data) => data.type !== 'Port' || typeof data.port === 'number', {
       message: 'Port is required for Port monitors',
       path: ['port'],
@@ -293,10 +340,13 @@ const withPortRequiredForPortType = <T extends typeof monitorBaseInput>(schema: 
       path: ['url'],
     });
 
-const monitorCreateInput = withPortRequiredForPortType(monitorBaseInput);
-const monitorUpdateInput = withPortRequiredForPortType(
+export const monitorCreateInput = withPortRequiredForPortType(monitorBaseInput);
+export const monitorUpdateInput = withPortRequiredForPortType(
   monitorBaseInput.extend({ id: z.string() }),
 );
+
+export type MonitorCreateInput = z.input<typeof monitorCreateInput>;
+export type MonitorUpdateInput = z.input<typeof monitorUpdateInput>;
 
 /**
  * The HTTP-only columns, reduced to their defaults for monitor types whose
@@ -347,6 +397,26 @@ function dnsOptionsFor(input: z.infer<typeof monitorBaseInput>) {
 }
 
 /**
+ * The heartbeat columns, resolved against what's already stored.
+ *
+ * The token is generated once, the first time a monitor becomes a Heartbeat,
+ * and kept across every later edit — it is pasted into a crontab on some
+ * other machine, so silently reissuing it on a name change would break the
+ * job without telling anyone. Switching a monitor *away* from Heartbeat
+ * clears it, which is what makes the old URL stop answering.
+ */
+function heartbeatFieldsFor(input: z.infer<typeof monitorBaseInput>, existingToken: string | null) {
+  if (input.type !== 'Heartbeat') {
+    return { heartbeatToken: null, heartbeatGraceSeconds: null };
+  }
+
+  return {
+    heartbeatToken: existingToken ?? generateHeartbeatToken(),
+    heartbeatGraceSeconds: input.heartbeatGraceSeconds ?? DEFAULT_HEARTBEAT_GRACE_SECONDS,
+  };
+}
+
+/**
  * The port column: required for Port monitors, optional (with a per-type
  * default the workers apply) for the probe family, and meaningless for
  * everything else.
@@ -383,6 +453,256 @@ function credentialFor(input: z.infer<typeof monitorBaseInput>, existing: string
   return existing;
 }
 
+/**
+ * Validates a proposed parent: it has to exist, and it must not close a loop
+ * back onto the monitor being edited. Two monitors that were each other's
+ * parent would suppress each other's incidents the moment either went Down —
+ * an outage nobody hears about, which is worse than the storm the feature
+ * exists to prevent.
+ */
+async function assertValidParent(monitorId: string | null, parentId: string | null | undefined) {
+  if (!parentId) return;
+
+  const parent = await prisma.monitor.findUnique({ where: { id: parentId }, select: { id: true } });
+  if (!parent) {
+    throw new TRPCError({ code: 'BAD_REQUEST', message: 'The monitor this one depends on no longer exists' });
+  }
+
+  // A monitor that doesn't exist yet can't be anywhere in the chain above its
+  // own parent, so only an edit can produce a cycle.
+  if (monitorId && (await wouldCreateDependencyCycle(monitorId, parentId))) {
+    throw new TRPCError({
+      code: 'BAD_REQUEST',
+      message: 'That would make a dependency loop — the monitor already sits above this one.',
+    });
+  }
+}
+
+/**
+ * Who is making the change, for the audit log.
+ *
+ * `id` is null for anything that isn't a signed-in user — today that means
+ * the public API (src/app/api/v1), which authenticates with the instance API
+ * key rather than as a person. The audit entry still records *what* happened
+ * and from which address; it just can't name a human, which is the honest
+ * answer rather than attributing a script's change to whoever created the key.
+ */
+export interface MonitorActor {
+  id: string | null;
+  name: string;
+  ipAddress: string;
+}
+
+/** The signed-in caller, as the shared mutations want them. */
+function actorFrom(ctx: { session: { user: { id: string; name: string } }; ipAddress: string }): MonitorActor {
+  return { id: ctx.session.user.id, name: ctx.session.user.name, ipAddress: ctx.ipAddress };
+}
+
+/**
+ * The four mutations below are exported as plain functions and called by both
+ * the tRPC router and the public REST API (src/app/api/v1/monitors).
+ *
+ * Deliberately one implementation rather than two: a monitor created through
+ * Terraform has to end up as exactly the same row, with the same normalized
+ * URL, the same blanked-out per-type options and the same audit entry, as one
+ * created in the form. Two code paths would drift the first time a column was
+ * added — which is the same reasoning as invariant 1's TS/Go mirror pairs,
+ * one layer up.
+ *
+ * They throw TRPCError, which the REST layer maps onto status codes
+ * (src/app/api/v1/_lib.ts) — so validation and not-found behave identically
+ * whichever door the request came through.
+ */
+export async function createMonitor(
+  input: z.output<typeof monitorCreateInput>,
+  actor: MonitorActor,
+): Promise<Monitor> {
+  await assertValidParent(null, input.parentId);
+
+  const monitor = await prisma.$transaction(async (tx) => {
+    const created = await tx.monitor.create({
+      data: {
+        name: input.name,
+        url: normalizeUrl(input.type, input.url),
+        type: input.type,
+        interval: input.interval,
+        port: portFor(input),
+        escalationPolicyId: input.escalationPolicyId || null,
+        parentId: input.parentId || null,
+        autoIncidents: input.autoIncidents,
+        createdById: actor.id,
+        credential: credentialFor(input, null),
+        sloTarget: input.sloTarget ?? null,
+        ...heartbeatFieldsFor(input, null),
+        ...overridesFor(input),
+        ...httpOptionsFor(input),
+        ...dnsOptionsFor(input),
+      },
+    });
+
+    await applyTags(tx, created.id, input.tagNames);
+
+    return created;
+  });
+
+  await logAudit({
+    actorId: actor.id,
+    actorName: actor.name,
+    action: 'CREATED_MONITOR',
+    target: monitor.name,
+    ipAddress: actor.ipAddress,
+  });
+
+  const full = await prisma.monitor.findUniqueOrThrow({ where: { id: monitor.id }, include: withRelations });
+  return serializeMonitor(full);
+}
+
+export async function updateMonitor(
+  input: z.output<typeof monitorUpdateInput>,
+  actor: MonitorActor,
+): Promise<Monitor> {
+  const existing = await prisma.monitor.findUnique({ where: { id: input.id } });
+
+  if (!existing) {
+    throw new TRPCError({ code: 'NOT_FOUND', message: 'Monitor not found' });
+  }
+
+  await assertValidParent(input.id, input.parentId);
+
+  const monitor = await prisma.$transaction(async (tx) => {
+    const updated = await tx.monitor.update({
+      where: { id: input.id },
+      data: {
+        name: input.name,
+        url: normalizeUrl(input.type, input.url),
+        type: input.type,
+        interval: input.interval,
+        port: portFor(input),
+        escalationPolicyId: input.escalationPolicyId || null,
+        parentId: input.parentId || null,
+        autoIncidents: input.autoIncidents,
+        credential: credentialFor(input, existing.credential),
+        sloTarget: input.sloTarget ?? null,
+        ...heartbeatFieldsFor(input, existing.heartbeatToken),
+        ...overridesFor(input),
+        ...httpOptionsFor(input),
+        ...dnsOptionsFor(input),
+        // A monitor that stops being HTTP can't have a meaningful
+        // certificate expiry any more, and one that stops being a Domain
+        // monitor can't have a meaningful registry expiry.
+        ...(input.type === 'HTTP' ? {} : { certExpiresAt: null }),
+        ...(input.type === 'Domain' ? {} : { domainExpiresAt: null }),
+      },
+    });
+
+    await applyTags(tx, input.id, input.tagNames);
+
+    return updated;
+  });
+
+  await logAudit({
+    actorId: actor.id,
+    actorName: actor.name,
+    action: 'UPDATED_MONITOR',
+    target: monitor.name,
+    ipAddress: actor.ipAddress,
+  });
+
+  const full = await prisma.monitor.findUniqueOrThrow({ where: { id: monitor.id }, include: withRelations });
+  return serializeMonitor(full);
+}
+
+/**
+ * Pause or resume a monitor. Pausing only stops the workers from picking it
+ * up (they filter on `enabled`); the monitor keeps its history, its uptime
+ * figure and its place on any status page, and any incident it already has
+ * open stays open — nobody's outage disappears because someone hit pause.
+ */
+export async function setMonitorEnabled(id: string, enabled: boolean, actor: MonitorActor): Promise<Monitor> {
+  const existing = await prisma.monitor.findUnique({ where: { id } });
+
+  if (!existing) {
+    throw new TRPCError({ code: 'NOT_FOUND', message: 'Monitor not found' });
+  }
+
+  await prisma.monitor.update({ where: { id }, data: { enabled } });
+
+  await logAudit({
+    actorId: actor.id,
+    actorName: actor.name,
+    action: enabled ? 'RESUMED_MONITOR' : 'PAUSED_MONITOR',
+    target: existing.name,
+    ipAddress: actor.ipAddress,
+  });
+
+  const full = await prisma.monitor.findUniqueOrThrow({ where: { id }, include: withRelations });
+  return serializeMonitor(full);
+}
+
+export async function deleteMonitor(id: string, actor: MonitorActor): Promise<{ id: string }> {
+  const existing = await prisma.monitor.findUnique({ where: { id } });
+
+  if (!existing) {
+    throw new TRPCError({ code: 'NOT_FOUND', message: 'Monitor not found' });
+  }
+
+  await prisma.monitor.delete({ where: { id } });
+
+  await logAudit({
+    actorId: actor.id,
+    actorName: actor.name,
+    action: 'DELETED_MONITOR',
+    target: existing.name,
+    ipAddress: actor.ipAddress,
+  });
+
+  return { id };
+}
+
+/**
+ * Turns a stored monitor back into the shape the input schema accepts.
+ *
+ * Only the public API needs this: a PATCH is a partial update, and the
+ * validation above (with its cross-field refinements — a Port monitor needs a
+ * port, a JsonPath assertion needs a path) can only judge a whole monitor. So
+ * a PATCH is merged onto this before it is validated, which means a
+ * one-field change is checked against the same rules as the full form.
+ *
+ * `credential` is deliberately absent rather than round-tripped: a blank one
+ * means "keep what's stored" (see credentialFor), which is exactly the
+ * behaviour a partial update wants.
+ */
+export function monitorToInput(monitor: PrismaMonitor & { tags: { tag: { name: string } }[] }): MonitorUpdateInput {
+  return {
+    id: monitor.id,
+    name: monitor.name,
+    url: monitor.url,
+    type: monitor.type as MonitorType,
+    interval: monitor.interval as MonitorInterval,
+    port: monitor.port ?? undefined,
+    escalationPolicyId: monitor.escalationPolicyId,
+    parentId: monitor.parentId,
+    tagNames: monitor.tags.map(({ tag }) => tag.name),
+    method: monitor.method as MonitorMethod,
+    requestHeaders: monitor.requestHeaders ?? undefined,
+    requestBody: monitor.requestBody ?? undefined,
+    followRedirects: monitor.followRedirects,
+    expectedStatusCodes: monitor.expectedStatusCodes ?? undefined,
+    keyword: monitor.keyword ?? undefined,
+    keywordInverted: monitor.keywordInverted,
+    assertionType: monitor.assertionType as AssertionType,
+    jsonPath: monitor.jsonPath ?? undefined,
+    dnsRecordType: monitor.dnsRecordType as DnsRecordType,
+    dnsExpectedValue: monitor.dnsExpectedValue ?? undefined,
+    sloTarget: monitor.sloTarget,
+    httpTimeoutSeconds: monitor.httpTimeoutSeconds,
+    failedAttemptsThreshold: monitor.failedAttemptsThreshold,
+    latencyThresholdMs: monitor.latencyThresholdMs,
+    autoIncidents: monitor.autoIncidents,
+    heartbeatGraceSeconds: monitor.heartbeatGraceSeconds,
+  };
+}
+
 export const monitorRouter = createTRPCRouter({
   getAll: protectedProcedure.query(async () => {
     const monitors = await prisma.monitor.findMany({
@@ -410,117 +730,47 @@ export const monitorRouter = createTRPCRouter({
 
   create: writeMonitors
     .input(monitorCreateInput)
-    .mutation(async ({ input, ctx }) => {
-      const monitor = await prisma.$transaction(async (tx) => {
-        const created = await tx.monitor.create({
-          data: {
-            name: input.name,
-            url: normalizeUrl(input.type, input.url),
-            type: input.type,
-            interval: input.interval,
-            port: portFor(input),
-            escalationPolicyId: input.escalationPolicyId || null,
-            autoIncidents: input.autoIncidents,
-            createdById: ctx.session.user.id,
-            credential: credentialFor(input, null),
-            sloTarget: input.sloTarget ?? null,
-            ...overridesFor(input),
-            ...httpOptionsFor(input),
-            ...dnsOptionsFor(input),
-          },
-        });
-
-        await applyTags(tx, created.id, input.tagNames);
-
-        return created;
-      });
-
-      await logAudit({
-        actorId: ctx.session.user.id,
-        actorName: ctx.session.user.name,
-        action: 'CREATED_MONITOR',
-        target: monitor.name,
-        ipAddress: ctx.ipAddress,
-      });
-
-      const full = await prisma.monitor.findUniqueOrThrow({ where: { id: monitor.id }, include: withRelations });
-      return serializeMonitor(full);
-    }),
+    .mutation(({ input, ctx }) => createMonitor(input, actorFrom(ctx))),
 
   update: writeMonitors
     .input(monitorUpdateInput)
+    .mutation(({ input, ctx }) => updateMonitor(input, actorFrom(ctx))),
+
+  setEnabled: writeMonitors
+    .input(z.object({ id: z.string(), enabled: z.boolean() }))
+    .mutation(({ input, ctx }) => setMonitorEnabled(input.id, input.enabled, actorFrom(ctx))),
+
+  /**
+   * Issues a fresh ping token for a Heartbeat monitor, immediately
+   * invalidating the old URL.
+   *
+   * Separate from `update` on purpose: the token lives in a crontab on
+   * another machine, so rotating it has to be something someone asks for
+   * rather than a side effect of renaming the monitor. Nothing else changes —
+   * the monitor keeps its history, its status and any open incident, it just
+   * stops answering the old URL until the job is updated.
+   */
+  regenerateHeartbeatToken: writeMonitors
+    .input(z.object({ id: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const existing = await prisma.monitor.findUnique({ where: { id: input.id } });
 
       if (!existing) {
         throw new TRPCError({ code: 'NOT_FOUND', message: 'Monitor not found' });
       }
-
-      const monitor = await prisma.$transaction(async (tx) => {
-        const updated = await tx.monitor.update({
-          where: { id: input.id },
-          data: {
-            name: input.name,
-            url: normalizeUrl(input.type, input.url),
-            type: input.type,
-            interval: input.interval,
-            port: portFor(input),
-            escalationPolicyId: input.escalationPolicyId || null,
-            autoIncidents: input.autoIncidents,
-            credential: credentialFor(input, existing.credential),
-            sloTarget: input.sloTarget ?? null,
-            ...overridesFor(input),
-            ...httpOptionsFor(input),
-            ...dnsOptionsFor(input),
-            // A monitor that stops being HTTP can't have a meaningful
-            // certificate expiry any more, and one that stops being a Domain
-            // monitor can't have a meaningful registry expiry.
-            ...(input.type === 'HTTP' ? {} : { certExpiresAt: null }),
-            ...(input.type === 'Domain' ? {} : { domainExpiresAt: null }),
-          },
-        });
-
-        await applyTags(tx, input.id, input.tagNames);
-
-        return updated;
-      });
-
-      await logAudit({
-        actorId: ctx.session.user.id,
-        actorName: ctx.session.user.name,
-        action: 'UPDATED_MONITOR',
-        target: monitor.name,
-        ipAddress: ctx.ipAddress,
-      });
-
-      const full = await prisma.monitor.findUniqueOrThrow({ where: { id: monitor.id }, include: withRelations });
-      return serializeMonitor(full);
-    }),
-
-  /**
-   * Pause or resume a monitor. Pausing only stops the workers from picking it
-   * up (they filter on `enabled`); the monitor keeps its history, its uptime
-   * figure and its place on any status page, and any incident it already has
-   * open stays open — nobody's outage disappears because someone hit pause.
-   */
-  setEnabled: writeMonitors
-    .input(z.object({ id: z.string(), enabled: z.boolean() }))
-    .mutation(async ({ input, ctx }) => {
-      const existing = await prisma.monitor.findUnique({ where: { id: input.id } });
-
-      if (!existing) {
-        throw new TRPCError({ code: 'NOT_FOUND', message: 'Monitor not found' });
+      if (existing.type !== 'Heartbeat') {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'Only heartbeat monitors have a ping URL' });
       }
 
       await prisma.monitor.update({
         where: { id: input.id },
-        data: { enabled: input.enabled },
+        data: { heartbeatToken: generateHeartbeatToken() },
       });
 
       await logAudit({
         actorId: ctx.session.user.id,
         actorName: ctx.session.user.name,
-        action: input.enabled ? 'RESUMED_MONITOR' : 'PAUSED_MONITOR',
+        action: 'REGENERATED_HEARTBEAT_TOKEN',
         target: existing.name,
         ipAddress: ctx.ipAddress,
       });
@@ -531,23 +781,5 @@ export const monitorRouter = createTRPCRouter({
 
   delete: writeMonitors
     .input(z.object({ id: z.string() }))
-    .mutation(async ({ input, ctx }) => {
-      const existing = await prisma.monitor.findUnique({ where: { id: input.id } });
-
-      if (!existing) {
-        throw new TRPCError({ code: 'NOT_FOUND', message: 'Monitor not found' });
-      }
-
-      await prisma.monitor.delete({ where: { id: input.id } });
-
-      await logAudit({
-        actorId: ctx.session.user.id,
-        actorName: ctx.session.user.name,
-        action: 'DELETED_MONITOR',
-        target: existing.name,
-        ipAddress: ctx.ipAddress,
-      });
-
-      return { id: input.id };
-    }),
+    .mutation(({ input, ctx }) => deleteMonitor(input.id, actorFrom(ctx))),
 });

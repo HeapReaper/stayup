@@ -22,6 +22,7 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Textarea } from '@/components/ui/textarea';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Switch } from '@/components/ui/switch';
 import {
   Table,
   TableBody,
@@ -61,6 +62,8 @@ type FormState = {
   startsAt: string; // datetime-local value
   endsAt: string;
   monitorIds: string[];
+  // Whether subscribers are told about this window at all.
+  notifySubscribers: boolean;
 };
 
 function toLocalInputValue(date: Date): string {
@@ -82,7 +85,14 @@ function defaultEnd(): string {
 }
 
 function emptyForm(): FormState {
-  return { title: '', message: '', startsAt: defaultStart(), endsAt: defaultEnd(), monitorIds: [] };
+  return {
+    title: '',
+    message: '',
+    startsAt: defaultStart(),
+    endsAt: defaultEnd(),
+    monitorIds: [],
+    notifySubscribers: true,
+  };
 }
 
 function windowToForm(window: MaintenanceWindowSummary): FormState {
@@ -92,6 +102,7 @@ function windowToForm(window: MaintenanceWindowSummary): FormState {
     startsAt: toLocalInputValue(new Date(window.startsAt)),
     endsAt: toLocalInputValue(new Date(window.endsAt)),
     monitorIds: window.monitors.map((m) => m.id),
+    notifySubscribers: window.notifySubscribers,
   };
 }
 
@@ -220,6 +231,7 @@ export default function MaintenanceClientPage({ initialWindows, monitors }: Main
       startsAt: new Date(form.startsAt),
       endsAt: new Date(form.endsAt),
       monitorIds: form.monitorIds,
+      notifySubscribers: form.notifySubscribers,
     };
 
     if (editingId) {
@@ -346,6 +358,25 @@ export default function MaintenanceClientPage({ initialWindows, monitors }: Main
                     ))}
                   </div>
                 )}
+              </div>
+
+              <div className="space-y-2 rounded-lg border p-3">
+                <div className="flex items-center justify-between gap-4">
+                  <Label htmlFor="mw-notify" className="text-sm font-normal">
+                    Announce to subscribers
+                  </Label>
+                  <Switch
+                    id="mw-notify"
+                    checked={form.notifySubscribers}
+                    onCheckedChange={(checked) => setForm({ ...form, notifySubscribers: checked })}
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Sends three notices — when the window is scheduled, when it starts and when it
+                  finishes — to every enabled integration and to everyone subscribed to a status
+                  page carrying these monitors. Moving the window re-announces it; cancelling it
+                  says so. Turn this off for work nobody outside the team needs to know about.
+                </p>
               </div>
 
               {formError && <p className="text-sm text-destructive">{formError}</p>}

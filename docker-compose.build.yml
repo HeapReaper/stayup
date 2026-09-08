@@ -1,4 +1,4 @@
-# Runs the whole stack — Postgres, Redis, the Next.js app, and all six
+# Runs the whole stack — Postgres, Redis, the Next.js app, and all eight
 # monitor-check/notification workers — built from THIS checkout. For working
 # on StayUp; to just run it, use docker-compose.yaml, which pulls the
 # pre-built images from the registry instead of compiling anything.
@@ -115,6 +115,13 @@ services:
   worker-probes:
     <<: *worker
     command: ["/usr/local/bin/probes"]
+
+  # The one worker that checks monitors by *not* being called: Heartbeat
+  # monitors are pinged by the job itself (cron, backup, import script) and
+  # this marks them down when that ping stops arriving.
+  worker-heartbeat:
+    <<: *worker
+    command: ["/usr/local/bin/heartbeat"]
 
   worker-integrations:
     <<: *worker

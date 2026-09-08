@@ -23,6 +23,9 @@ model User {
   banned          Boolean?         @default(false)
   banReason       String?
   banExpires      DateTime?
+  // better-auth's twoFactor plugin (src/lib/auth.ts). Flipped on once a
+  // TOTP secret has been verified; the secret itself lives in TwoFactor.
+  twoFactorEnabled Boolean?        @default(false)
   sessions           Session[]
   accounts           Account[]
   monitors           Monitor[]
@@ -38,6 +41,7 @@ model User {
   onCallShifts       OnCallParticipant[]
   notificationRules  NotificationRule[]
   uploads            StoredFile[]
+  twoFactors         TwoFactor[]
 
   @@unique([email])
   @@map("user")
@@ -68,6 +72,7 @@ model Account {
   providerId            String
   accessToken           String?
   refreshToken          String?
+  idToken               String?
   accessTokenExpiresAt  DateTime?
   refreshTokenExpiresAt DateTime?
   scope                 String?
@@ -90,11 +95,34 @@ model Verification {
   @@map("verification")
 }
 
+// better-auth's twoFactor plugin table — one row per user with TOTP set up.
+// Column names and types are dictated by the plugin's schema (see
+// node_modules/better-auth/dist/plugins/two-factor/schema.mjs); StayUp never
+// reads or writes it directly, which is why there is no Go counterpart.
+model TwoFactor {
+  id                      String    @id @default(cuid())
+  // The TOTP shared secret and the encoded one-time backup codes. Both are
+  // marked `returned: false` by the plugin, so they never leave the server.
+  secret                  String
+  backupCodes             String
+  userId                  String
+  user                    User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  verified                Boolean   @default(true)
+  // Brute-force guard the plugin maintains itself: too many bad codes locks
+  // verification until lockedUntil passes.
+  failedVerificationCount Int       @default(0)
+  lockedUntil             DateTime?
+
+  @@index([userId])
+  @@index([secret])
+  @@map("two_factor")
+}
+
 model Monitor {
   id            String              @id @default(cuid())
   name          String
   url           String
-  type          String              @default("HTTP") // HTTP | Ping | Port | DNS
+  type          String              @default("HTTP") // HTTP | Ping | Port | DNS | Heartbeat | …
   status        String              @default("Up") // Up | Down | Degraded
   interval      String              @default("60s") // 15s | 30s | 60s | 5m
   port          Int?
@@ -190,6 +218,33 @@ model Monitor {
   // that check wasn't HTTPS. Written by the https worker; read by the
   // "Certificate Expiry Warning" logic and shown in the monitors list.
   certExpiresAt   DateTime?
+  // --- Heartbeat monitors (dead man's switch) ---
+  // A Heartbeat monitor is the one type StayUp never dials: the *job* calls
+  // in, to /api/heartbeat/<heartbeatToken>, and worker/cmd/heartbeat flips it
+  // Down when the call doesn't arrive. That is the only way to watch a thing
+  // with no port open — a cron job, a nightly backup, an import script.
+  //
+  // The token is the whole credential (it is in a URL a cron line pastes), so
+  // it is generated with 24 random bytes and regeneratable from the monitor
+  // form. Null for every other monitor type.
+  heartbeatToken  String?  @unique
+  // How long after `interval` has elapsed the ping may still arrive before
+  // the monitor is called Down. Null means the default (see
+  // DEFAULT_HEARTBEAT_GRACE_SECONDS in src/lib/monitor-types.ts) — a job that
+  // runs hourly is not late at 60:01.
+  heartbeatGraceSeconds Int?
+  // --- Dependency chain ---
+  // The monitor this one sits behind. When the parent is Down, this monitor's
+  // own failure opens no incident and pages nobody: the router being dead is
+  // one outage, not thirty. Suppression is the same shape as a maintenance
+  // window's — checks are still written, the status still flips, only the
+  // incident is skipped (worker/internal/dependencies).
+  //
+  // SetNull rather than Cascade: deleting a router must not delete everything
+  // behind it, it must only stop the suppression.
+  parentId      String?
+  parent        Monitor?            @relation("MonitorDependency", fields: [parentId], references: [id], onDelete: SetNull)
+  children      Monitor[]           @relation("MonitorDependency")
   createdById   String?
   createdBy     User?               @relation(fields: [createdById], references: [id], onDelete: SetNull)
   // Optional paging chain — if set, an open incident on this monitor is paged
@@ -210,6 +265,7 @@ model Monitor {
 
   @@index([createdById])
   @@index([escalationPolicyId])
+  @@index([parentId])
   @@map("monitor")
 }
 
@@ -460,6 +516,17 @@ model MaintenanceWindow {
   startsAt    DateTime
   endsAt      DateTime
   cancelledAt DateTime?
+  // Whether this window is announced to subscribers at all — a five-minute
+  // config push nobody notices does not need three e-mails.
+  notifySubscribers Boolean @default(true)
+  // Send-once marks for the three announcements (scheduled / started /
+  // ended). They are timestamps rather than booleans so the Logs page can say
+  // *when* an announcement went out, and they are what makes the worker's
+  // start/end sweep idempotent — it polls every few seconds and must not
+  // re-announce the same window on every tick.
+  notifiedScheduledAt DateTime?
+  notifiedStartedAt   DateTime?
+  notifiedEndedAt     DateTime?
   createdById String?
   createdBy   User?     @relation(fields: [createdById], references: [id], onDelete: SetNull)
   createdAt   DateTime  @default(now())
