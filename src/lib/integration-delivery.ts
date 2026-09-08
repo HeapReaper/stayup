@@ -86,7 +86,7 @@ export async function deliverToIntegration(
           subject,
           react: IntegrationAlertEmail({ subject, message }),
         });
-        return result.success ? { success: true } : { success: false, error: 'Email send failed' };
+        return result.success ? { success: true } : { success: false, error: result.error ?? 'Email send failed' };
       }
 
       case 'Push': {

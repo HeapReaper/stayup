@@ -170,11 +170,11 @@ export const settingsRouter = createTRPCRouter({
     }),
 
   /**
-   * Sends a real test email to the logged-in user. Note: this goes out
-   * through the live SMTP transporter configured via .env (see src/lib/email.ts)
-   * — the SMTP tab above persists what you type, but doesn't hot-swap the
-   * already-initialized transporter, so this won't reflect unsaved/just-saved
-   * changes here without a server restart.
+   * Sends a real test email to the logged-in user, through whatever the SMTP
+   * tab above has saved (falling back per field to the SMTP_* environment —
+   * see resolveSmtpConfig() in src/lib/email.ts). The transporter is keyed on
+   * that resolved config, so a Save here is picked up by the very next send:
+   * save first, then test.
    */
   sendTestEmail: writeSettings.mutation(async ({ ctx }) => {
     const result = await sendEmail({
@@ -187,7 +187,10 @@ export const settingsRouter = createTRPCRouter({
     });
 
     if (!result.success) {
-      throw new Error('Failed to send test email — check your SMTP configuration in .env');
+      // The SMTP server's own rejection is the only thing that actually tells
+      // an admin what to change, so pass it through instead of a generic
+      // "check your configuration".
+      throw new Error(`Failed to send test email: ${result.error ?? 'unknown error'}`);
     }
 
     return { success: true };

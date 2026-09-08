@@ -526,9 +526,10 @@ export default function SettingsClientPage({
               <CardHeader>
                 <CardTitle>SMTP Server Configuration</CardTitle>
                 <CardDescription>
-                  Configure your outgoing mail server for reference. Note: actual outgoing email still uses
-                  the SMTP_* variables in your .env — this tab persists what you enter, but doesn't hot-swap
-                  the already-initialized mail transporter (see src/lib/email.ts).
+                  Your outgoing mail server. These values are used for every email this instance sends —
+                  incident updates, subscriber notifications and invites — and each field falls back to the
+                  matching SMTP_* variable in your .env when you leave it blank. Changes apply to the next
+                  email, so save before sending a test.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">

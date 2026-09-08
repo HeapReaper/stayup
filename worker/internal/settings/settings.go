@@ -9,10 +9,14 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 
+	"stayup/worker/internal/notify"
 	"stayup/worker/internal/store"
 )
 
@@ -41,6 +45,52 @@ type Settings struct {
 	// check, leaving the dashboard's "Check now" button as the only thing
 	// that reaches out (internal/updates).
 	UpdateCheckEnabled bool
+	// SMTP is the Settings page's mail block merged over the SMTP_*
+	// environment, ready to hand to notify.SendEmail.
+	SMTP notify.SMTPConfig
+}
+
+const defaultSMTPPort = 587
+
+// pickString returns the stored setting when it's non-empty, and the .env
+// fallback otherwise — the per-field precedence pick() implements in
+// src/lib/email.ts.
+func pickString(stored *string, envKey string) string {
+	if stored != nil && strings.TrimSpace(*stored) != "" {
+		return strings.TrimSpace(*stored)
+	}
+	return strings.TrimSpace(os.Getenv(envKey))
+}
+
+// resolveSMTP mirrors resolveSmtpConfig() in src/lib/email.ts: the stored
+// SMTP block wins field by field, with the SMTP_* environment filling in
+// whatever was left blank.
+func resolveSMTP(row *store.AppSettings) notify.SMTPConfig {
+	port := 0
+	if row.SMTPPort != nil {
+		port = *row.SMTPPort
+	}
+	if port <= 0 {
+		port, _ = strconv.Atoi(strings.TrimSpace(os.Getenv("SMTP_PORT")))
+	}
+	if port <= 0 {
+		port = defaultSMTPPort
+	}
+
+	fromName := ""
+	if row.SMTPFromName != nil {
+		fromName = strings.TrimSpace(*row.SMTPFromName)
+	}
+
+	return notify.SMTPConfig{
+		Host:      pickString(row.SMTPHost, "SMTP_HOST"),
+		Port:      port,
+		User:      pickString(row.SMTPUser, "SMTP_USER"),
+		Pass:      pickString(row.SMTPPass, "SMTP_PASS"),
+		FromEmail: pickString(row.SMTPFromEmail, "SMTP_FROM"),
+		FromName:  fromName,
+		UseTLS:    row.SMTPUseTLS,
+	}
 }
 
 // atLeast returns value when it's >= min, and fallback otherwise.
@@ -118,6 +168,7 @@ func Get(ctx context.Context, s *store.Store) (Settings, error) {
 		UpdateCheckEnabled:       row.UpdateCheckEnabled,
 		VapidPublicKey:           *row.VapidPublicKey,
 		VapidPrivateKey:          *row.VapidPrivateKey,
+		SMTP:                     resolveSMTP(row),
 	}, nil
 }
 

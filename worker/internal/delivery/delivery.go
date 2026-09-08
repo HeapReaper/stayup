@@ -81,11 +81,11 @@ func Deliver(integration store.Integration, subject, message string, alert notif
 		return deliverTelegram(integration, subject, message)
 
 	case "Email":
-		if err := notify.SendEmail(integration.Target, subject, notify.IntegrationAlertTemplate(), notify.IntegrationAlertData{
+		if err := notify.SendEmail(cfg.SMTP, integration.Target, subject, notify.IntegrationAlertTemplate(), notify.IntegrationAlertData{
 			Subject: subject,
 			Message: message,
 		}); err != nil {
-			return fail("Email send failed")
+			return fail(err.Error())
 		}
 		return ok()
 

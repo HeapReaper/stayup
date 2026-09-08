@@ -164,8 +164,19 @@ type AppSettings struct {
 	CertExpiryWarningDays    int
 	CheckRetentionDays       int
 	DeliveryRetentionDays    int
-	VapidPublicKey           *string
-	VapidPrivateKey          *string
+	// The Settings page's SMTP block. Every field is optional: a blank one
+	// falls back to the matching SMTP_* environment variable, resolved in
+	// internal/settings — same precedence as resolveSmtpConfig() in
+	// src/lib/email.ts.
+	SMTPHost        *string
+	SMTPPort        *int
+	SMTPUser        *string
+	SMTPPass        *string
+	SMTPFromEmail   *string
+	SMTPFromName    *string
+	SMTPUseTLS      bool
+	VapidPublicKey  *string
+	VapidPrivateKey *string
 	// UpdateCheckEnabled off means cmd/janitor skips its daily update check —
 	// the dashboard's "Check now" button still works. See internal/updates.
 	UpdateCheckEnabled bool

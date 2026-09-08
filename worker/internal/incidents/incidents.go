@@ -13,6 +13,7 @@ import (
 	"stayup/worker/internal/delivery"
 	"stayup/worker/internal/logging"
 	"stayup/worker/internal/notify"
+	"stayup/worker/internal/settings"
 	"stayup/worker/internal/store"
 )
 
@@ -219,9 +220,16 @@ func notifySubscribers(ctx context.Context, s *store.Store, incidentID, incident
 		return nil
 	}
 
+	// Read once per notification rather than per recipient — the mail server
+	// is instance-wide (Settings -> SMTP, merged over the SMTP_* environment).
+	cfg, err := settings.Get(ctx, s)
+	if err != nil {
+		return err
+	}
+
 	sent := 0
 	for _, email := range emails {
-		err := notify.SendEmail(email, fmt.Sprintf("[%s] %s", status, incidentTitle), notify.IncidentUpdateTemplate(), notify.IncidentUpdateData{
+		err := notify.SendEmail(cfg.SMTP, email, fmt.Sprintf("[%s] %s", status, incidentTitle), notify.IncidentUpdateTemplate(), notify.IncidentUpdateData{
 			IncidentTitle: incidentTitle,
 			Status:        status,
 			StatusColor:   notify.StatusColor(status),
@@ -254,6 +262,11 @@ func notifyStatusPageSubscribers(ctx context.Context, s *store.Store, incidentID
 		return nil
 	}
 
+	cfg, err := settings.Get(ctx, s)
+	if err != nil {
+		return err
+	}
+
 	// Detail for the Discord embeds below, from the same query the queued
 	// deliveries use (cmd/integrations) so both render identical fields. Only
 	// worth the round trip if someone actually subscribed over Discord, and a
@@ -273,7 +286,7 @@ func notifyStatusPageSubscribers(ctx context.Context, s *store.Store, incidentID
 		if sub.Channel == "Discord" {
 			err = notify.SendDiscordAlert(sub.Target, fmt.Sprintf("[%s] %s", status, incidentTitle), message, alertCtx)
 		} else {
-			err = notify.SendEmail(sub.Target, fmt.Sprintf("[%s] %s", status, incidentTitle), notify.IncidentUpdateTemplate(), notify.IncidentUpdateData{
+			err = notify.SendEmail(cfg.SMTP, sub.Target, fmt.Sprintf("[%s] %s", status, incidentTitle), notify.IncidentUpdateTemplate(), notify.IncidentUpdateData{
 				IncidentTitle: incidentTitle,
 				Status:        status,
 				StatusColor:   notify.StatusColor(status),
